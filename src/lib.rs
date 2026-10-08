@@ -1,5 +1,6 @@
 pub mod core;
 pub mod jw;
+pub mod export;
 pub mod fonts;
 pub mod history;
 pub mod platform;

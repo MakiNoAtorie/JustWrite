@@ -171,6 +171,18 @@ pub fn parse_emphasis(text: &str) -> Parsed {
     parsed
 }
 
+/// Emphasis of every character of `text`; `None` for the `*` delimiters and escapes that are
+/// not shown.
+pub fn char_emphasis(text: &str) -> Vec<Option<Emphasis>> {
+    let parsed = parse_emphasis(text);
+    let per_byte = parsed.per_byte(text.len());
+    let mut hidden = vec![false; text.len()];
+    for r in parsed.delimiters.iter().chain(&parsed.escapes) {
+        hidden[r.clone()].fill(true);
+    }
+    text.char_indices().map(|(b, _)| (!hidden[b]).then(|| per_byte[b])).collect()
+}
+
 /// A stretch of paragraph text with one style, for exporters. Delimiters are gone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Piece {

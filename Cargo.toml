@@ -26,6 +26,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 similar = "3"
+quick-xml = "0.42"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]
