@@ -2,5 +2,8 @@ pub mod buffer;
 pub mod commands;
 pub mod config;
 pub mod markdown;
+pub mod notes;
+pub mod prose;
 pub mod storage;
+pub mod typography;
 pub mod workspace;
