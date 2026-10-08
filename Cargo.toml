@@ -27,6 +27,7 @@ blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 similar = "3"
 quick-xml = "0.42"
+regex-lite = "0.1"
 typst = "0.15.1"
 typst-layout = "0.15.1"
 typst-pdf = "0.15.1"

@@ -3,6 +3,7 @@ pub mod jw;
 pub mod export;
 pub mod fonts;
 pub mod history;
+pub mod import;
 pub mod platform;
 pub mod render;
 pub mod ui;
