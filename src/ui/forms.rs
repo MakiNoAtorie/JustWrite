@@ -435,7 +435,7 @@ fn preset_fields(p: &Preset) -> Vec<Field> {
         n("font_size", "Font size", p.font_size, 6., 40., 0.5, 1, "pt").when("format", PAGED),
         n("line_spacing", "Line spacing", p.line_spacing, 0.8, 4., 0.1, 1, "×").when("format", PAGED),
         Field::toggle("justify", "Justified text", p.justify).when("format", FLOWING),
-        Field::toggle("hyphenate", "Hyphenate (uses the project language)", p.hyphenate).when("format", FLOWING),
+        Field::toggle("hyphenate", "Hyphenate words", p.hyphenate).when("format", FLOWING),
         n("indent", "First-line indent", p.indent, 0., 2., 0.05, 2, "in").when("format", PAGED),
         n("paragraph_space", "Space between paragraphs", p.paragraph_space, 0., 36., 1., 0, "pt").when("format", PAGED),
         Field::toggle("flush_after_break", "No indent after a break or chapter start", p.flush_after_break).when("format", PAGED),
@@ -446,13 +446,13 @@ fn preset_fields(p: &Preset) -> Vec<Field> {
         Field::toggle("head_on_chapter_start", "Running head on chapter-opening pages", p.head_on_chapter_start).when("format", PAGED),
         Field::heading("Chapter openings").when("format", PAGED),
         Field::toggle("chapter_new_page", "Start chapters on a new page", p.chapter_new_page).when("format", PAGED),
-        n("chapter_drop", "Space above the title (share of the page)", p.chapter_drop, 0., 0.6, 0.05, 2, "").when("format", PAGED),
+        n("chapter_drop", "Space above the title", p.chapter_drop, 0., 0.6, 0.05, 2, "").when("format", PAGED),
         Field::choice("chapter_align", "Title alignment", labels(&["Left", "Centred"]), position(&ALIGNS, p.chapter_align)).when("format", PAGED),
         n("chapter_size", "Title size", p.chapter_size, 6., 72., 1., 0, "pt").when("format", PAGED),
         Field::choice("chapter_caps", "Title capitals", labels(&["As typed", "Upper case", "Small capitals"]), position(&CAPS, p.chapter_caps)).when("format", PAGED),
         Field::toggle("chapter_bold", "Bold title", p.chapter_bold).when("format", PAGED),
         Field::text("chapter_ornament", "Ornament under the title", &p.chapter_ornament).when("format", PAGED).hint("Optional, such as ❦"),
-        n("drop_cap", "Drop cap (lines; 0 is off)", p.drop_cap as f32, 0., 4., 1., 0, "").when("format", PDF_ONLY),
+        n("drop_cap", "Drop cap", p.drop_cap as f32, 0., 4., 1., 0, "lines (0 is off)").when("format", PDF_ONLY),
         Field::toggle("recto_start", "Chapters start on right-hand pages", p.recto_start).when("format", PDF_ONLY),
         Field::heading("E-book").when("format", EPUB_ONLY),
         Field::choice("epub_theme", "Style", labels(&["Classic", "Modern", "Plain"]), position(&THEMES, p.epub_theme)).when("format", EPUB_ONLY),
@@ -605,7 +605,7 @@ impl App {
         let accent = super::gui::ACCENTS.iter().position(|a| *a == s.accent_color()).unwrap_or(0);
         let fields = vec![
             Field::heading("Appearance"),
-            Field::choice("theme", "Theme", labels(&["Light", "Dark", "Follow the system"]), ["light", "dark", "system"].iter().position(|t| *t == s.theme).unwrap_or(1)),
+            Field::choice("theme", "Theme", labels(&["Light", "Dark", "System"]), ["light", "dark", "system"].iter().position(|t| *t == s.theme).unwrap_or(1)),
             Field::choice("accent", "Accent colour", labels(&["Amber", "Orange", "Red", "Pink", "Violet", "Blue", "Teal", "Green"]), accent),
             Field::button("font:interface_font", "Interface font", &s.interface_font),
             Field::heading("Writing"),
@@ -613,9 +613,9 @@ impl App {
             Field::number("font_size", "Font size", s.font_size, 10., 48., 1., 0, "pt"),
             Field::number("line_height", "Line height", s.line_height, 1., 3., 0.1, 1, "×"),
             Field::number("paragraph_gap", "Space between paragraphs", s.paragraph_gap, 0., 2., 0.1, 1, "lines"),
-            Field::number("max_width", "Column width (0 for the full window)", s.max_width.unwrap_or(0.), 0., 3000., 40., 0, "px"),
+            Field::number("max_width", "Column width", s.max_width.unwrap_or(0.), 0., 3000., 40., 0, "px (0 is full width)"),
             Field::toggle("typewriter", "Typewriter scrolling", s.typewriter).hint("Keep the line you are typing in the middle"),
-            Field::toggle("show_markers", "Show * and note markers on every line", s.show_markers),
+            Field::toggle("show_markers", "Show formatting marks", s.show_markers),
             Field::toggle("spellcheck", "Underline possible misspellings", s.spellcheck).hint("Uses the project language"),
             Field::heading("Notes"),
             Field::text("note_marker", "Note marker", &s.note_marker).hint("Two or three punctuation characters, such as $$ or %%"),
@@ -702,7 +702,7 @@ impl App {
         let shown: String = quote.chars().take(160).collect();
         let tags: Vec<String> = COMMENT_TAGS.iter().map(|t| if t.is_empty() { "No tag".to_owned() } else { (*t).to_owned() }).collect();
         let fields = vec![
-            Field::info(&format!("“{}{}”", shown.replace('\n', " "), if quote.chars().count() > 160 { "…" } else { "" })),
+            Field::info(&format!("On: {}{}", shown.replace('\n', " "), if quote.chars().count() > 160 { "…" } else { "" })),
             Field::area("body", "Comment", "", 4),
             Field::choice("tag", "Tag", tags, 0),
             Field::text("custom", "Custom tag", "").when("tag", &[5]),
@@ -714,7 +714,7 @@ impl App {
         let known = COMMENT_TAGS.iter().position(|t| *t == c.tag);
         let tags: Vec<String> = COMMENT_TAGS.iter().map(|t| if t.is_empty() { "No tag".to_owned() } else { (*t).to_owned() }).collect();
         let fields = vec![
-            Field::info(&format!("“{}”", c.quote.chars().take(160).collect::<String>().replace('\n', " "))),
+            Field::info(&format!("On: {}", c.quote.chars().take(160).collect::<String>().replace('\n', " "))),
             Field::area("body", "Comment", &c.body, 4),
             Field::choice("tag", "Tag", tags, known.unwrap_or(5)),
             Field::text("custom", "Custom tag", if known.is_none() { &c.tag } else { "" }).when("tag", &[5]),
@@ -817,13 +817,13 @@ impl App {
             Field::toggle("smart_quotes", "Smart quotation marks", s.typography.smart_quotes),
             Field::toggle("em_dash", "Two hyphens become an em dash", s.typography.em_dash),
             Field::toggle("ellipsis", "Three dots become an ellipsis", s.typography.ellipsis),
-            Field::toggle("dialogue_dash", "Spanish dialogue dash (— at the start of a line)", s.typography.dialogue_dash).when("language", &[1]),
+            Field::toggle("dialogue_dash", "Spanish dialogue dash", s.typography.dialogue_dash).when("language", &[1]),
             Field::text("scene_break", "Scene-break symbol in the editor", &s.scene_break).hint("Shown in place of a line like #  or ***"),
             Field::heading("Goals"),
-            Field::number("project_words", "Manuscript word goal (0 for none)", s.goals.project_words as f32, 0., 2_000_000., 1000., 0, "words"),
-            Field::number("session_words", "Words to write each session (0 for none)", s.goals.session_words as f32, 0., 100_000., 100., 0, "words"),
+            Field::number("project_words", "Manuscript word goal", s.goals.project_words as f32, 0., 2_000_000., 1000., 0, "words (0 for none)"),
+            Field::number("session_words", "Words per session", s.goals.session_words as f32, 0., 100_000., 100., 0, "words (0 for none)"),
             Field::heading("Snapshots"),
-            Field::number("auto_minutes", "Automatic snapshot every (0 for never)", s.snapshots.auto_minutes as f32, 0., 1440., 5., 0, "min"),
+            Field::number("auto_minutes", "Automatic snapshot every", s.snapshots.auto_minutes as f32, 0., 1440., 5., 0, "min (0 for never)"),
             Field::toggle("on_close", "Snapshot when the project closes", s.snapshots.on_close),
             Field::toggle("thin", "Thin out old automatic snapshots", s.snapshots.thin).hint("Manual snapshots are always kept"),
             Field::number("keep_all_days", "Keep every automatic snapshot for", s.snapshots.keep_all_days as f32, 0., 365., 1., 0, "days"),
@@ -1006,7 +1006,10 @@ impl App {
             }
             Key::Named(NamedKey::Tab) => form.move_focus(!self.modifiers.shift_key()),
             Key::Named(NamedKey::Enter) => {
-                if area {
+                if primary && form.submit.is_some() {
+                    self.submit_form();
+                    return true;
+                } else if area {
                     form.type_text("\n");
                     changed = true;
                 } else if let Some(Control::Button(_)) = form.fields.get(form.focus).map(|f| f.control.clone()) {
@@ -1053,7 +1056,7 @@ impl App {
                     _ => {}
                 }
             }
-            Key::Character(c) if c.as_str() == " " && !typed => {
+            Key::Character(_) | Key::Named(NamedKey::Space) if !typed && (matches!(key, Key::Named(NamedKey::Space)) || matches!(key, Key::Character(c) if c.as_str() == " ")) => {
                 let at = form.focus;
                 match form.fields.get(at).map(|f| f.control.clone()) {
                     Some(Control::Toggle) => {
@@ -1080,7 +1083,8 @@ impl App {
                     Err(error) => self.status = error,
                 }
             }
-            Key::Character(_) if typed && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() => {
+            Key::Character(_) | Key::Named(NamedKey::Space) if typed && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() => {
+                let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
                     form.type_text(text);
                     changed = true;
@@ -1605,7 +1609,11 @@ impl App {
         let scale = self.scale;
         let width_logical = form.width.min(window.width as f32 / scale - 24.);
         let top_margin = 28.;
-        let height_logical = (window.height as f32 / scale - 2. * top_margin).clamp(260., 820.);
+        let field_width = width_logical - 48.;
+        let content: f32 = form.shown_fields().into_iter().map(|i| form.fields[i].height(field_width)).sum();
+        let intro = if form.intro.is_empty() { 0. } else { form.intro.lines().count() as f32 * 20. + 6. };
+        let wanted = 60. + intro + content + 66. + 8.;
+        let height_logical = wanted.min((window.height as f32 / scale - 2. * top_margin).clamp(260., 820.)).max(150.);
         let rect = Rect {
             x: (window.width as i32 - (width_logical * scale) as i32) / 2,
             y: self.s(top_margin).max(((window.height as f32 - height_logical * scale) / 2.) as i32),
@@ -1637,13 +1645,12 @@ impl App {
         form.room = list_height as f32 / scale;
         let shown: Vec<usize> = (0..form.fields.len()).filter(|i| form.shown(*i)).collect();
         let start = shown.iter().position(|i| *i >= form.scroll).unwrap_or(0);
-        let label_width = (inner_width as f32 * 0.4) as i32;
+        let label_width = (inner_width as f32 * 0.42) as i32;
         let control_x = rect.x + pad + label_width;
         let control_width = inner_width as i32 - label_width;
         let mut used = 0;
         let mut drawn = 0;
         let mut dropdown_anchor: Option<(usize, Rect)> = None;
-        let field_width = width_logical - 48.;
         for &i in &shown[start..] {
             let height = self.s(form.fields[i].height(field_width));
             if used + height > list_height && drawn > 0 {
@@ -1693,7 +1700,7 @@ impl App {
                             self.button("−", minus, Hit::Do(Act::FormStep(i, -1)), Look::Outline, p);
                             self.button("+", plus, Hit::Do(Act::FormStep(i, 1)), Look::Outline, p);
                             if !unit.is_empty() {
-                                let at = Rect { x: stepper.x + stepper.width as i32 + self.s(8.), width: self.su(110.), ..control };
+                                let at = Rect { x: stepper.x + stepper.width as i32 + self.s(8.), width: control.width.saturating_sub(stepper.width + self.su(8.)), ..control };
                                 self.put(unit, at, 12., p.muted, Face::Normal, Align::Left);
                             }
                         }

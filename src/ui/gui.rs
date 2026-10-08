@@ -3,7 +3,7 @@
 use super::*;
 use crate::ui::{
     layout::Divider,
-    menu::{self, EDITOR_MENU, MENUS, Popup, TAB_MENU, TREE_MENU},
+    menu::{self, EDITOR_MENU, MENUS, NEW_MENU, Popup, TAB_MENU, TREE_MENU},
 };
 use cosmic_text::{Style as FontStyle, Weight};
 
@@ -733,6 +733,7 @@ impl App {
         tab.view.highlights = highlights;
         tab.view.configure(&settings, &symbol);
         tab.view.layout(&tab.document, &tab.blocks, &settings, &mut self.fonts, editor_rect);
+        if std::env::var_os("JW_DEBUG").is_some() { eprintln!("top={} len={} cursor={} tiles={} rect_h={}", tab.view.top, tab.document.text.len_chars(), tab.document.cursor, tab.view.tiles.len(), editor_rect.height); }
         tab.view.paint(&tab.document, &mut self.fonts, &mut self.renderer);
         let empty = tab.document.text.len_chars() == 0 && !tab.loading && tab.path.is_some();
         let (len_chars, len_lines, top_char) =
@@ -934,17 +935,10 @@ impl App {
             if let Some((label, section)) = row.heading {
                 let head = Rect { x: line.x + self.s(6.), y: line.y + self.s(4.), width: line.width, height: line.height };
                 self.put(label, head, 10.5, mix(p.muted, p.accent, 0.3), Face::Bold, Align::Left);
-                let (text, command) = match section {
-                    manifest::Section::Manuscript => ("+ Chapter", Command::NewChapter),
-                    manifest::Section::Notes => ("+ Page", Command::NewPage),
-                };
-                let width = self.measure(text, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(14.);
+                let text = "+ New";
+                let width = self.measure(text, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(16.);
                 let add = Rect { x: line.x + line.width as i32 - width as i32 - self.s(2.), y: line.y + self.s(2.), width, height: line.height - self.su(4.) };
-                self.button(text, add, Hit::Command(command), Look::Plain, p);
-                if section == manifest::Section::Manuscript {
-                    let part = Rect { x: add.x - self.s(58.), width: self.su(56.), ..add };
-                    self.button("+ Part", part, Hit::Command(Command::NewPart), Look::Plain, p);
-                }
+                self.button(text, add, Hit::Do(Act::NewMenu), Look::Plain, p);
                 continue;
             }
             let is_selected = selected.as_deref() == Some(row.id.as_str());
@@ -1063,6 +1057,7 @@ impl App {
                     .take(40)
                     .map(|l| text.line(l).to_string().trim().to_owned())
                     .find(|l| !l.is_empty() && !prose::is_scene_break(l))
+                    .map(|l| crate::core::notes::strip(&l).replace('*', "").trim().to_owned())
                     .unwrap_or_default()
             })
             .collect();

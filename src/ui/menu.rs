@@ -131,6 +131,7 @@ pub const TAB_MENU: Items = &[
     Some(Command::SplitDown),
     Some(Command::CloseSplit),
 ];
+pub const NEW_MENU: Items = &[Some(Command::NewChapter), Some(Command::NewPart), Some(Command::NewPage)];
 pub const TREE_MENU: Items = &[
     Some(Command::NewChapter),
     Some(Command::NewPart),

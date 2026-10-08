@@ -899,7 +899,7 @@ impl App {
         };
         let row_pt_width = if v.spreads { page_w * 2. + 2. } else { page_w };
         let margin = self.s(32.) as f32;
-        let fit = ((body.width as f32 - 2. * margin) / row_pt_width).max(0.05);
+        let fit = ((body.width as f32 - 2. * margin) / row_pt_width).min((body.height as f32 - 2. * margin) / (page_h + gap_pt)).max(0.05);
         let k = fit * v.zoom;
         let row_height_pt = page_h + gap_pt;
         v.total = rows.len() as f32 * row_height_pt;

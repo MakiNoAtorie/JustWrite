@@ -134,6 +134,7 @@ enum Act {
     MatchStep(i32),
     ToggleReplace,
     Screen(ScreenAct),
+    NewMenu,
     CommentDo(&'static str, String),
     CommentFilter(&'static str),
     OpenRecent(usize),
@@ -337,8 +338,8 @@ impl App {
             outline_top: 0,
             show_tree: true,
             show_outline: true,
-            tree_width: 218.,
-            outline_width: 200.,
+            tree_width: 232.,
+            outline_width: 260.,
             closed: Vec::new(),
             overlay: None,
             hits: Vec::new(),
@@ -1373,6 +1374,7 @@ impl App {
             }
             Act::Replace(all) => self.replace(all),
             Act::Screen(action) => self.screen_act(action),
+            Act::NewMenu => self.open_popup(crate::ui::menu::NEW_MENU, rect.x, rect.y + rect.height as i32),
             Act::OpenRecent(index) => {
                 if let Some(path) = self.recent.iter().filter(|r| r.is_file()).nth(index).cloned() {
                     self.open_project_checked(path);
@@ -1555,9 +1557,10 @@ impl App {
                     o.caret = None;
                 }
             }
-            Key::Character(_)
+            Key::Character(_) | Key::Named(NamedKey::Space)
                 if editable && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
             {
+                let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
                     if let Some(o) = &mut self.overlay {
                         o.type_text(text);
@@ -2025,9 +2028,10 @@ impl App {
                 tab.document.enter();
                 edited = true;
             }
-            Key::Character(_)
+            Key::Character(_) | Key::Named(NamedKey::Space)
                 if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
             {
+                let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
                     tab.document.type_text(text, typography.as_ref().map(|(t, l)| (t, *l)));
                     edited = true;
@@ -2254,12 +2258,13 @@ impl App {
         let body = size.height.saturating_sub(footer + menubar);
         let logical_width = size.width as f32 / self.scale;
         let on_screen = self.screen.is_some();
-        let tree = if !focus && !on_screen && self.show_tree && logical_width > 640. {
+        let has_project = self.project.is_some();
+        let tree = if !focus && !on_screen && has_project && self.show_tree && logical_width > 640. {
             (self.tree_width * self.scale) as u32
         } else {
             0
         };
-        let outline = if !focus && !on_screen && self.show_outline && logical_width > 820. {
+        let outline = if !focus && !on_screen && has_project && self.show_outline && logical_width > 820. {
             (self.outline_width * self.scale) as u32
         } else {
             0
@@ -2330,15 +2335,7 @@ impl App {
                 .active_id()
                 .and_then(|id| self.tabs.get(&id))
                 .and_then(|tab| {
-                    tab.view
-                        .tiles
-                        .iter()
-                        .find(|tile| {
-                            tab.document.cursor >= tile.start
-                                && tab.document.cursor <= tile.start + tile.preview.end
-                        })
-                        .and_then(|tile| tile.caret(tab.document.cursor))
-                        .map(|(x, y)| (tab.view.rect.unwrap(), x, y))
+                    tab.view.caret_at(tab.document.cursor).map(|(x, y)| (tab.view.rect.unwrap(), x, y))
                 });
             if let Some((rect, x, y)) = position {
                 self.label(
@@ -2410,16 +2407,7 @@ impl App {
         }
         if let Some(id) = self.active_id() {
             let tab = &self.tabs[&id];
-            if let Some((x, y)) = tab
-                .view
-                .tiles
-                .iter()
-                .find(|tile| {
-                    tab.document.cursor >= tile.start
-                        && tab.document.cursor <= tile.start + tile.preview.end
-                })
-                .and_then(|tile| tile.caret(tab.document.cursor))
-            {
+            if let Some((x, y)) = tab.view.caret_at(tab.document.cursor) {
                 if let Some(rect) = tab.view.rect {
                     window.set_ime_cursor_area(
                         PhysicalPosition::new(rect.x as f64 + x as f64, rect.y as f64 + y as f64),
@@ -3000,15 +2988,22 @@ impl ApplicationHandler<UserEvent> for App {
                         .skip(1)
                         .find(|s| !s.to_string_lossy().starts_with("--"));
                     if let Some(session) = &session {
-                        self.tree_width = if (130.0..=420.0).contains(&session.tree_width) { session.tree_width } else { 218. };
-                        self.outline_width = if (130.0..=420.0).contains(&session.outline_width) { session.outline_width } else { 200. };
+                        self.tree_width = if (130.0..=420.0).contains(&session.tree_width) { session.tree_width } else { 232. };
+                        self.outline_width = if (130.0..=420.0).contains(&session.outline_width) { session.outline_width } else { 260. };
                         self.recent = session.recent.clone();
                         self.show_tree = session.show_tree;
                         self.show_outline = session.show_outline;
                     }
                     if self.project.is_none() {
                         if let Some(path) = argument {
-                            self.open_project(PathBuf::from(path), false);
+                            let path = PathBuf::from(path);
+                            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jw")) && !path.exists() {
+                                // `justwrite novel.jw` starts the project when it is not there yet.
+                                let title = path.file_stem().map_or_else(|| "My novel".to_owned(), |s| s.to_string_lossy().into_owned());
+                                self.create_project(path, title);
+                            } else {
+                                self.open_project(path, false);
+                            }
                         } else if let Some(path) = session.as_ref().and_then(|s| s.project.clone()).filter(|p| p.is_file()) {
                             self.pending_session = session.and_then(|s| s.split);
                             self.open_project(path, false);

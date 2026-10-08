@@ -76,6 +76,8 @@ pub struct EditorView {
     pub marker: Marker,
     /// Shown for scene-break lines.
     pub scene_symbol: String,
+    /// Scroll so the caret shows at the next layout.
+    pub reveal: bool,
 }
 fn blend(a: u32, b: u32, t: f32) -> u32 {
     let channel = |s: u32| {
@@ -139,6 +141,47 @@ impl EditorView {
         self.cache.clear();
     }
     pub fn layout(
+        &mut self,
+        doc: &Document,
+        blocks: &BlockIndex,
+        settings: &Settings,
+        fonts: &mut FontSystem,
+        rect: Rect,
+    ) {
+        self.layout_pass(doc, blocks, settings, fonts, rect);
+        if !std::mem::take(&mut self.reveal) {
+            return;
+        }
+        let line_height = settings.font_size * settings.line_height;
+        let gap = settings.font_size * settings.paragraph_gap;
+        let visible = |view: &Self| {
+            let found = view.caret_at(doc.cursor);
+            match found {
+                Some((_, y)) => y >= -1.0 && y + line_height <= rect.height as f32 + 1.0,
+                // The empty line after a final newline has no tile of its own.
+                None => doc.cursor == doc.text.len_chars() && view.tiles.last().is_some_and(|t| t.start + t.preview.end == doc.cursor && t.y + t.height + line_height <= rect.height as f32 + 1.0),
+            }
+        };
+        for attempt in 0..2 {
+            if visible(self) {
+                return;
+            }
+            let line = doc.text.char_to_line(doc.cursor.min(doc.text.len_chars()));
+            let line_start = doc.text.line_to_char(line);
+            self.top = if doc.cursor - line_start > CHUNK {
+                doc.cursor.saturating_sub(160)
+            } else if attempt == 0 && doc.cursor >= self.top {
+                // Below the window: show some of what comes before the caret.
+                let above = ((rect.height as f32 * 0.45) / (line_height + gap)).floor() as usize;
+                doc.text.line_to_char(line.saturating_sub(above))
+            } else {
+                line_start
+            };
+            self.history.clear();
+            self.layout_pass(doc, blocks, settings, fonts, rect);
+        }
+    }
+    fn layout_pass(
         &mut self,
         doc: &Document,
         blocks: &BlockIndex,
@@ -249,12 +292,7 @@ impl EditorView {
             self.cache.pop_front();
         }
         if settings.typewriter {
-            if let Some((_, y)) = self
-                .tiles
-                .iter()
-                .find(|t| doc.cursor >= t.start && doc.cursor <= t.start + t.preview.end)
-                .and_then(|t| t.caret(doc.cursor))
-            {
+            if let Some((_, y)) = self.caret_at(doc.cursor) {
                 let shift = rect.height as f32 * 0.5 - y;
                 for tile in &mut self.tiles {
                     tile.y += shift;
@@ -442,27 +480,18 @@ impl EditorView {
             }
         }
     }
-    pub fn ensure_cursor(&mut self, doc: &Document) {
-        let visible_end = self
-            .tiles
-            .last()
-            .map_or(self.top, |tile| tile.start + tile.preview.end);
-        let cursor_visible = self.tiles.iter().any(|t| {
-            if doc.cursor < t.start || doc.cursor > t.start + t.preview.end {
-                return false;
-            }
-            t.buffer
-                .cursor_position(&t.display_cursor(doc.cursor))
-                .is_some_and(|(_, y)| t.y + y < self.rect.map_or(600, |r| r.height) as f32 - 30.0)
-        });
-        if doc.cursor < self.top || doc.cursor > visible_end || !cursor_visible {
-            let line_start = doc.text.line_to_char(doc.text.char_to_line(doc.cursor));
-            self.top = if doc.cursor - line_start > CHUNK {
-                doc.cursor.saturating_sub(160)
-            } else {
-                line_start
-            };
-        }
+    /// Where the caret is on screen, relative to the editor's rectangle.
+    pub fn caret_at(&self, cursor: usize) -> Option<(f32, f32)> {
+        // A caret on a line boundary belongs to two tiles; either may be the one that shows it.
+        self.tiles
+            .iter()
+            .filter(|t| cursor >= t.start && cursor <= t.start + t.preview.end && !t.preview.hidden)
+            .filter_map(|t| t.caret(cursor))
+            .next()
+    }
+    /// Asks for the caret to be brought into view the next time the text is laid out.
+    pub fn ensure_cursor(&mut self, _doc: &Document) {
+        self.reveal = true;
     }
 }
 
