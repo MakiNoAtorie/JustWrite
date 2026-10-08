@@ -151,13 +151,8 @@ impl Renderer for CpuRenderer {
     fn text(&mut self, fonts: &mut FontSystem, buffer: &mut Buffer, x: i32, y: i32, clip: Rect) {
         self.dirty.push(clip);
         let width = self.width as i32;
-        // The clip rectangle, cut to the screen once instead of for every pixel.
-        let visible = clip.intersect(Rect { x: 0, y: 0, width: self.width, height: self.height });
-        let (left, right) = (visible.x, visible.x + visible.width as i32);
-        let (top, bottom) = (visible.y, visible.y + visible.height as i32);
+        let height = self.height as i32;
         let pixels = &mut self.pixels;
-        // x / 255 for 0 <= x <= 255 * 255, without a division.
-        let div255 = |v: u32| (v + 1 + (v >> 8)) >> 8;
         buffer.draw(
             fonts,
             &mut self.glyphs,
@@ -167,18 +162,31 @@ impl Renderer for CpuRenderer {
                 if alpha == 0 {
                     return;
                 }
-                let (cr, cg, cb) = (color.r() as u32 * alpha, color.g() as u32 * alpha, color.b() as u32 * alpha);
-                let inverse = 255 - alpha;
-                let first_column = (x + gx).max(left);
-                let last_column = (x + gx + gw as i32).min(right);
-                for row in (y + gy).max(top)..(y + gy + gh as i32).min(bottom) {
-                    let base = (row * width) as usize;
-                    for column in first_column..last_column {
-                        let pixel = &mut pixels[base + column as usize];
-                        let p = *pixel;
-                        let red = div255(cr + ((p >> 16) & 255) * inverse);
-                        let green = div255(cg + ((p >> 8) & 255) * inverse);
-                        let blue = div255(cb + (p & 255) * inverse);
+                for row in y + gy..y + gy + gh as i32 {
+                    if row < clip.y
+                        || row >= clip.y + clip.height as i32
+                        || row < 0
+                        || row >= height
+                    {
+                        continue;
+                    }
+                    for column in x + gx..x + gx + gw as i32 {
+                        if column < clip.x
+                            || column >= clip.x + clip.width as i32
+                            || column < 0
+                            || column >= width
+                        {
+                            continue;
+                        }
+                        let pixel = &mut pixels[(row * width + column) as usize];
+                        let red = ((color.r() as u32 * alpha)
+                            + ((*pixel >> 16) & 255) * (255 - alpha))
+                            / 255;
+                        let green = ((color.g() as u32 * alpha)
+                            + ((*pixel >> 8) & 255) * (255 - alpha))
+                            / 255;
+                        let blue =
+                            ((color.b() as u32 * alpha) + (*pixel & 255) * (255 - alpha)) / 255;
                         *pixel = red << 16 | green << 8 | blue;
                     }
                 }
