@@ -967,10 +967,10 @@ impl App {
         fields.push(Field::heading("How to cut it into chapters"));
         fields.push(Field::choice("by", "Start a new chapter at", labels(&["Each heading", "Each paragraph matching a pattern", "Each page break", "Nowhere: one chapter"]), by));
         fields.push(Field::number("level", "Heading level for chapters", level as f32, 1., 6., 1., 0, "").when("by", &[0]));
-        fields.push(Field::toggle("parts", "Higher-level headings become parts", suggestion.parts).when("by", &[0]));
+        fields.push(Field::toggle("parts", "Higher headings become parts", suggestion.parts).when("by", &[0]));
         fields.push(Field::text("pattern", "Pattern (regular expression)", &pattern).hint("For example ^(Chapter|CHAPTER) \\d+").when("by", &[1]));
         fields.push(Field::heading("Notes"));
-        fields.push(Field::text("prefix", "Lines starting with this become notes", &suggestion.comment_prefix).hint("For example # or //; leave empty for none"));
+        fields.push(Field::text("prefix", "Lines starting with this are notes", &suggestion.comment_prefix).hint("such as # or //"));
         let mut form = Form::new(FormKind::Import, "Import a manuscript", fields).submit("Import").width(620.);
         form.data = vec![path.to_string_lossy().into_owned()];
         self.import_raw = Some(Arc::new(raw));

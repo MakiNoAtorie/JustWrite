@@ -100,13 +100,21 @@ fn dialog(parent: &Option<Arc<Window>>, title: &str, filters: &[Filter]) -> rfd:
 pub fn choose_folder(parent: Option<Arc<Window>>, title: &str) -> Option<PathBuf> {
     dialog(&parent, title, &[]).pick_folder()
 }
+/// `JUSTWRITE_DIALOG_FILE` and `JUSTWRITE_DIALOG_DIR` answer the file dialogs without showing
+/// them, for automated runs.
 pub fn choose_file(parent: Option<Arc<Window>>, title: &str, filters: &[Filter]) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("JUSTWRITE_DIALOG_FILE") {
+        return Some(PathBuf::from(path));
+    }
     dialog(&parent, title, filters).pick_file()
 }
 pub fn choose_files(parent: Option<Arc<Window>>, title: &str, filters: &[Filter]) -> Vec<PathBuf> {
     dialog(&parent, title, filters).pick_files().unwrap_or_default()
 }
 pub fn choose_save(parent: Option<Arc<Window>>, title: &str, name: &str, filters: &[Filter]) -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("JUSTWRITE_DIALOG_DIR") {
+        return Some(PathBuf::from(dir).join(name));
+    }
     dialog(&parent, title, filters).set_file_name(name).save_file()
 }
 

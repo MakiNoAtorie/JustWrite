@@ -195,6 +195,14 @@ pub fn pack(work: &Path, target: &Path, previous: Option<Previous>) -> io::Resul
 /// Replaces `target` with the temporary file; a sync client or virus scanner holding the target
 /// open for a moment is waited out.
 pub fn persist(mut temporary: tempfile::NamedTempFile, target: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        // Temporary files are private; the saved file keeps the mode of the one it replaces, or
+        // the usual one for a new file.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(target).map_or(0o644, |m| m.permissions().mode() & 0o777);
+        let _ = temporary.as_file().set_permissions(std::fs::Permissions::from_mode(mode));
+    }
     for attempt in 0..6 {
         match temporary.persist(target) {
             Ok(_) => return Ok(()),

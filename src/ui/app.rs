@@ -486,6 +486,7 @@ impl App {
         let proxy = self.proxy.clone();
         let parent = self.window.clone();
         let name = self.project.as_ref().map(|p| p.core.title().to_owned());
+        let export_name = self.pending_export.as_ref().map(|(_, n)| n.clone()).unwrap_or_else(|| "manuscript".into());
         std::thread::spawn(move || {
             let jw: &[platform::Filter] = &[("JustWrite project", &["jw"])];
             let path = match choice {
@@ -494,7 +495,10 @@ impl App {
                 Choose::SaveProjectAs => platform::choose_save(parent, "Save a copy as", &format!("{}.jw", name.unwrap_or_else(|| "My novel".into())), jw).map(|p| p.with_extension("jw")),
                 Choose::ImportFile => platform::choose_file(parent, "Import a manuscript", &[("Manuscripts", &["docx", "md", "markdown", "txt"])]),
                 Choose::Cover => platform::choose_file(parent, "Choose a cover image", &[("Images", &["jpg", "jpeg", "png"])]),
-                Choose::Export => None,
+                Choose::Export => {
+                    let extension = Path::new(&export_name).extension().and_then(|e| e.to_str()).unwrap_or("docx").to_owned();
+                    platform::choose_save(parent, "Export to", &export_name, &[("Export", &[extension.as_str()])])
+                }
             };
             let _ = proxy.send_event(UserEvent::Chosen(path, choice));
         });
@@ -2167,6 +2171,7 @@ impl App {
                     self.tabs.insert(id, Tab::new(id));
                     ids.push(id);
                 }
+                self.refresh_titles();
                 Split::Pane(Pane {
                     id: pane,
                     active: active.min(ids.len() - 1),
@@ -3016,7 +3021,10 @@ impl ApplicationHandler<UserEvent> for App {
                     if self.project.is_none() {
                         if let Some(path) = argument {
                             let path = PathBuf::from(path);
-                            if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jw")) && !path.exists() {
+                            if path.extension().is_some_and(|e| ["docx", "md", "markdown", "txt"].iter().any(|x| e.eq_ignore_ascii_case(x))) {
+                                // A manuscript on the command line is offered for import.
+                                self.chosen(path, Choose::ImportFile);
+                            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("jw")) && !path.exists() {
                                 // `justwrite novel.jw` starts the project when it is not there yet.
                                 let title = path.file_stem().map_or_else(|| "My novel".to_owned(), |s| s.to_string_lossy().into_owned());
                                 self.create_project(path, title);
