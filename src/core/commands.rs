@@ -2,16 +2,32 @@ use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
-    Open,
-    OpenFile,
+    // Project
+    NewProject,
+    OpenProject,
+    Recent,
+    Import,
     Save,
     SaveAs,
-    Reload,
-    New,
+    CloseProject,
+    Quit,
+    // Chapters and pages
+    NewChapter,
+    NewPart,
+    NewPage,
+    Rename,
+    Delete,
+    MoveUp,
+    MoveDown,
+    // Tabs and panes
     CloseTab,
     Reopen,
     NextTab,
     PreviousTab,
+    SplitRight,
+    SplitDown,
+    CloseSplit,
+    // Editing
     Undo,
     Redo,
     SelectAll,
@@ -20,38 +36,35 @@ pub enum Command {
     Paste,
     Bold,
     Italic,
-    Strike,
-    Heading(u8),
-    Bullet,
-    Numbered,
-    InlineCode,
-    CodeBlock,
-    Link,
-    Indent,
-    Outdent,
-    Palette,
-    QuickOpen,
-    JumpHeading,
-    GotoLine,
-    WordCount,
+    ToggleNote,
+    NoteParagraph,
+    AddComment,
     Find,
     Replace,
-    FolderSearch,
-    SplitRight,
-    SplitDown,
-    CloseSplit,
-    Recent,
+    ProjectSearch,
+    // Navigation
+    Palette,
+    QuickOpen,
+    JumpScene,
+    GotoLine,
+    WordCount,
+    // Review and history
+    ShowComments,
+    ShowHistory,
+    Snapshot,
+    // Output
+    Export,
+    Preview,
+    BookDetails,
+    ProjectSettings,
+    // View and settings
     ToggleTree,
-    ToggleOutline,
+    TogglePanel,
     ToggleMarkers,
+    HideNotes,
     Focus,
     Settings,
     Keymap,
-    CreateFile,
-    CreateFolder,
-    RenameFile,
-    DeleteFile,
-    Quit,
 }
 pub struct CommandInfo {
     pub id: Command,
@@ -65,41 +78,28 @@ macro_rules! commands {
     };
 }
 commands![
-    (
-        Command::Open,
-        "open_folder",
-        "Open folder…",
-        "Ctrl+O"
-    ),
-    (
-        Command::OpenFile,
-        "open_file",
-        "Open file…",
-        "Ctrl+Shift+L"
-    ),
+    (Command::NewProject, "new_project", "New project…", "Ctrl+Shift+N"),
+    (Command::OpenProject, "open_project", "Open project…", "Ctrl+O"),
+    (Command::Recent, "recent", "Open recent project…", ""),
+    (Command::Import, "import", "Import .docx, .md or .txt…", ""),
     (Command::Save, "save", "Save", "Ctrl+S"),
-    (Command::SaveAs, "save_as", "Save as…", "Ctrl+Shift+S"),
-    (
-        Command::Reload,
-        "reload",
-        "Reload from disk (discard my edits)",
-        "Ctrl+R"
-    ),
-    (Command::New, "new", "New file", "Ctrl+N"),
+    (Command::SaveAs, "save_as", "Save project as…", "Ctrl+Shift+S"),
+    (Command::CloseProject, "close_project", "Close project", ""),
+    (Command::Quit, "quit", "Exit", "Alt+F4"),
+    (Command::NewChapter, "new_chapter", "New chapter", "Ctrl+N"),
+    (Command::NewPart, "new_part", "New part or act", ""),
+    (Command::NewPage, "new_page", "New note page", "Ctrl+Alt+N"),
+    (Command::Rename, "rename", "Rename…", "F2"),
+    (Command::Delete, "delete", "Delete…", ""),
+    (Command::MoveUp, "move_up", "Move up", "Alt+ArrowUp"),
+    (Command::MoveDown, "move_down", "Move down", "Alt+ArrowDown"),
     (Command::CloseTab, "close_tab", "Close tab", "Ctrl+W"),
-    (
-        Command::Reopen,
-        "reopen",
-        "Reopen closed tab",
-        "Ctrl+Shift+T"
-    ),
+    (Command::Reopen, "reopen", "Reopen closed tab", "Ctrl+Shift+T"),
     (Command::NextTab, "next_tab", "Next tab", "Ctrl+Tab"),
-    (
-        Command::PreviousTab,
-        "previous_tab",
-        "Previous tab",
-        "Ctrl+Shift+Tab"
-    ),
+    (Command::PreviousTab, "previous_tab", "Previous tab", "Ctrl+Shift+Tab"),
+    (Command::SplitRight, "split_right", "Split right", "Ctrl+\\"),
+    (Command::SplitDown, "split_down", "Split down", "Ctrl+Shift+\\"),
+    (Command::CloseSplit, "close_split", "Close split pane", ""),
     (Command::Undo, "undo", "Undo", "Ctrl+Z"),
     (Command::Redo, "redo", "Redo", "Ctrl+Y"),
     (Command::SelectAll, "select_all", "Select all", "Ctrl+A"),
@@ -108,118 +108,31 @@ commands![
     (Command::Paste, "paste", "Paste", "Ctrl+V"),
     (Command::Bold, "bold", "Bold", "Ctrl+B"),
     (Command::Italic, "italic", "Italic", "Ctrl+I"),
-    (Command::Strike, "strike", "Strikethrough", "Alt+Shift+5"),
-    (Command::Heading(1), "heading_1", "Heading 1", "Ctrl+1"),
-    (Command::Heading(2), "heading_2", "Heading 2", "Ctrl+2"),
-    (Command::Heading(3), "heading_3", "Heading 3", "Ctrl+3"),
-    (Command::Heading(4), "heading_4", "Heading 4", "Ctrl+4"),
-    (Command::Heading(5), "heading_5", "Heading 5", "Ctrl+5"),
-    (Command::Heading(6), "heading_6", "Heading 6", "Ctrl+6"),
-    (Command::Bullet, "bullet", "Bullet list", "Ctrl+Shift+8"),
-    (
-        Command::Numbered,
-        "numbered",
-        "Numbered list",
-        "Ctrl+Shift+7"
-    ),
-    (Command::InlineCode, "inline_code", "Inline code", "Ctrl+E"),
-    (
-        Command::CodeBlock,
-        "code_block",
-        "Code block",
-        "Ctrl+Shift+K"
-    ),
-    (Command::Link, "link", "Link", "Ctrl+K"),
-    (Command::Indent, "indent", "Indent", "Tab"),
-    (Command::Outdent, "outdent", "Outdent", "Shift+Tab"),
-    (
-        Command::Palette,
-        "palette",
-        "Command palette",
-        "Ctrl+Shift+P"
-    ),
-    (Command::QuickOpen, "quick_open", "Quick open", "Ctrl+P"),
-    (
-        Command::JumpHeading,
-        "jump_heading",
-        "Jump to heading",
-        "Ctrl+J"
-    ),
-    (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
-    (Command::WordCount, "word_count", "Word count", ""),
+    (Command::ToggleNote, "toggle_note", "Turn line or selection into a note, and back", "Ctrl+/"),
+    (Command::NoteParagraph, "note_paragraph", "Turn paragraph into a note, and back", "Ctrl+Alt+/"),
+    (Command::AddComment, "add_comment", "Add review comment…", "Ctrl+Alt+M"),
     (Command::Find, "find", "Find…", "Ctrl+F"),
     (Command::Replace, "replace", "Replace…", "Ctrl+H"),
-    (
-        Command::FolderSearch,
-        "folder_search",
-        "Search workspace…",
-        "Ctrl+Shift+F"
-    ),
-    (Command::SplitRight, "split_right", "Split right", "Ctrl+\\"),
-    (
-        Command::SplitDown,
-        "split_down",
-        "Split down",
-        "Ctrl+Shift+\\"
-    ),
-    (
-        Command::CloseSplit,
-        "close_split",
-        "Close split pane",
-        ""
-    ),
-    (
-        Command::Recent,
-        "recent",
-        "Open recent folder…",
-        ""
-    ),
-    (
-        Command::ToggleTree,
-        "toggle_tree",
-        "Toggle folder tree",
-        "Ctrl+Shift+E"
-    ),
-    (
-        Command::ToggleOutline,
-        "toggle_outline",
-        "Toggle outline",
-        "Ctrl+Shift+O"
-    ),
-    (
-        Command::ToggleMarkers,
-        "toggle_markers",
-        "Toggle syntax markers",
-        "Ctrl+M"
-    ),
+    (Command::ProjectSearch, "project_search", "Search the project…", "Ctrl+Shift+F"),
+    (Command::Palette, "palette", "Command palette", "Ctrl+Shift+P"),
+    (Command::QuickOpen, "quick_open", "Go to chapter or page…", "Ctrl+P"),
+    (Command::JumpScene, "jump_scene", "Jump to scene", "Ctrl+J"),
+    (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
+    (Command::WordCount, "word_count", "Word count", ""),
+    (Command::ShowComments, "show_comments", "Show comments panel", "Ctrl+Shift+M"),
+    (Command::ShowHistory, "show_history", "Snapshots and history…", "Ctrl+Shift+H"),
+    (Command::Snapshot, "snapshot", "Take snapshot…", "Ctrl+Alt+S"),
+    (Command::Export, "export", "Export…", "Ctrl+E"),
+    (Command::Preview, "preview", "Paged preview…", "Ctrl+Alt+P"),
+    (Command::BookDetails, "book_details", "Book details…", ""),
+    (Command::ProjectSettings, "project_settings", "Project settings…", ""),
+    (Command::ToggleTree, "toggle_tree", "Toggle project tree", "Ctrl+Shift+E"),
+    (Command::TogglePanel, "toggle_panel", "Toggle side panel", "Ctrl+Shift+O"),
+    (Command::ToggleMarkers, "toggle_markers", "Show formatting and note markers", "Ctrl+M"),
+    (Command::HideNotes, "hide_notes", "Hide notes", "Ctrl+Shift+Y"),
     (Command::Focus, "focus", "Focus mode", "F11"),
     (Command::Settings, "settings", "Settings…", "Ctrl+,"),
     (Command::Keymap, "keymap", "Keyboard shortcuts…", ""),
-    (
-        Command::CreateFile,
-        "create_file",
-        "New note in workspace…",
-        ""
-    ),
-    (
-        Command::CreateFolder,
-        "create_folder",
-        "New folder in workspace…",
-        ""
-    ),
-    (
-        Command::RenameFile,
-        "rename_file",
-        "Rename…",
-        "F2"
-    ),
-    (
-        Command::DeleteFile,
-        "delete_file",
-        "Delete (Recycle Bin)…",
-        ""
-    ),
-    (Command::Quit, "quit", "Exit", "Alt+F4"),
 ];
 
 #[derive(Clone, PartialEq, Eq)]

@@ -8,13 +8,30 @@ pub struct Settings {
     pub accent: String,
     pub editor_font: String,
     pub interface_font: String,
-    pub code_font: String,
+    /// Show formatting and note markers on every line, not just the one being edited.
     pub show_markers: bool,
     pub font_size: f32,
+    /// Line height as a multiple of the font size.
+    pub line_height: f32,
+    /// Extra space between paragraphs, in lines of text.
+    pub paragraph_gap: f32,
     #[serde(default)]
     pub max_width: Option<f32>,
     pub typewriter: bool,
+    /// Save chapters shortly after typing stops.
     pub autosave: bool,
+    /// How often the `.jw` file is rewritten from the working copy, in minutes.
+    pub repack_minutes: u32,
+    /// The marker for notes, such as `$$`. Stored text does not depend on it.
+    pub note_marker: String,
+    /// Colour of notes (`#rrggbb`); empty for the theme's muted colour.
+    pub note_color: String,
+    pub note_italic: bool,
+    pub hide_notes: bool,
+    /// Underline possible spelling mistakes.
+    pub spellcheck: bool,
+    /// Export preset the Export command starts from.
+    pub default_preset: String,
     pub keymap: BTreeMap<String, String>,
     /// Whether Windows is currently in light mode; only used when `theme` is "system".
     #[serde(skip)]
@@ -25,14 +42,22 @@ impl Default for Settings {
         Self {
             theme: "dark".into(),
             accent: "#d9aa72".into(),
-            editor_font: "Segoe UI".into(),
-            interface_font: "Segoe UI".into(),
-            code_font: "Consolas".into(),
+            editor_font: crate::fonts::DEFAULT_EDITOR_FONT.into(),
+            interface_font: crate::platform::default_sans().into(),
             show_markers: false,
             font_size: 18.,
-            max_width: Some(920.),
+            line_height: 1.6,
+            paragraph_gap: 0.4,
+            max_width: Some(720.),
             typewriter: false,
             autosave: true,
+            repack_minutes: 3,
+            note_marker: "$$".into(),
+            note_color: String::new(),
+            note_italic: true,
+            hide_notes: false,
+            spellcheck: true,
+            default_preset: String::new(),
             keymap: BTreeMap::new(),
             system_light: false,
         }
@@ -59,6 +84,20 @@ impl Settings {
         {
             return Err("Accent must be a hex color, such as #d9aa72".into());
         }
+        if !(1.0..=3.0).contains(&settings.line_height) || !settings.line_height.is_finite() {
+            return Err("Line height must be between 1.0 and 3.0".into());
+        }
+        if !(1..=60).contains(&settings.repack_minutes) {
+            return Err("The file is saved every 1 to 60 minutes".into());
+        }
+        super::notes::Marker::new(&settings.note_marker)?;
+        if !settings.note_color.is_empty()
+            && (settings.note_color.len() != 7
+                || !settings.note_color.starts_with('#')
+                || u32::from_str_radix(&settings.note_color[1..], 16).is_err())
+        {
+            return Err("Note colour must be a hex colour such as #8a8175, or empty".into());
+        }
         for shortcut in settings.keymap.values() {
             super::commands::parse_shortcut(shortcut)?;
         }
@@ -70,6 +109,13 @@ impl Settings {
     pub fn light(&self) -> bool {
         self.theme == "light" || (self.theme == "system" && self.system_light)
     }
+    pub fn marker(&self) -> super::notes::Marker {
+        super::notes::Marker::new(&self.note_marker).unwrap_or_default()
+    }
+    /// The note colour, or `None` for the theme's muted colour.
+    pub fn note_colour(&self) -> Option<u32> {
+        u32::from_str_radix(self.note_color.trim_start_matches('#'), 16).ok().filter(|_| self.note_color.len() == 7)
+    }
     pub fn accent_color(&self) -> u32 {
         u32::from_str_radix(self.accent.trim_start_matches('#'), 16).unwrap_or(0xd9aa72)
     }
@@ -78,13 +124,14 @@ impl Settings {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
-    pub workspace: Option<PathBuf>,
+    /// The `.jw` project that was open.
+    pub project: Option<PathBuf>,
     pub split: Option<SessionSplit>,
     pub tree_width: f32,
     pub outline_width: f32,
     pub show_tree: bool,
     pub show_outline: bool,
-    /// Recently opened workspace folders, newest first.
+    /// Recently opened projects, newest first.
     pub recent: Vec<PathBuf>,
     pub window: Option<WindowState>,
 }
@@ -112,8 +159,7 @@ pub enum SessionSplit {
 }
 #[derive(Serialize, Deserialize)]
 pub struct SessionTab {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<PathBuf>,
+    /// Path of the chapter or page file inside the project.
     pub path: PathBuf,
     pub cursor: usize,
     pub top: usize,
@@ -133,15 +179,14 @@ mod tests {
         settings.accent = "invalid".into();
         assert!(Settings::parse(&settings.serialize()).is_err());
         let session = Session {
-            workspace: Some(PathBuf::from("C:/notes")),
+            project: Some(PathBuf::from("C:/notes/novel.jw")),
             split: Some(SessionSplit::Split {
                 down: false,
                 ratio: 0.4,
                 first: Box::new(SessionSplit::Pane {
                     active: 0,
                     tabs: vec![SessionTab {
-                        root: None,
-                        path: "note.md".into(),
+                        path: "chapters/note.txt".into(),
                         cursor: 42,
                         top: 12,
                     }],

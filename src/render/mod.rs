@@ -37,6 +37,9 @@ pub trait Renderer {
     fn damage(&mut self) -> Vec<Rect>;
     /// Blends `color` over `rect` (alpha 0-255); used to dim the window behind dialogs.
     fn shade(&mut self, rect: Rect, color: u32, alpha: u32);
+    /// Draws a `width` x `height` image of `0x00RRGGBB` pixels into `dest`, stretching it if the
+    /// sizes differ, and only within `clip`.
+    fn image(&mut self, dest: Rect, pixels: &[u32], width: u32, height: u32, clip: Rect);
     fn fill_round(&mut self, rect: Rect, radius: u32, color: u32) {
         let r = radius.min(rect.width / 2).min(rect.height / 2) as i32;
         if r == 0 {
@@ -258,6 +261,26 @@ impl Renderer for CpuRenderer {
             }
         }
         self.dirty.push(rect);
+    }
+    fn image(&mut self, dest: Rect, pixels: &[u32], width: u32, height: u32, clip: Rect) {
+        if width == 0 || height == 0 || dest.width == 0 || dest.height == 0 || pixels.len() < width as usize * height as usize {
+            return;
+        }
+        let screen = Rect { x: 0, y: 0, width: self.width, height: self.height };
+        let visible = dest.intersect(clip).intersect(screen);
+        if visible.width == 0 || visible.height == 0 {
+            return;
+        }
+        let same = dest.width == width && dest.height == height;
+        for y in visible.y..visible.y + visible.height as i32 {
+            let sy = if same { (y - dest.y) as usize } else { ((y - dest.y) as u64 * height as u64 / dest.height as u64) as usize };
+            let row = y as usize * self.width as usize;
+            for x in visible.x..visible.x + visible.width as i32 {
+                let sx = if same { (x - dest.x) as usize } else { ((x - dest.x) as u64 * width as u64 / dest.width as u64) as usize };
+                self.pixels[row + x as usize] = pixels[sy.min(height as usize - 1) * width as usize + sx.min(width as usize - 1)];
+            }
+        }
+        self.dirty.push(visible);
     }
     fn damage(&mut self) -> Vec<Rect> {
         let full = Rect {

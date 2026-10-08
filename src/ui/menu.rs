@@ -8,21 +8,21 @@ pub const MENUS: &[(&str, char, Items)] = &[
         "File",
         'f',
         &[
-            Some(Command::New),
-            Some(Command::OpenFile),
-            Some(Command::Open),
+            Some(Command::NewProject),
+            Some(Command::OpenProject),
             Some(Command::Recent),
-            Some(Command::QuickOpen),
+            Some(Command::Import),
             None,
             Some(Command::Save),
             Some(Command::SaveAs),
-            Some(Command::Reload),
+            Some(Command::Snapshot),
             None,
-            Some(Command::CreateFile),
-            Some(Command::CreateFolder),
+            Some(Command::Export),
+            Some(Command::Preview),
             None,
             Some(Command::CloseTab),
             Some(Command::Reopen),
+            Some(Command::CloseProject),
             None,
             Some(Command::Quit),
         ],
@@ -41,7 +41,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             None,
             Some(Command::Find),
             Some(Command::Replace),
-            Some(Command::FolderSearch),
+            Some(Command::ProjectSearch),
             None,
             Some(Command::Settings),
             Some(Command::Keymap),
@@ -53,23 +53,31 @@ pub const MENUS: &[(&str, char, Items)] = &[
         &[
             Some(Command::Bold),
             Some(Command::Italic),
-            Some(Command::Strike),
-            Some(Command::InlineCode),
-            Some(Command::CodeBlock),
-            Some(Command::Link),
             None,
-            Some(Command::Bullet),
-            Some(Command::Numbered),
+            Some(Command::ToggleNote),
+            Some(Command::NoteParagraph),
+            Some(Command::AddComment),
             None,
-            Some(Command::Heading(1)),
-            Some(Command::Heading(2)),
-            Some(Command::Heading(3)),
-            Some(Command::Heading(4)),
-            Some(Command::Heading(5)),
-            Some(Command::Heading(6)),
+            Some(Command::HideNotes),
+            Some(Command::ToggleMarkers),
+        ],
+    ),
+    (
+        "Project",
+        'p',
+        &[
+            Some(Command::NewChapter),
+            Some(Command::NewPart),
+            Some(Command::NewPage),
             None,
-            Some(Command::Indent),
-            Some(Command::Outdent),
+            Some(Command::Rename),
+            Some(Command::MoveUp),
+            Some(Command::MoveDown),
+            Some(Command::Delete),
+            None,
+            Some(Command::BookDetails),
+            Some(Command::ProjectSettings),
+            Some(Command::ShowHistory),
         ],
     ),
     (
@@ -77,8 +85,8 @@ pub const MENUS: &[(&str, char, Items)] = &[
         'v',
         &[
             Some(Command::ToggleTree),
-            Some(Command::ToggleOutline),
-            Some(Command::ToggleMarkers),
+            Some(Command::TogglePanel),
+            Some(Command::ShowComments),
             Some(Command::Focus),
             None,
             Some(Command::SplitRight),
@@ -87,7 +95,8 @@ pub const MENUS: &[(&str, char, Items)] = &[
             None,
             Some(Command::NextTab),
             Some(Command::PreviousTab),
-            Some(Command::JumpHeading),
+            Some(Command::QuickOpen),
+            Some(Command::JumpScene),
             Some(Command::GotoLine),
             Some(Command::WordCount),
         ],
@@ -109,8 +118,8 @@ pub const EDITOR_MENU: Items = &[
     None,
     Some(Command::Bold),
     Some(Command::Italic),
-    Some(Command::Link),
-    Some(Command::InlineCode),
+    Some(Command::ToggleNote),
+    Some(Command::AddComment),
     None,
     Some(Command::Find),
 ];
@@ -123,19 +132,14 @@ pub const TAB_MENU: Items = &[
     Some(Command::CloseSplit),
 ];
 pub const TREE_MENU: Items = &[
-    Some(Command::CreateFile),
-    Some(Command::CreateFolder),
+    Some(Command::NewChapter),
+    Some(Command::NewPart),
+    Some(Command::NewPage),
     None,
-    Some(Command::RenameFile),
-    Some(Command::DeleteFile),
-];
-pub const HEADING_MENU: Items = &[
-    Some(Command::Heading(1)),
-    Some(Command::Heading(2)),
-    Some(Command::Heading(3)),
-    Some(Command::Heading(4)),
-    Some(Command::Heading(5)),
-    Some(Command::Heading(6)),
+    Some(Command::Rename),
+    Some(Command::MoveUp),
+    Some(Command::MoveDown),
+    Some(Command::Delete),
 ];
 
 pub struct Popup {
@@ -160,7 +164,7 @@ mod tests {
         let all = MENUS
             .iter()
             .map(|(_, _, items)| *items)
-            .chain([EDITOR_MENU, TAB_MENU, TREE_MENU, HEADING_MENU]);
+            .chain([EDITOR_MENU, TAB_MENU, TREE_MENU]);
         for items in all {
             for command in items.iter().flatten() {
                 assert!(info(*command).is_some(), "{command:?} missing from COMMANDS");

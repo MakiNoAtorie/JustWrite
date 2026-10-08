@@ -1,4 +1,8 @@
 use ropey::Rope;
+use super::{
+    comments::EditRec,
+    typography::{Language, Typography, on_type},
+};
 use std::ops::Range;
 
 #[derive(Clone, Debug)]
@@ -26,6 +30,12 @@ pub struct Document {
     state: u64,
     saved_state: u64,
     states: im::OrdMap<u64, u64>,
+    /// Changes since the last [`Document::take_edits`], for anchors that follow the text.
+    edits: Vec<EditRec>,
+    /// The previous edit was typing, so more typing may join its undo step.
+    typing: bool,
+    deleting: bool,
+    last_edit: Option<std::time::Instant>,
 }
 
 impl Default for Document {
@@ -55,6 +65,10 @@ impl Document {
             state: 0,
             saved_state: 0,
             states: [(0u64, 0u64)].into_iter().collect(),
+            edits: Vec::new(),
+            typing: false,
+            deleting: false,
+            last_edit: None,
         }
     }
     pub fn selection(&self) -> Range<usize> {
@@ -70,6 +84,10 @@ impl Document {
     }
     pub fn saved_snapshot(&self) -> Rope {
         self.saved.clone()
+    }
+    /// The edits made since the last call, oldest first.
+    pub fn take_edits(&mut self) -> Vec<EditRec> {
+        std::mem::take(&mut self.edits)
     }
     pub fn append_loaded(&mut self, chunk: Rope) {
         self.saved.append(chunk.clone());
@@ -87,6 +105,7 @@ impl Document {
     pub fn replace_rope(&mut self, range: Range<usize>, inserted: Rope) {
         let changed_line = self.text.char_to_line(range.start);
         let before = (self.cursor, self.anchor);
+        self.edits.push(EditRec { start: range.start, removed: range.len(), inserted: inserted.len_chars() });
         let removed = self.text.slice(range.clone()).into();
         let tail = self.text.split_off(range.end);
         self.text.remove(range.start..);
@@ -113,6 +132,7 @@ impl Document {
         self.replace(self.selection(), text);
     }
     fn apply(&mut self, start: usize, count: usize, replacement: &Rope, caret: (usize, usize)) {
+        self.edits.push(EditRec { start, removed: count, inserted: replacement.len_chars() });
         let changed_line = self.text.char_to_line(start);
         let tail = self.text.split_off(start + count);
         self.text.remove(start..);
@@ -170,7 +190,23 @@ impl Document {
             }
         }
         if !range.is_empty() {
+            let single_back = backwards && range.len() == 1 && self.selection().is_empty();
+            let fresh = self.last_edit.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(1500));
+            let adjacent = self.undo.last().is_some_and(|e| e.inserted.len_chars() == 0 && e.start == range.end);
             self.replace(range, "");
+            if single_back && adjacent && self.deleting && !fresh && self.undo.len() >= 2 {
+                let last = self.undo.pop().unwrap();
+                let previous = self.undo.last_mut().unwrap();
+                let mut removed = last.removed;
+                removed.append(std::mem::take(&mut previous.removed));
+                previous.removed = removed;
+                previous.start = last.start;
+                previous.after = last.after;
+                previous.after_state = last.after_state;
+            }
+            self.deleting = single_back;
+            self.typing = false;
+            self.last_edit = Some(std::time::Instant::now());
         }
     }
     pub fn horizontal(&mut self, right: bool, extend: bool, word: bool) {
@@ -209,82 +245,96 @@ impl Document {
         }
         self.select(pos, extend);
     }
+    /// A new paragraph. Paragraphs are lines, so nothing is carried over.
     pub fn enter(&mut self) {
-        let start = self.text.line_to_char(self.text.char_to_line(self.cursor));
-        let prefix: String = self
-            .text
-            .slice(start..self.cursor.min(start + 512))
-            .chars()
-            .collect();
-        let indent: String = prefix
-            .chars()
-            .take_while(|c| *c == ' ' || *c == '\t')
-            .collect();
-        let trimmed = prefix.trim_start();
-        let mut continuation = String::new();
-        for marker in ["- [ ] ", "- [x] ", "* [ ] ", "* [x] ", "- ", "* ", "+ "] {
-            if let Some(rest) = trimmed.strip_prefix(marker) {
-                if rest.is_empty() {
-                    self.replace(start..self.cursor, "");
-                    return;
-                }
-                continuation = marker.replace("[x]", "[ ]");
-                break;
-            }
-        }
-        if continuation.is_empty() {
-            let digits: String = trimmed.chars().take_while(char::is_ascii_digit).collect();
-            if let Some(rest) = trimmed
-                .strip_prefix(&digits)
-                .and_then(|s| s.strip_prefix(". "))
-            {
-                if !digits.is_empty() {
-                    if rest.is_empty() {
-                        self.replace(start..self.cursor, "");
-                        return;
-                    }
-                    continuation =
-                        format!("{}. ", digits.parse::<u64>().unwrap_or(0).saturating_add(1));
-                }
-            }
-        }
-        self.insert(&format!("{}{indent}{continuation}", self.line_ending));
+        self.insert(&self.line_ending.to_string());
     }
-    pub fn type_text(&mut self, text: &str) {
-        let close = match text {
-            "(" => Some(")"),
-            "[" => Some("]"),
-            "{" => Some("}"),
-            "\"" => Some("\""),
-            "'" => Some("'"),
-            "`" => Some("`"),
-            _ => None,
-        };
-        if text.chars().count() == 1
-            && matches!(text, ")" | "]" | "}" | "\"" | "'" | "`")
-            && self.selection().is_empty()
-            && self.cursor < self.text.len_chars()
-            && self.text.char(self.cursor).to_string() == text
-        {
-            self.select(self.cursor + 1, false);
-            return;
+    /// Types `text` as the author typed it, applying auto-typography when given: smart quotes,
+    /// dashes and the like rewrite what is just before the caret.
+    pub fn type_text(&mut self, text: &str, typography: Option<(&Typography, Language)>) {
+        let mut text = text.to_owned();
+        let mut delete_before = 0;
+        if let (Some((options, language)), true) = (typography, text.chars().count() == 1) {
+            let line_start = self.text.line_to_char(self.text.char_to_line(self.selection().start));
+            let from = self.selection().start.saturating_sub(64).max(line_start);
+            let before: String = self.text.slice(from..self.selection().start).into();
+            if let Some(replacement) = on_type(&before, text.chars().next().unwrap(), language, options) {
+                delete_before = replacement.delete_before.min(before.chars().count());
+                text = replacement.insert;
+            }
         }
-        if let Some(close) = close {
-            // Apostrophes within words are literal, not quote pairs.
-            if text == "'" && self.cursor > 0 && self.text.char(self.cursor - 1).is_alphanumeric() {
-                self.insert(text);
+        let range = self.selection();
+        let word_start = text.chars().next().is_some_and(|c| !c.is_whitespace())
+            && range.start > 0
+            && self.text.char(range.start - 1).is_whitespace();
+        let adjacent_to_last = self.undo.last().is_some_and(|e| e.removed.len_chars() == 0 && e.start + e.inserted.len_chars() == range.start);
+        let fresh = self.last_edit.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(1500));
+        let merge = range.is_empty() && delete_before == 0 && adjacent_to_last && !word_start && !fresh && self.typing;
+        self.replace(range.start - delete_before..range.end, &text);
+        if merge && self.undo.len() >= 2 {
+            let last = self.undo.pop().unwrap();
+            let previous = self.undo.last_mut().unwrap();
+            previous.inserted.append(last.inserted);
+            previous.after = last.after;
+            previous.after_state = last.after_state;
+        }
+        self.typing = true;
+        self.last_edit = Some(std::time::Instant::now());
+    }
+    /// Wraps the selection in `mark` (`*` or `**`), or takes the marks off if it already has them.
+    /// With nothing selected the word at the caret is used, or an empty pair is inserted.
+    pub fn toggle_emphasis(&mut self, mark: &str) {
+        self.typing = false;
+        let m = mark.chars().count();
+        let mut range = self.selection();
+        if range.is_empty() {
+            let word = |c: char| c.is_alphanumeric() || c == '\'' || c == '’';
+            let (mut a, mut b) = (range.start, range.start);
+            while a > 0 && word(self.text.char(a - 1)) {
+                a -= 1;
+            }
+            while b < self.text.len_chars() && word(self.text.char(b)) {
+                b += 1;
+            }
+            if a == b {
+                self.insert(&format!("{mark}{mark}"));
+                self.select(range.start + m, false);
+                if let Some(edit) = self.undo.last_mut() {
+                    edit.after = (self.cursor, self.anchor);
+                }
                 return;
             }
-            let selection = self.selection();
-            if !selection.is_empty() {
-                self.surround(text, close);
-            } else {
-                self.insert(&format!("{text}{close}"));
-                self.cursor -= 1;
-                self.anchor = self.cursor;
+            range = a..b;
+            (self.anchor, self.cursor) = (a, b);
+        }
+        let (a, b) = (range.start, range.end);
+        let run = |from: usize, forward: bool, text: &Rope| -> usize {
+            let mut n = 0;
+            while n < 3
+                && if forward { from + n < text.len_chars() && text.char(from + n) == '*' } else { from > n && text.char(from - n - 1) == '*' }
+            {
+                n += 1;
             }
+            n
+        };
+        // `*` is italics when an odd number of asterisks hug the text, `**` bold when two or more do.
+        let present = |n: usize| if m == 2 { n >= 2 } else { n % 2 == 1 };
+        let outside = run(a, false, &self.text).min(run(b, true, &self.text));
+        let inside = run(a, true, &self.text).min(run(b, false, &self.text));
+        if present(outside) {
+            let inner: Rope = self.text.slice(a..b).into();
+            self.replace_rope(a - m..b + m, inner);
+            self.anchor = a - m;
+            self.cursor = b - m;
+        } else if present(inside) && b - a > 2 * inside {
+            let inner: Rope = self.text.slice(a + m..b - m).into();
+            self.replace_rope(a..b, inner);
+            self.anchor = a;
+            self.cursor = b - 2 * m;
         } else {
-            self.insert(text);
+            self.surround(mark, mark);
+            self.anchor = a + m;
+            self.cursor = b + m;
         }
         if let Some(edit) = self.undo.last_mut() {
             edit.after = (self.cursor, self.anchor);
@@ -299,125 +349,6 @@ impl Document {
         self.replace_rope(range.clone(), inserted);
         self.anchor = range.start + opening.chars().count();
         self.cursor = self.anchor + length;
-        if let Some(edit) = self.undo.last_mut() {
-            edit.after = (self.cursor, self.anchor);
-        }
-    }
-    pub fn prefix(&mut self, marker: &str, heading: bool) {
-        if self.selection().is_empty() {
-            let start = self.text.line_to_char(self.text.char_to_line(self.cursor));
-            let sample = self
-                .text
-                .slice(start..(start + 8).min(self.text.len_chars()))
-                .to_string();
-            let remove = if heading {
-                sample.chars().take_while(|c| *c == '#').count()
-            } else {
-                0
-            };
-            let remove = if heading && sample.as_bytes().get(remove) == Some(&b' ') {
-                remove + 1
-            } else {
-                remove
-            };
-            if !heading && sample.starts_with(marker) {
-                self.replace(start..start + marker.chars().count(), "");
-            } else {
-                self.replace(start..start + remove, marker);
-            }
-            return;
-        }
-        let first = self.text.char_to_line(self.selection().start);
-        let last = self.text.char_to_line(self.selection().end);
-        let start = self.text.line_to_char(first);
-        let end = if last + 1 < self.text.len_lines() {
-            self.text.line_to_char(last + 1)
-        } else {
-            self.text.len_chars()
-        };
-        let source = self.text.slice(start..end).to_string();
-        let mut output = String::new();
-        for line in source.split_inclusive('\n') {
-            let line = if heading {
-                line.trim_start_matches('#').trim_start_matches(' ')
-            } else {
-                line
-            };
-            if let Some(rest) = line.strip_prefix(marker).filter(|_| !heading) {
-                output.push_str(rest);
-            } else {
-                output.push_str(marker);
-                output.push_str(line);
-            }
-        }
-        self.replace(start..end, &output);
-    }
-    pub fn indent(&mut self, outdent: bool) {
-        let range = self.selection();
-        if range.is_empty() {
-            let start = self.text.line_to_char(self.text.char_to_line(self.cursor));
-            let spaces = self
-                .text
-                .slice(start..(start + 4).min(self.text.len_chars()))
-                .chars()
-                .take_while(|c| *c == ' ')
-                .count();
-            if outdent {
-                let remove = if start < self.text.len_chars() && self.text.char(start) == '\t' {
-                    1
-                } else {
-                    spaces
-                };
-                self.replace(start..start + remove, "");
-                self.select(range.start.saturating_sub(remove).max(start), false);
-            } else {
-                self.replace(start..start, "    ");
-                self.select(range.start + 4, false);
-            }
-            if let Some(edit) = self.undo.last_mut() {
-                edit.after = (self.cursor, self.anchor);
-            }
-            return;
-        }
-        let first = self.text.char_to_line(range.start);
-        let last = self.text.char_to_line(range.end);
-        let start = self.text.line_to_char(first);
-        let end = if last + 1 < self.text.len_lines() {
-            self.text.line_to_char(last + 1)
-        } else {
-            self.text.len_chars()
-        };
-        let source = self.text.slice(start..end).to_string();
-        let output: String = source
-            .split_inclusive('\n')
-            .map(|line| {
-                if outdent {
-                    if let Some(rest) = line.strip_prefix('\t') {
-                        rest.to_owned()
-                    } else {
-                        let n = line.bytes().take(4).take_while(|c| *c == b' ').count();
-                        line[n..].to_owned()
-                    }
-                } else {
-                    format!("    {line}")
-                }
-            })
-            .collect();
-        self.replace(start..end, &output);
-        if range.is_empty() {
-            self.select(
-                (range.start as isize
-                    + if outdent {
-                        output.len() as isize - source.len() as isize
-                    } else {
-                        4
-                    })
-                .max(start as isize) as usize,
-                false,
-            );
-        } else {
-            self.anchor = start;
-        }
         if let Some(edit) = self.undo.last_mut() {
             edit.after = (self.cursor, self.anchor);
         }
@@ -440,23 +371,99 @@ pub fn word_count(text: ropey::RopeSlice) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn typed(doc: &mut Document, text: &str) {
+        for c in text.chars() {
+            doc.type_text(&c.to_string(), None);
+        }
+    }
     #[test]
     fn edits_keep_unicode_and_original_endings() {
-        let mut doc = Document::new(Rope::from_str("- café\r\n日本語"));
-        doc.select(6, false);
+        let mut doc = Document::new(Rope::from_str("café\r\n日本語"));
+        doc.select(4, false);
         doc.enter();
-        doc.type_text("한글");
-        assert_eq!(doc.text.to_string(), "- café\r\n- 한글\r\n日本語");
+        doc.type_text("한글", None);
+        assert_eq!(doc.text.to_string(), "café\r\n한글\r\n日本語");
         doc.undo();
         doc.undo();
-        assert_eq!(doc.text.to_string(), "- café\r\n日本語");
+        assert_eq!(doc.text.to_string(), "café\r\n日本語");
         doc.redo();
         doc.redo();
         assert!(doc.text.to_string().contains("한글"));
+        // No bracket pairing in prose.
         doc.select(doc.text.len_chars(), false);
-        doc.type_text("(");
-        doc.type_text(")");
-        assert!(doc.text.to_string().ends_with("日本語()"));
+        doc.type_text("(", None);
+        assert!(doc.text.to_string().ends_with("日本語("));
+    }
+    #[test]
+    fn typing_is_undone_a_word_at_a_time_and_backspacing_in_one_step() {
+        let mut doc = Document::new(Rope::new());
+        typed(&mut doc, "hello world");
+        assert_eq!(doc.text.to_string(), "hello world");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "hello ");
+        doc.redo();
+        assert_eq!(doc.text.to_string(), "hello world");
+        doc.undo();
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "");
+        typed(&mut doc, "abcdef");
+        for _ in 0..3 {
+            doc.delete(true);
+        }
+        assert_eq!(doc.text.to_string(), "abc");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "abcdef");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "");
+        assert!(!doc.dirty());
+    }
+    #[test]
+    fn smart_typography_rewrites_what_is_typed() {
+        let options = Typography::default();
+        let mut doc = Document::new(Rope::new());
+        for c in "He said \"hi\"... wait--it's \"fine\".".chars() {
+            doc.type_text(&c.to_string(), Some((&options, Language::English)));
+        }
+        assert_eq!(doc.text.to_string(), "He said “hi”… wait—it’s “fine”.");
+        // Undo takes back the rewritten character, not the straight one.
+        doc.undo();
+        assert!(doc.text.to_string().len() < 40);
+        let mut es = Document::new(Rope::new());
+        for c in "-Hola -dijo--. \"Adiós\"".chars() {
+            es.type_text(&c.to_string(), Some((&options, Language::Spanish)));
+        }
+        assert_eq!(es.text.to_string(), "—Hola —dijo—. «Adiós»");
+    }
+    #[test]
+    fn emphasis_toggles_on_selections_words_and_existing_marks() {
+        let mut doc = Document::new(Rope::from_str("one two three"));
+        doc.anchor = 4;
+        doc.cursor = 7;
+        doc.toggle_emphasis("*");
+        assert_eq!(doc.text.to_string(), "one *two* three");
+        assert_eq!(doc.selection(), 5..8);
+        doc.toggle_emphasis("**");
+        assert_eq!(doc.text.to_string(), "one ***two*** three");
+        doc.toggle_emphasis("*");
+        assert_eq!(doc.text.to_string(), "one **two** three");
+        doc.toggle_emphasis("**");
+        assert_eq!(doc.text.to_string(), "one two three");
+        // No selection: the word at the caret.
+        doc.select(9, false);
+        assert_eq!((doc.anchor, doc.cursor), (9, 9));
+        doc.toggle_emphasis("*");
+        assert_eq!(doc.text.to_string(), "one two *three*");
+        // Selecting the marks too also takes them off.
+        doc.anchor = 8;
+        doc.cursor = 15;
+        doc.toggle_emphasis("*");
+        assert_eq!(doc.text.to_string(), "one two three");
+        // Nothing near the caret: an empty pair with the caret inside.
+        doc.select(7, false);
+        doc.insert(" ");
+        doc.toggle_emphasis("*");
+        assert_eq!(doc.text.to_string(), "one two ** three");
+        assert_eq!(doc.cursor, 9);
     }
     #[test]
     fn deleted_selection_is_logged_without_flattening_the_file() {
@@ -468,6 +475,26 @@ mod tests {
         doc.undo();
         assert_eq!(doc.text.to_string(), "αβγ\r\nδ");
         assert_eq!(doc.selection(), 1..5);
+    }
+    #[test]
+    fn edits_are_recorded_for_anchors() {
+        let mut doc = Document::new(Rope::from_str("hello"));
+        doc.select(5, false);
+        doc.insert("!!");
+        doc.anchor = 0;
+        doc.cursor = 2;
+        doc.insert("");
+        doc.undo();
+        let edits = doc.take_edits();
+        assert_eq!(
+            edits,
+            [
+                EditRec { start: 5, removed: 0, inserted: 2 },
+                EditRec { start: 0, removed: 2, inserted: 0 },
+                EditRec { start: 0, removed: 0, inserted: 2 },
+            ]
+        );
+        assert!(doc.take_edits().is_empty());
     }
     #[test]
     fn saved_state_survives_undo_redo_branching_and_delayed_saves() {

@@ -2,16 +2,17 @@ use crate::{
     core::{
         buffer::Document,
         config::Settings,
-        markdown::{self, BlockIndex, Presentation, RowKind, Style},
+        notes::{self, Delim, Kind as NoteKind, Marker},
+        prose::{self, BlockIndex, Initial, Presentation, Style},
     },
     render::{self, Rect, Renderer},
 };
 use cosmic_text::{
-    Attrs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, Weight, Wrap,
+    Align, Attrs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, Weight, Wrap,
 };
 use std::collections::VecDeque;
 
-const CHUNK: usize = 512;
+const CHUNK: usize = 1024;
 pub struct Tile {
     pub start: usize,
     pub y: f32,
@@ -20,9 +21,8 @@ pub struct Tile {
     pub buffer: Buffer,
     source: String,
     raw: bool,
-    code: bool,
-    /// Row kind and column widths this tile was asked to draw as a table.
-    table: Option<(RowKind, Vec<usize>)>,
+    initial: Initial,
+    hide: bool,
     width: f32,
     size: f32,
     line_bytes: Vec<usize>,
@@ -48,25 +48,34 @@ impl Tile {
             .map(|(x, y)| (x, self.y + y))
     }
 }
-/// The table (or run of pipe lines that is not one) around the last line asked about.
-struct TableScan {
-    revision: u64,
-    rows: std::ops::Range<usize>,
-    /// Header line, delimiter line and column widths.
-    found: Option<(usize, usize, Vec<usize>)>,
+
+/// A range of the text drawn with a tint behind it: a review comment, say.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Mark {
+    pub start: usize,
+    pub end: usize,
+    pub orphaned: bool,
+    pub active: bool,
 }
+
 #[derive(Default)]
 pub struct EditorView {
     pub top: usize,
     pub tiles: Vec<Tile>,
     pub rect: Option<Rect>,
     cache: VecDeque<Tile>,
-    table: Option<TableScan>,
     desired_x: Option<i32>,
     palette: render::theme::Palette,
     history: Vec<usize>,
     /// Sorted char ranges to tint, e.g. every match of the find bar.
     pub highlights: Vec<(usize, usize)>,
+    /// Review comments, sorted by start.
+    pub marks: Vec<Mark>,
+    /// Ranges of misspelled words, sorted.
+    pub misspelled: Vec<(usize, usize)>,
+    pub marker: Marker,
+    /// Shown for scene-break lines.
+    pub scene_symbol: String,
 }
 fn blend(a: u32, b: u32, t: f32) -> u32 {
     let channel = |s: u32| {
@@ -76,47 +85,25 @@ fn blend(a: u32, b: u32, t: f32) -> u32 {
 }
 fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
     let palette = render::theme::Palette::new(settings.light(), settings.accent_color());
-    let color = render::theme::color(if style.dim {
+    let color = render::theme::color(if style.note {
+        let base = settings.note_colour().unwrap_or(palette.muted);
+        if style.dim { blend(base, palette.background, 0.4) } else { base }
+    } else if style.dim || style.scene {
         palette.muted
-    } else if style.link {
-        palette.accent
     } else {
         palette.text
     });
+    let italic = style.italic || (style.note && settings.note_italic);
     Attrs::new()
-        .family(Family::Name(if style.code || style.mono {
-            &settings.code_font
-        } else {
-            &settings.editor_font
-        }))
-        .weight(if style.bold {
-            Weight::BOLD
-        } else {
-            Weight::NORMAL
-        })
-        .style(if style.italic {
-            cosmic_text::Style::Italic
-        } else {
-            cosmic_text::Style::Normal
-        })
+        .family(Family::Name(&settings.editor_font))
+        .weight(if style.bold { Weight::BOLD } else { Weight::NORMAL })
+        .style(if italic { cosmic_text::Style::Italic } else { cosmic_text::Style::Normal })
         .color(color)
-        .metadata(
-            usize::from(style.code)
-                | usize::from(style.strike) << 1
-                | usize::from(style.link) << 2
-                | usize::from(style.border) << 3,
-        )
-        .metrics(Metrics::new(
-            if style.heading > 0 {
-                size * (1.5 - style.heading as f32 * 0.06)
-            } else {
-                size
-            },
-            size * 1.65,
-        ))
+        .metadata(usize::from(style.misspelled))
+        .metrics(Metrics::new(size, size * settings.line_height))
 }
 fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
-    let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * 1.65));
+    let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * settings.line_height));
     buffer.set_size(Some(width), None);
     buffer.set_wrap(wrap);
     buffer.set_rich_text(
@@ -130,60 +117,22 @@ fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fo
         Shaping::Advanced,
         None,
     );
+    if preview.center {
+        for line in &mut buffer.lines {
+            line.set_align(Some(Align::Center));
+        }
+    }
     buffer.shape_until_scroll(fonts, false);
     buffer
 }
 impl EditorView {
-    /// How `line` should be drawn if it belongs to a pipe table: its role and the column widths.
-    fn table_row(
-        &mut self,
-        doc: &Document,
-        blocks: &BlockIndex,
-        line: usize,
-    ) -> Option<(RowKind, Vec<usize>)> {
-        let fresh = self
-            .table
-            .as_ref()
-            .is_some_and(|t| t.revision == doc.revision && t.rows.contains(&line));
-        if !fresh {
-            let pipes = |l: usize| {
-                let text = doc.text.line(l);
-                (text.len_chars() <= CHUNK && !blocks.in_code(l))
-                    .then(|| text.to_string())
-                    .filter(|s| s.contains('|'))
-            };
-            pipes(line)?;
-            // ponytail: tables longer than 300 rows either side of the line get widths from a window.
-            let mut first = line;
-            while first > 0 && line - first < 300 && pipes(first - 1).is_some() {
-                first -= 1;
-            }
-            let mut last = line;
-            while last + 1 < doc.text.len_lines() && last - line < 300 && pipes(last + 1).is_some() {
-                last += 1;
-            }
-            let lines: Vec<String> = (first..=last).map(|l| pipes(l).unwrap_or_default()).collect();
-            let found = lines
-                .iter()
-                .position(|l| markdown::is_delimiter(l))
-                .filter(|&d| d > 0)
-                .map(|d| {
-                    let rows = lines.iter().enumerate();
-                    let rows = rows.filter(|&(i, _)| i + 1 >= d && i != d).map(|(_, l)| l.as_str());
-                    (first + d - 1, first + d, markdown::column_widths(rows))
-                });
-            self.table = Some(TableScan { revision: doc.revision, rows: first..last + 1, found });
+    pub fn configure(&mut self, settings: &Settings, scene_symbol: &str) {
+        let marker = settings.marker();
+        if marker != self.marker || scene_symbol != self.scene_symbol {
+            self.marker = marker;
+            self.scene_symbol = scene_symbol.to_owned();
+            self.clear_cache();
         }
-        let scan = self.table.as_ref()?;
-        let (header, delimiter, widths) = scan.found.as_ref()?;
-        let kind = match line {
-            l if l < *header => return None,
-            l if l == *header => RowKind::Header,
-            l if l == *delimiter => RowKind::Delimiter,
-            l if l + 1 == scan.rows.end => RowKind::Last,
-            _ => RowKind::Body,
-        };
-        Some((kind, widths.clone()))
     }
     pub fn clear_cache(&mut self) {
         self.tiles.clear();
@@ -197,13 +146,14 @@ impl EditorView {
         fonts: &mut FontSystem,
         rect: Rect,
     ) {
-        self.palette =
-            render::theme::Palette::new(settings.light(), settings.accent_color());
+        self.palette = render::theme::Palette::new(settings.light(), settings.accent_color());
         self.rect = Some(rect);
         self.cache.extend(self.tiles.drain(..));
         let cursor_line = doc.text.char_to_line(doc.cursor);
         let mut start = self.top.min(doc.text.len_chars());
         let mut y = 0.0;
+        let line_height = settings.font_size * settings.line_height;
+        let gap = settings.font_size * settings.paragraph_gap;
         while y < rect.height as f32 + settings.font_size * 2.0 {
             let line = doc.text.char_to_line(start);
             let line_start = doc.text.line_to_char(line);
@@ -213,6 +163,17 @@ impl EditorView {
                 doc.text.len_chars()
             };
             let mut end = (start + CHUNK).min(line_end);
+            // Long lines are cut after a space, so words are not split between chunks.
+            if end < line_end {
+                let floor = end.saturating_sub(80).max(start + 1);
+                let mut at = end;
+                while at > floor && doc.text.char(at - 1) != ' ' {
+                    at -= 1;
+                }
+                if at > floor {
+                    end = at;
+                }
+            }
             // Don't split a CRLF pair between virtual chunks.
             if end > start
                 && end < doc.text.len_chars()
@@ -223,91 +184,60 @@ impl EditorView {
             }
             let source = doc.text.slice(start..end).to_string();
             let raw = settings.show_markers || line == cursor_line;
-            let code = blocks.in_code(line)
-                || (start > line_start
-                    && doc
-                        .text
-                        .slice(line_start..(line_start + 3).min(line_end))
-                        .to_string()
-                        .starts_with("```"));
-            let width = rect.width as f32;
-            let row = if !raw && !code && start == line_start && end == line_end {
-                self.table_row(doc, blocks, line)
-            } else {
-                None
+            let initial = Initial {
+                in_block: blocks.in_block(line),
+                in_line_note: start > line_start && self.line_note_before(doc, line_start, start),
             };
+            let width = rect.width as f32;
+            let hide = settings.hide_notes;
             let cached = self.cache.iter().position(|tile| {
                 tile.source == source
                     && tile.raw == raw
-                    && tile.code == code
-                    && tile.table == row
+                    && tile.initial == initial
+                    && tile.hide == hide
                     && tile.width == width
                     && tile.size == settings.font_size
             });
             let mut tile = if let Some(index) = cached {
                 self.cache.remove(index).unwrap()
             } else {
-                let flowing = |fonts: &mut FontSystem| {
-                    let preview = markdown::present(
-                        &source,
-                        0,
-                        if raw { Some(0) } else { None },
-                        settings.show_markers,
-                        code,
-                    );
-                    let buffer = shape(&preview, Wrap::WordOrGlyph, width, settings, fonts);
-                    (preview, buffer)
+                let options = prose::Options {
+                    marker: &self.marker,
+                    show_markers: settings.show_markers,
+                    hide_notes: hide,
+                    scene_symbol: &self.scene_symbol,
                 };
-                // A table wider than the pane would wrap into a mess, so it stays plain source.
-                let (preview, buffer) = match &row {
-                    Some((kind, widths)) => {
-                        let grid = markdown::present_table_row(&source, 0, *kind, widths);
-                        let buffer = shape(&grid, Wrap::None, width, settings, fonts);
-                        let widest = buffer.layout_runs().map(|run| run.line_w).fold(0., f32::max);
-                        if widest <= width { (grid, buffer) } else { flowing(fonts) }
-                    }
-                    None => flowing(fonts),
-                };
+                let preview = prose::present(&source, 0, if raw { Some(0) } else { None }, initial, options);
+                let buffer = shape(&preview, Wrap::WordOrGlyph, width, settings, fonts);
                 let height = buffer
                     .layout_runs()
                     .map(|run| run.line_top + run.line_height)
                     .last()
-                    .unwrap_or(settings.font_size * 1.65);
+                    .unwrap_or(line_height);
                 let mut line_bytes = vec![0];
                 for (b, c) in preview.text.char_indices() {
                     if c == '\n' {
                         line_bytes.push(b + 1);
                     }
                 }
-                Tile {
-                    start,
-                    y,
-                    height,
-                    preview,
-                    buffer,
-                    source,
-                    raw,
-                    code,
-                    table: row,
-                    width,
-                    size: settings.font_size,
-                    line_bytes,
-                }
+                Tile { start, y, height, preview, buffer, source, raw, initial, hide, width, size: settings.font_size, line_bytes }
             };
             tile.start = start;
             tile.y = y;
             // A terminating newline belongs to the next tile, not an extra blank layout row.
             let height = if tile.source.ends_with('\n') && tile.buffer.lines.len() > 1 {
-                tile.height - settings.font_size * 1.65
+                tile.height - line_height
             } else {
                 tile.height
             };
-            if tile.preview.row == Some(RowKind::Delimiter) {
-                // The header rule takes a sliver, not a blank line.
-                tile.height = 3.;
-                y += 3.;
+            if tile.preview.hidden {
+                // A hidden note takes no room.
+                tile.height = 0.;
             } else {
-                y += height.max(settings.font_size * 1.65);
+                y += height.max(line_height);
+                if tile.source.ends_with('\n') {
+                    y += gap;
+                }
             }
             self.tiles.push(tile);
             if end == doc.text.len_chars() {
@@ -332,86 +262,34 @@ impl EditorView {
             }
         }
     }
+    /// Whether the line starting at `line_start` has already opened a note that runs to its end
+    /// by `at`; only the first 512 characters of the line are inspected.
+    fn line_note_before(&self, doc: &Document, line_start: usize, at: usize) -> bool {
+        let prefix: String = doc.text.slice(line_start..at.min(line_start + 512)).chars().collect();
+        notes::scan_line(&prefix, &self.marker, false)
+            .segs
+            .iter()
+            .any(|s| matches!(s.kind, NoteKind::Delim(Delim::Line | Delim::Open)))
+    }
     pub fn paint(&mut self, doc: &Document, fonts: &mut FontSystem, renderer: &mut impl Renderer) {
         let Some(rect) = self.rect else {
             return;
         };
-        renderer.fill(
-            Rect {
-                x: rect.x - 8,
-                width: rect.width + 8,
-                ..rect
-            },
-            self.palette.background,
-        );
+        renderer.fill(Rect { x: rect.x - 8, width: rect.width + 8, ..rect }, self.palette.background);
         let selection = doc.selection();
+        let comment_tint = blend(self.palette.background, 0xe2b93b, if self.palette.light { 0.40 } else { 0.30 });
+        let comment_active = blend(self.palette.background, 0xe2b93b, if self.palette.light { 0.65 } else { 0.55 });
+        let orphan_tint = blend(self.palette.background, 0x9a8f86, 0.35);
         for tile in &mut self.tiles {
-            if tile.code {
-                renderer.fill(
-                    Rect {
-                        x: rect.x,
-                        y: rect.y + tile.y as i32,
-                        width: rect.width,
-                        height: tile.height.ceil() as u32,
-                    }
-                    .intersect(rect),
-                    self.palette.code,
-                );
+            if tile.preview.hidden {
+                continue;
             }
-            if tile.preview.quote {
-                renderer.fill(
-                    Rect {
-                        x: rect.x - 8,
-                        y: rect.y + tile.y as i32,
-                        width: 3,
-                        height: tile.height.ceil() as u32,
-                    }
-                    .intersect(Rect {
-                        x: rect.x - 8,
-                        width: rect.width + 8,
-                        ..rect
-                    }),
-                    self.palette.accent,
-                );
-            }
-            if !tile.preview.rules.is_empty() && !tile.raw {
-                renderer.fill(
-                    Rect {
-                        x: rect.x,
-                        y: rect.y + tile.y as i32 + (tile.size * 0.75) as i32,
-                        width: rect.width,
-                        height: 1,
-                    }
-                    .intersect(rect),
-                    self.palette.muted,
-                );
-            }
-            let delimiter = tile.preview.row == Some(RowKind::Delimiter);
-            let mut edges: Option<(f32, f32)> = None;
             for run in tile.buffer.layout_runs() {
                 let y = rect.y + (tile.y + run.line_top) as i32;
                 if y >= rect.y + rect.height as i32 {
                     break;
                 }
                 for glyph in run.glyphs {
-                    if glyph.metadata & 8 != 0 {
-                        let x = glyph.x + glyph.w / 2.;
-                        edges = Some(edges.map_or((x, x), |(a, b)| (a.min(x), b.max(x))));
-                        renderer.fill(
-                            Rect {
-                                x: rect.x + x as i32,
-                                y: rect.y + tile.y as i32,
-                                width: 1,
-                                height: tile.height.ceil() as u32,
-                            }
-                            .intersect(rect),
-                            self.palette.muted,
-                        );
-                        continue;
-                    }
-                    if delimiter {
-                        continue;
-                    }
                     let byte = tile.line_bytes[run.line_i] + glyph.start;
                     let source = tile.start + tile.preview.source_at(byte);
                     let color = if selection.contains(&source) {
@@ -421,10 +299,13 @@ impl EditorView {
                         at > 0 && source < self.highlights[at - 1].1
                     } {
                         Some(blend(self.palette.background, self.palette.accent, 0.38))
-                    } else if glyph.metadata & 1 != 0 {
-                        Some(self.palette.code)
                     } else {
-                        None
+                        let at = self.marks.partition_point(|m| m.start <= source);
+                        self.marks[at.saturating_sub(8)..at]
+                            .iter()
+                            .rev()
+                            .find(|m| source < m.end && !m.orphaned)
+                            .map(|m| if m.active { comment_active } else { comment_tint })
                     };
                     if let Some(color) = color {
                         renderer.fill(
@@ -438,72 +319,29 @@ impl EditorView {
                             color,
                         );
                     }
-                    if glyph.metadata & 2 != 0 {
-                        renderer.fill(
-                            Rect {
-                                x: rect.x + glyph.x as i32,
-                                y: y + (run.line_height * 0.5) as i32,
-                                width: glyph.w.ceil() as u32,
-                                height: 1,
-                            }
-                            .intersect(rect),
-                            self.palette.muted,
-                        );
-                    }
-                    if glyph.metadata & 4 != 0 {
-                        renderer.fill(
-                            Rect {
-                                x: rect.x + glyph.x as i32,
-                                y: y + (run.line_height * 0.85) as i32,
-                                width: glyph.w.ceil() as u32,
-                                height: 1,
-                            }
-                            .intersect(rect),
-                            self.palette.accent,
-                        );
-                    }
-                }
-            }
-            if let (Some(kind), Some((left, right))) = (tile.preview.row, edges) {
-                let bottom = tile.y + tile.height.ceil() - 1.;
-                let lines = match kind {
-                    RowKind::Header => [tile.y, tile.y],
-                    RowKind::Delimiter => [tile.y, bottom],
-                    _ => [bottom, bottom],
-                };
-                for y in lines {
-                    renderer.fill(
-                        Rect {
-                            x: rect.x + left as i32,
-                            y: rect.y + y as i32,
-                            width: (right - left) as u32 + 1,
-                            height: 1,
+                    if glyph.metadata & 1 != 0 {
+                        // A dotted red underline for a possible spelling mistake.
+                        let base = y + (run.line_height * 0.9) as i32;
+                        let mut dx = 0;
+                        while (dx as f32) < glyph.w {
+                            renderer.fill(
+                                Rect { x: rect.x + glyph.x as i32 + dx, y: base + (dx / 2 % 2), width: 1, height: 1 }.intersect(rect),
+                                0xd0605e,
+                            );
+                            dx += 2;
                         }
-                        .intersect(rect),
-                        self.palette.muted,
-                    );
+                    }
                 }
             }
-            renderer.text(
-                fonts,
-                &mut tile.buffer,
-                rect.x,
-                rect.y + tile.y as i32,
-                rect,
-            );
+            let _ = orphan_tint;
+            renderer.text(fonts, &mut tile.buffer, rect.x, rect.y + tile.y as i32, rect);
             if doc.cursor >= tile.start && doc.cursor <= tile.start + tile.preview.end {
                 let cursor = tile.display_cursor(doc.cursor);
                 if let Some((x, y)) = tile.buffer.cursor_position(&cursor) {
                     let y = rect.y + tile.y as i32 + y as i32;
                     if y < rect.y + rect.height as i32 {
                         renderer.fill(
-                            Rect {
-                                x: rect.x + x as i32,
-                                y,
-                                width: 2,
-                                height: tile.size.ceil() as u32 + 5,
-                            }
-                            .intersect(rect),
+                            Rect { x: rect.x + x as i32, y, width: 2, height: tile.size.ceil() as u32 + 5 }.intersect(rect),
                             self.palette.accent,
                         );
                     }
@@ -522,18 +360,6 @@ impl EditorView {
         tile.buffer
             .hit(x - rect.x as f32, local_y - tile.y)
             .map(|cursor| tile.source_cursor(cursor))
-    }
-    pub fn checkbox_at(&self, x: f32, y: f32) -> Option<(usize, bool)> {
-        let source = self.hit(x, y)?;
-        for tile in &self.tiles {
-            for (_, index, checked) in &tile.preview.tasks {
-                if (tile.start + index.saturating_sub(1)..=tile.start + index + 1).contains(&source)
-                {
-                    return Some((tile.start + index, *checked));
-                }
-            }
-        }
-        None
     }
     pub fn motion(
         &mut self,
@@ -555,7 +381,7 @@ impl EditorView {
                 .find(|t| doc.cursor >= t.start && doc.cursor <= t.start + t.preview.end)
                 .and_then(|t| t.caret(doc.cursor));
             if let Some((x, y)) = position {
-                let step = settings.font_size * 1.65;
+                let step = settings.font_size * settings.line_height;
                 let target_y = y + if down { step * 1.5 } else { -step * 0.5 };
                 self.desired_x = Some(self.desired_x.unwrap_or(x as i32));
                 if target_y >= 0. && target_y < rect.height as f32 {
@@ -647,60 +473,60 @@ mod tests {
     thread_local! {
         static FONTS: std::cell::RefCell<FontSystem> = std::cell::RefCell::new(FontSystem::new());
     }
-    fn kinds(text: &str, cursor: usize, width: u32, markers: bool) -> Vec<Option<RowKind>> {
+    fn view(text: &str, cursor: usize, width: u32, edit: impl FnOnce(&mut Settings)) -> (EditorView, Document) {
         let mut doc = Document::new(Rope::from_str(text));
         doc.select(cursor.min(doc.text.len_chars()), false);
         let mut blocks = BlockIndex::default();
-        blocks.update(&doc.text, 0);
+        let marker = Marker::default();
+        blocks.update(&doc.text, 0, &marker);
         let mut settings = Settings::default();
-        settings.show_markers = markers;
+        edit(&mut settings);
         let mut view = EditorView::default();
+        view.configure(&settings, "* * *");
         let rect = Rect { x: 0, y: 0, width, height: 4000 };
         FONTS.with(|fonts| view.layout(&doc, &blocks, &settings, &mut fonts.borrow_mut(), rect));
-        // Painting and hit-testing every tile must not panic either.
-        view.hit(10., 10.);
-        view.tiles.iter().map(|t| t.preview.row).collect()
+        (view, doc)
     }
-    #[test]
-    fn tables_get_header_rule_body_and_last_rows() {
-        use RowKind::*;
-        let table = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\nafter\n";
-        let cursor = table.len() - 2;
-        let expect = vec![None, None, Some(Header), Some(Delimiter), Some(Body), Some(Last), None, None];
-        assert_eq!(&kinds(table, cursor, 800, false)[..8], &expect[..]);
-        // The same table in a CRLF file, and with no newline at the very end.
-        let crlf = table.replace('\n', "\r\n");
-        assert_eq!(&kinds(&crlf, crlf.len() - 2, 800, false)[..8], &expect[..]);
-        let bare = "| a | b |\n|---|---|\n| 1 | 2 |";
-        assert_eq!(kinds(bare, bare.len(), 800, false), [Some(Header), Some(Delimiter), None]);
-        assert_eq!(kinds(bare, 0, 800, false), [None, Some(Delimiter), Some(Last)]);
+    fn shown(view: &EditorView) -> String {
+        view.tiles.iter().map(|t| t.preview.text.clone()).collect()
     }
+
     #[test]
-    fn tables_fall_back_to_source_when_they_cannot_be_drawn() {
-        let table = "| a | b |\n|---|---|\n| 1 | 2 |\n\nx";
-        let source = table.len() - 1;
-        // Too narrow, markers shown, or inside a code fence: plain source, never a grid.
-        assert!(kinds(table, source, 40, false).iter().all(Option::is_none));
-        assert!(kinds(table, source, 800, true).iter().all(Option::is_none));
-        let fenced = "```\n| a | b |\n|---|---|\n| 1 | 2 |\n```\nx";
-        assert!(kinds(fenced, fenced.len(), 800, false).iter().all(Option::is_none));
-        // A header with no delimiter row, or a delimiter with no header, is not a table.
-        assert!(kinds("a | b\nc | d\nx", 12, 800, false).iter().all(Option::is_none));
-        assert!(kinds("|---|---|\n| 1 | 2 |\nx", 19, 800, false).iter().all(Option::is_none));
+    fn markers_hide_off_the_cursor_line_and_notes_follow_the_settings() {
+        let text = "A *bold* start\nSecond $$ aside $$ line\n#\n$$ whole note\nEnd\n";
+        let (v, _) = view(text, 0, 800, |_| {});
+        let s = shown(&v);
+        assert!(s.contains("A *bold* start"), "cursor line shows its markers: {s}");
+        assert!(s.contains("Second aside line") && s.contains("* * *") && s.contains("whole note"), "{s}");
+        let (v, _) = view(text, 0, 800, |s| s.hide_notes = true);
+        let s = shown(&v);
+        assert!(s.contains("Second line") && !s.contains("whole note"), "{s}");
+        assert_eq!(v.tiles.iter().filter(|t| t.height == 0.0).count(), 1, "the note-only line takes no room");
+        let (v, _) = view(text, 0, 800, |s| s.show_markers = true);
+        assert!(shown(&v).contains("$$ whole note") && shown(&v).contains("#"));
     }
+
     #[test]
-    fn long_tables_and_every_cursor_position_lay_out() {
-        let mut big = String::from("| name | n |\n|---|---|\n");
-        for i in 0..700 {
-            big.push_str(&format!("| row {i} | {i} |\n"));
+    fn every_cursor_position_lays_out_and_hit_tests() {
+        let text = "Ünï *cödé* 日本語 $$ x\n\n$$$\nblock\n$$$\n***\n";
+        for cursor in 0..=text.chars().count() {
+            let (v, _) = view(text, cursor, 300, |_| {});
+            v.hit(10., 10.);
+            assert!(!v.tiles.is_empty());
         }
-        for cursor in [0, 30, big.len() / 2, big.len() - 1] {
-            let k = kinds(&big, cursor, 800, false);
-            assert!(k.len() > 10);
+    }
+
+    #[test]
+    fn long_paragraphs_are_cut_at_spaces_and_still_cover_the_text() {
+        let words = "lorem ipsum dolor sit amet ".repeat(400);
+        let (v, doc) = view(&words, 0, 600, |_| {});
+        assert!(v.tiles.len() > 1);
+        for pair in v.tiles.windows(2) {
+            assert_eq!(pair[0].start + pair[0].preview.end, pair[1].start);
         }
-        let small = "| é | 漢 |\r\n|:-:|--:|\r\n| `x` | **y** |\r\n\r\n|\r\n||\r\n|||\r\n";
-        for cursor in 0..=small.chars().count() {
-            kinds(small, cursor, 300, false);
+        for t in &v.tiles[..v.tiles.len() - 1] {
+            assert!(t.source.ends_with(' '), "{:?}", &t.source[t.source.len().saturating_sub(10)..]);
         }
+        assert!(doc.text.len_chars() > 10_000);
     }
 }

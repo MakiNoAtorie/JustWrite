@@ -5,7 +5,6 @@ use crate::ui::{
     layout::Divider,
     menu::{self, EDITOR_MENU, MENUS, Popup, TAB_MENU, TREE_MENU},
 };
-use crate::core::markdown::Format;
 use cosmic_text::{Style as FontStyle, Weight};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -32,7 +31,7 @@ pub(super) const ACCENTS: [u32; 8] = [
     0xd9aa72, 0xe8864a, 0xd9534f, 0xd96aa0, 0x9b7ed8, 0x5b9bd5, 0x4fb3a5, 0x7fb069,
 ];
 
-fn mix(a: u32, b: u32, t: f32) -> u32 {
+pub(super) fn mix(a: u32, b: u32, t: f32) -> u32 {
     let channel = |shift: u32| {
         let (a, b) = (((a >> shift) & 255) as f32, ((b >> shift) & 255) as f32);
         (a * (1. - t) + b * t).round() as u32
@@ -40,7 +39,7 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
     channel(16) << 16 | channel(8) << 8 | channel(0)
 }
 /// Readable text colour on top of a solid fill.
-fn on_color(fill: u32) -> u32 {
+pub(super) fn on_color(fill: u32) -> u32 {
     let luma = 0.299 * ((fill >> 16) & 255) as f32
         + 0.587 * ((fill >> 8) & 255) as f32
         + 0.114 * (fill & 255) as f32;
@@ -48,14 +47,53 @@ fn on_color(fill: u32) -> u32 {
 }
 
 /// Selected-row fill: the raised surface washed with the accent.
-fn selected_fill(base: u32, p: Palette) -> u32 {
+pub(super) fn selected_fill(base: u32, p: Palette) -> u32 {
     mix(base, p.accent, if p.light { 0.3 } else { 0.24 })
 }
-fn hovered(base: u32, p: Palette) -> u32 {
+pub(super) fn hovered(base: u32, p: Palette) -> u32 {
     mix(base, p.text, if p.light { 0.07 } else { 0.09 })
 }
 
+struct TreeRow {
+    id: String,
+    title: String,
+    depth: usize,
+    part: bool,
+    words: u32,
+    open: usize,
+    heading: Option<(&'static str, manifest::Section)>,
+    collapsed: bool,
+}
+
 impl App {
+    /// The project tree as one flat list: section headings, parts and their chapters, then pages.
+    fn tree_rows(&self) -> Vec<TreeRow> {
+        let mut rows: Vec<TreeRow> = Vec::new();
+        let Some(state) = &self.project else { return rows };
+        fn walk(nodes: &[manifest::Node], depth: usize, state: &ProjectState, out: &mut Vec<TreeRow>) {
+            for node in nodes {
+                let collapsed = state.collapsed.contains(node.id());
+                out.push(TreeRow {
+                    id: node.id().to_owned(),
+                    title: node.title().to_owned(),
+                    depth,
+                    part: node.is_part(),
+                    words: node.words(),
+                    open: state.comments.count_open(node.id()),
+                    heading: None,
+                    collapsed,
+                });
+                if node.is_part() && !collapsed {
+                    walk(node.children(), depth + 1, state, out);
+                }
+            }
+        }
+        for (section, label) in [(manifest::Section::Manuscript, "MANUSCRIPT"), (manifest::Section::Notes, "NOTES & RESEARCH")] {
+            rows.push(TreeRow { id: String::new(), title: String::new(), depth: 0, part: false, words: 0, open: 0, heading: Some((label, section)), collapsed: false });
+            walk(state.core.manifest.tree.section(section), 0, state, &mut rows);
+        }
+        rows
+    }
     /// Soft drop shadow built from stacked translucent layers.
     pub(super) fn soft_shadow(&mut self, rect: Rect) {
         let spread = self.s(1.5).max(1);
@@ -226,20 +264,56 @@ impl App {
     pub(super) fn checked(&self, command: Command) -> bool {
         match command {
             Command::ToggleTree => self.show_tree,
-            Command::ToggleOutline => self.show_outline,
+            Command::TogglePanel => self.show_outline,
             Command::ToggleMarkers => self.settings.show_markers,
+            Command::HideNotes => self.settings.hide_notes,
             Command::Focus => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             _ => false,
         }
     }
     pub(super) fn enabled(&self, command: Command) -> bool {
         let tab = self.active_id().and_then(|id| self.tabs.get(&id));
+        let project = self.project.is_some();
+        let selection = tab.is_some_and(|t| !t.document.selection().is_empty());
         match command {
-            Command::Reload => tab.is_some_and(|t| t.external.is_some()),
-            Command::Reopen => !self.closed.is_empty(),
-            Command::RenameFile | Command::DeleteFile => self.target_path().is_some(),
-            Command::Cut | Command::Copy => tab.is_some_and(|t| !t.document.selection().is_empty()),
-            Command::GotoLine | Command::WordCount => tab.is_some(),
+            Command::Reopen => !self.closed.is_empty() && project,
+            Command::Cut | Command::Copy => selection && project,
+            Command::AddComment => selection && project,
+            Command::Undo
+            | Command::Redo
+            | Command::SelectAll
+            | Command::Paste
+            | Command::Bold
+            | Command::Italic
+            | Command::ToggleNote
+            | Command::NoteParagraph
+            | Command::Find
+            | Command::Replace
+            | Command::JumpScene
+            | Command::GotoLine
+            | Command::WordCount
+            | Command::CloseTab => tab.is_some() && project,
+            Command::Rename | Command::Delete | Command::MoveUp | Command::MoveDown => project && self.selected_item().is_some(),
+            Command::NewChapter
+            | Command::NewPart
+            | Command::NewPage
+            | Command::Save
+            | Command::SaveAs
+            | Command::CloseProject
+            | Command::Snapshot
+            | Command::Export
+            | Command::Preview
+            | Command::BookDetails
+            | Command::ProjectSettings
+            | Command::ShowHistory
+            | Command::ShowComments
+            | Command::ProjectSearch
+            | Command::QuickOpen
+            | Command::NextTab
+            | Command::PreviousTab
+            | Command::SplitRight
+            | Command::SplitDown
+            | Command::CloseSplit => project,
             _ => true,
         }
     }
@@ -263,7 +337,6 @@ impl App {
             .find(|(rect, _)| contains(*rect, self.mouse.x, self.mouse.y))?;
         let command = match hit {
             Hit::Command(c) | Hit::Do(Act::Run(c)) => *c,
-            Hit::Do(Act::Heading) => return Some((*rect, "Heading level".into())),
             Hit::Do(Act::MatchStep(d)) => return Some((*rect, if *d > 0 { "Next match  ·  Enter" } else { "Previous match  ·  Shift+Enter" }.into())),
             Hit::Do(Act::Case) => return Some((*rect, "Match case".into())),
             _ => return None,
@@ -365,7 +438,7 @@ impl App {
         let (x, y) = (self.mouse.x as i32, self.mouse.y as i32);
         let items = match hit {
             Some(Hit::Tab(..)) => TAB_MENU,
-            Some(Hit::Tree(..)) => TREE_MENU,
+            Some(Hit::Node(_)) => TREE_MENU,
             None if !self.modal() => EDITOR_MENU,
             _ => return false,
         };
@@ -533,26 +606,21 @@ impl App {
             width: self.su(26.),
             height: header.saturating_sub(self.su(10.)),
         };
-        self.button("+", plus, Hit::Command(Command::New), Look::Plain, p);
+        self.button("+", plus, Hit::Command(Command::NewChapter), Look::Plain, p);
     }
-    fn paint_toolbar(&mut self, rect: Rect, format: Format, p: Palette) {
-        let heading = if format.heading > 0 { format!("Heading {} ▾", format.heading) } else { "Heading ▾".to_owned() };
+    fn paint_toolbar(&mut self, rect: Rect, format: prose::Format, p: Palette) {
         let mut x = rect.x + self.s(14.);
         let height = rect.height.saturating_sub(self.su(10.));
         let y = rect.y + self.s(5.);
-        let tools: [(&str, Face, Option<Hit>); 12] = [
-            (heading.as_str(), Face::Normal, Some(Hit::Do(Act::Heading))),
-            ("", Face::Normal, None),
+        let tools: [(&str, Face, Option<Hit>); 8] = [
             ("B", Face::Bold, Some(Hit::Command(Command::Bold))),
             ("I", Face::Italic, Some(Hit::Command(Command::Italic))),
-            ("S", Face::Normal, Some(Hit::Command(Command::Strike))),
             ("", Face::Normal, None),
-            ("• List", Face::Normal, Some(Hit::Command(Command::Bullet))),
-            ("1. List", Face::Normal, Some(Hit::Command(Command::Numbered))),
+            ("Note", Face::Normal, Some(Hit::Command(Command::ToggleNote))),
+            ("Comment", Face::Normal, Some(Hit::Command(Command::AddComment))),
             ("", Face::Normal, None),
-            ("</>", Face::Normal, Some(Hit::Command(Command::CodeBlock))),
-            ("Link", Face::Normal, Some(Hit::Command(Command::Link))),
             ("Find", Face::Normal, Some(Hit::Command(Command::Find))),
+            ("Scenes", Face::Normal, Some(Hit::Command(Command::JumpScene))),
         ];
         for (text, face, hit) in tools {
             let Some(hit) = hit else {
@@ -567,56 +635,24 @@ impl App {
             if x + width as i32 > rect.x + rect.width as i32 - self.s(8.) {
                 break;
             }
-            let strike = matches!(&hit, Hit::Command(Command::Strike));
             let on = match &hit {
-                Hit::Do(Act::Heading) => format.heading > 0,
                 Hit::Command(Command::Bold) => format.bold,
                 Hit::Command(Command::Italic) => format.italic,
-                Hit::Command(Command::Strike) => format.strike,
-                Hit::Command(Command::Bullet) => format.bullet,
-                Hit::Command(Command::Numbered) => format.numbered,
-                Hit::Command(Command::CodeBlock) => format.code,
+                Hit::Command(Command::ToggleNote) => format.note,
                 _ => false,
             };
+            let enabled = match &hit {
+                Hit::Command(c) => self.enabled(*c),
+                _ => true,
+            };
             let look = if on { Look::Active } else { Look::Plain };
-            self.button_face(text, Rect { x, y, width, height }, hit, look, face, Align::Center, p);
-            if strike {
-                let glyph = self.measure(text, 13. * self.scale, face).ceil() as u32;
-                let line = Rect { x: x + (width as i32 - glyph as i32) / 2 - 1, y: y + height as i32 / 2, width: glyph + 2, height: 1 };
-                self.renderer.fill(line, p.muted);
+            if enabled {
+                self.button_face(text, Rect { x, y, width, height }, hit, look, face, Align::Center, p);
+            } else {
+                self.put(text, Rect { x, y, width, height }, 13., mix(p.muted, p.surface, 0.5), face, Align::Center);
             }
             x += width as i32 + self.s(2.);
         }
-    }
-    fn paint_banner(&mut self, rect: Rect, name: &str, p: Palette) {
-        self.renderer.fill(rect, mix(p.accent, p.background, 0.75));
-        let button = self.su(150.);
-        let text = Rect { x: rect.x + self.s(14.), width: rect.width.saturating_sub(button * 2 + self.su(40.)), ..rect };
-        self.put(
-            &format!("{name} was changed outside this editor."),
-            text,
-            12.5,
-            p.text,
-            Face::Normal,
-            Align::Left,
-        );
-        let height = rect.height.saturating_sub(self.su(10.));
-        let y = rect.y + self.s(5.);
-        let right = rect.x + rect.width as i32 - self.s(10.);
-        self.button(
-            "Load disk version",
-            Rect { x: right - button as i32, y, width: button, height },
-            Hit::Command(Command::Reload),
-            Look::Outline,
-            p,
-        );
-        self.button(
-            "Keep my edits",
-            Rect { x: right - button as i32 * 2 - self.s(8.), y, width: button, height },
-            Hit::Command(Command::Save),
-            Look::Primary,
-            p,
-        );
     }
     pub(super) fn paint_pane(&mut self, pane_id: u64, rect: Rect, focus: bool, p: Palette) {
         let Some(pane) = self.split.pane(pane_id).cloned() else {
@@ -624,38 +660,24 @@ impl App {
         };
         let header = if focus { 0 } else { self.su(36.) };
         let toolbar = if focus { 0 } else { self.su(38.) };
-        let external = pane
-            .tab()
-            .and_then(|id| self.tabs.get(&id))
-            .filter(|t| t.external.is_some())
-            .map(|t| t.name());
-        let banner = if focus || external.is_none() { 0 } else { self.su(38.) };
         if !focus {
             self.paint_tabs(&pane, pane_id, rect, header, p);
+            let marker = self.marker();
             let format = pane
                 .tab()
                 .and_then(|id| self.tabs.get(&id))
                 .map(|t| {
-                    let (line, column) = Self::line_around(&t.document.text, t.document.cursor);
-                    markdown::format_at(&line, column)
+                    let line = t.document.text.char_to_line(t.document.cursor.min(t.document.text.len_chars()));
+                    let start = t.document.text.line_to_char(line);
+                    let from = start.max(t.document.cursor.saturating_sub(1000));
+                    let end = if line + 1 < t.document.text.len_lines() { t.document.text.line_to_char(line + 1) } else { t.document.text.len_chars() };
+                    let to = end.min(t.document.cursor + 1000);
+                    let text = t.document.text.slice(from..to).to_string();
+                    prose::format_at(&text, t.document.cursor - from, &marker)
                 })
                 .unwrap_or_default();
-            self.paint_toolbar(
-                Rect { y: rect.y + header as i32, height: toolbar, ..rect },
-                format,
-                p,
-            );
-            self.renderer.fill(
-                Rect { y: rect.y + (header + toolbar) as i32, height: 1, ..rect },
-                p.border,
-            );
-            if let Some(name) = external {
-                self.paint_banner(
-                    Rect { y: rect.y + (header + toolbar) as i32 + 1, height: banner, ..rect },
-                    &name,
-                    p,
-                );
-            }
+            self.paint_toolbar(Rect { y: rect.y + header as i32, height: toolbar, ..rect }, format, p);
+            self.renderer.fill(Rect { y: rect.y + (header + toolbar) as i32, height: 1, ..rect }, p.border);
         }
         let Some(id) = pane.tab() else {
             return;
@@ -671,11 +693,11 @@ impl App {
             None => 0,
         };
         if find.is_some() {
-            let bar_top = rect.y + (header + toolbar + banner) as i32 + i32::from(!focus);
+            let bar_top = rect.y + (header + toolbar) as i32 + i32::from(!focus);
             self.paint_findbar(Rect { y: bar_top, height: find_height, ..rect }, p);
         }
         let padding = self.su(27.);
-        let top = header + toolbar + banner + find_height;
+        let top = header + toolbar + find_height;
         let width = rect
             .width
             .saturating_sub(padding * 2)
@@ -706,12 +728,13 @@ impl App {
         } else {
             Vec::new()
         };
+        let symbol = self.scene_symbol();
         let tab = self.tabs.get_mut(&id).unwrap();
         tab.view.highlights = highlights;
+        tab.view.configure(&settings, &symbol);
         tab.view.layout(&tab.document, &tab.blocks, &settings, &mut self.fonts, editor_rect);
         tab.view.paint(&tab.document, &mut self.fonts, &mut self.renderer);
-        let empty = tab.document.text.len_chars() == 0 && !tab.loading;
-        let untitled = tab.path.is_none();
+        let empty = tab.document.text.len_chars() == 0 && !tab.loading && tab.path.is_some();
         let (len_chars, len_lines, top_char) =
             (tab.document.text.len_chars(), tab.document.text.len_lines(), tab.view.top);
         if empty && !focus {
@@ -722,23 +745,6 @@ impl App {
                 height: (settings.font_size * 1.65) as u32,
             };
             self.put("Start writing…", hint, 16., mix(p.muted, p.background, 0.35), Face::Normal, Align::Left);
-            if untitled && self.tree_rect.is_none() {
-                let (height, gap) = (self.su(34.), self.s(10.));
-                let mut x = editor_rect.x;
-                let y = editor_rect.y + self.s(64.);
-                let mut buttons = vec![
-                    ("Open folder…", Command::Open, Look::Primary),
-                    ("Open file…", Command::OpenFile, Look::Outline),
-                ];
-                if self.root.is_some() {
-                    buttons.push(("New note in workspace…", Command::CreateFile, Look::Outline));
-                }
-                for (text, command, look) in buttons {
-                    let width = self.measure(text, 13. * self.scale, Face::Normal).ceil() as u32 + self.su(32.);
-                    self.button(text, Rect { x, y, width, height }, Hit::Command(command), look, p);
-                    x += width as i32 + gap;
-                }
-            }
         }
         if !focus {
             let scrollbar = Rect {
@@ -896,215 +902,278 @@ impl App {
         }
     }
 
-    fn tree_count(&self, folder: &Path) -> usize {
-        self.tree.get(folder).map_or(0, |entries| {
-            entries
-                .iter()
-                .map(|e| {
-                    1 + if e.directory && self.expanded.contains(&e.path) {
-                        self.tree_count(&e.path)
-                    } else {
-                        0
-                    }
-                })
-                .sum()
-        })
-    }
     pub(super) fn paint_tree(&mut self, rect: Rect, p: Palette) {
         self.renderer.fill(rect, p.surface);
-        self.renderer.fill(
-            Rect { x: rect.x + rect.width as i32 - 1, width: 1, ..rect },
-            p.border,
-        );
-        let inset = self.s(10.);
-        let head = Rect { x: rect.x + inset, y: rect.y + self.s(8.), width: rect.width.saturating_sub(inset as u32 * 2), height: self.su(28.) };
-        self.put("FOLDER", head, 11., p.muted, Face::Bold, Align::Left);
-        if self.root.is_none() {
-            let width = rect.width.saturating_sub(self.su(32.));
-            let x = rect.x + self.s(16.);
-            let mut y = rect.y + self.s(60.);
-            self.put(
-                "No folder open",
-                Rect { x, y, width, height: self.su(24.) },
-                13.,
-                p.muted,
-                Face::Normal,
-                Align::Left,
-            );
-            y += self.s(36.);
-            for (text, command, look) in [
-                ("Open folder…", Command::Open, Look::Primary),
-                ("Open file…", Command::OpenFile, Look::Outline),
-                ("Open recent…", Command::Recent, Look::Plain),
-            ] {
-                if command == Command::Recent && self.recent.is_empty() {
-                    continue;
-                }
-                self.button(text, Rect { x, y, width, height: self.su(32.) }, Hit::Command(command), look, p);
-                y += self.s(40.);
-            }
-        } else {
-            let small = self.su(24.);
-            let folder = Rect { x: rect.x + rect.width as i32 - self.s(84.), y: head.y + self.s(2.), width: self.su(74.), height: small };
-            let note = Rect { x: folder.x - self.s(60.), width: self.su(56.), ..folder };
-            self.button("+ Note", note, Hit::Command(Command::CreateFile), Look::Plain, p);
-            self.button("+ Folder", folder, Hit::Command(Command::CreateFolder), Look::Plain, p);
-            let name = self
-                .root
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let root = Rect { x: rect.x + self.s(6.), y: rect.y + self.s(42.), width: rect.width.saturating_sub(self.su(12.)), height: self.su(28.) };
-            let label = self.fit(&format!("▾  {name}"), root.width as f32 - self.s(24.) as f32, 13.);
-            self.button_face(&label, root, Hit::Command(Command::Open), Look::Plain, Face::Bold, Align::Left, p);
-            let row_height = self.su(28.);
-            let list_top = rect.y + self.s(76.);
-            let footer = if self.tree_selected.is_some() { self.su(44.) } else { 0 };
-            let capacity = (rect.height.saturating_sub(self.su(76.) + footer) / row_height) as usize;
-            let total = self.tree_count(Path::new("."));
-            self.tree_top = self.tree_top.min(total.saturating_sub(capacity));
-            let mut rows = Vec::new();
-            let mut seen = 0;
-            self.tree_rows(Path::new("."), 0, &mut seen, &mut rows, capacity.max(1));
-            if total == 0 {
-                let empty = Rect { x: rect.x + self.s(16.), y: list_top + self.s(6.), width: rect.width.saturating_sub(self.su(32.)), height: self.su(24.) };
-                self.put("No Markdown files yet", empty, 12., p.muted, Face::Normal, Align::Left);
-            }
-            for (index, (entry, depth)) in rows.into_iter().enumerate() {
-                let row = Rect {
-                    x: rect.x + self.s(6.),
-                    y: list_top + index as i32 * row_height as i32,
-                    width: rect.width.saturating_sub(self.su(12.)),
-                    height: row_height,
+        self.renderer.fill(Rect { x: rect.x + rect.width as i32 - 1, width: 1, ..rect }, p.border);
+        let rows = self.tree_rows();
+        let Some(state) = &self.project else {
+            return;
+        };
+        let selected = state.selected.clone();
+        let dragged_is_chapter = match &self.drag {
+            Some(Drag::Node(id, _)) => state.core.manifest.tree.find(id).is_some_and(|n| !n.is_part()),
+            _ => false,
+        };
+        let active = self.active_item();
+        let row_height = self.su(28.);
+        let footer = self.su(36.);
+        let list_top = rect.y + self.s(4.);
+        let capacity = (rect.height.saturating_sub(footer + self.su(4.)) / row_height) as usize;
+        self.tree_top = self.tree_top.min(rows.len().saturating_sub(capacity));
+        let drag = match &self.drag {
+            Some(Drag::Node(id, origin)) if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() > 8. => Some(id.clone()),
+            _ => None,
+        };
+        for (index, row) in rows.iter().enumerate().skip(self.tree_top).take(capacity.max(1)) {
+            let line = Rect {
+                x: rect.x + self.s(6.),
+                y: list_top + (index - self.tree_top) as i32 * row_height as i32,
+                width: rect.width.saturating_sub(self.su(12.)),
+                height: row_height,
+            };
+            if let Some((label, section)) = row.heading {
+                let head = Rect { x: line.x + self.s(6.), y: line.y + self.s(4.), width: line.width, height: line.height };
+                self.put(label, head, 10.5, mix(p.muted, p.accent, 0.3), Face::Bold, Align::Left);
+                let (text, command) = match section {
+                    manifest::Section::Manuscript => ("+ Chapter", Command::NewChapter),
+                    manifest::Section::Notes => ("+ Page", Command::NewPage),
                 };
-                if self.tree_selected.as_ref() == Some(&entry.path) {
-                    self.renderer.fill_round(row, self.su(5.), selected_fill(p.surface, p));
-                } else if self.hot(row) {
-                    self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
+                let width = self.measure(text, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(14.);
+                let add = Rect { x: line.x + line.width as i32 - width as i32 - self.s(2.), y: line.y + self.s(2.), width, height: line.height - self.su(4.) };
+                self.button(text, add, Hit::Command(command), Look::Plain, p);
+                if section == manifest::Section::Manuscript {
+                    let part = Rect { x: add.x - self.s(58.), width: self.su(56.), ..add };
+                    self.button("+ Part", part, Hit::Command(Command::NewPart), Look::Plain, p);
                 }
-                let name = entry.path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let indent = self.s(8.) + depth as i32 * self.s(14.);
-                if entry.directory {
-                    let chevron = if self.expanded.contains(&entry.path) { "▾" } else { "▸" };
-                    let area = Rect { x: row.x + indent, width: self.su(14.), ..row };
-                    self.put(chevron, area, 10., p.muted, Face::Normal, Align::Center);
-                }
-                let icon_x = row.x + indent + self.s(18.);
-                let icon_y = row.y + (row.height as i32 - self.s(14.)) / 2;
-                if entry.directory {
-                    self.icon_folder(icon_x, icon_y, mix(p.muted, p.accent, 0.55));
+                continue;
+            }
+            let is_selected = selected.as_deref() == Some(row.id.as_str());
+            let is_active = active.as_deref() == Some(row.id.as_str());
+            let dragging_over = drag.is_some() && drag.as_deref() != Some(row.id.as_str()) && contains(line, self.mouse.x, self.mouse.y);
+            if is_selected {
+                self.renderer.fill_round(line, self.su(5.), selected_fill(p.surface, p));
+            } else if is_active {
+                self.renderer.fill_round(line, self.su(5.), mix(p.surface, p.accent, 0.1));
+            } else if self.hot(line) && drag.is_none() {
+                self.renderer.fill_round(line, self.su(5.), hovered(p.surface, p));
+            }
+            let indent = self.s(8.) + row.depth as i32 * self.s(14.);
+            let mut text_x = line.x + indent;
+            if row.part {
+                let arrow = Rect { x: text_x - self.s(4.), width: self.su(22.), ..line };
+                self.put(if row.collapsed { "▸" } else { "▾" }, arrow, 10., p.muted, Face::Normal, Align::Center);
+                self.hits.push((arrow, Hit::Fold(row.id.clone())));
+                text_x += self.s(20.);
+            } else {
+                self.icon_doc(text_x + self.s(2.), line.y + (line.height as i32 - self.s(14.)) / 2, p.muted, p.surface);
+                text_x += self.s(24.);
+            }
+            let words = if row.words > 0 || !row.part { thousands(row.words as u64) } else { String::new() };
+            let words_width = self.measure(&words, 11. * self.scale, Face::Normal).ceil() as i32 + self.s(8.);
+            let badge = if row.open > 0 { self.measure(&format!("●{}", row.open), 10.5 * self.scale, Face::Normal).ceil() as i32 + self.s(6.) } else { 0 };
+            let room = (line.x + line.width as i32 - text_x - words_width - badge - self.s(6.)).max(10);
+            let title = self.fit(&row.title, room as f32, 13.);
+            self.put(&title, Rect { x: text_x, width: room as u32, ..line }, 13., p.text, if row.part { Face::Bold } else { Face::Normal }, Align::Left);
+            if row.open > 0 {
+                let at = Rect { x: line.x + line.width as i32 - words_width - badge, width: badge as u32, ..line };
+                self.put(&format!("●{}", row.open), at, 10.5, p.accent, Face::Normal, Align::Left);
+            }
+            let at = Rect { x: line.x, width: line.width - self.su(6.), ..line };
+            self.put(&words, at, 11., p.muted, Face::Normal, Align::Right);
+            if dragging_over {
+                let part_target = row.part && dragged_is_chapter;
+                if part_target {
+                    self.renderer.framed(line, self.su(5.), mix(p.surface, p.accent, 0.18), p.accent);
+                    self.put(&title, Rect { x: text_x, width: room as u32, ..line }, 13., p.text, Face::Bold, Align::Left);
                 } else {
-                    self.icon_doc(icon_x, icon_y, p.muted, p.surface);
+                    self.renderer.fill(Rect { y: line.y - 1, height: 2, ..line }, p.accent);
                 }
-                let text_x = icon_x + self.s(22.);
-                let room = (row.x + row.width as i32 - text_x - self.s(6.)).max(10);
-                let text = self.fit(&name, room as f32, 13.);
-                self.put(&text, Rect { x: text_x, width: room as u32, ..row }, 13., p.text, Face::Normal, Align::Left);
-                self.hits.push((row, Hit::Tree(entry.path, entry.directory)));
             }
-            if footer > 0 {
-                let y = rect.y + rect.height as i32 - self.s(36.);
-                let height = self.su(28.);
-                self.renderer.fill(Rect { y: y - self.s(6.), height: 1, ..rect }, p.border);
-                self.button("Rename", Rect { x: rect.x + self.s(10.), y, width: self.su(80.), height }, Hit::Command(Command::RenameFile), Look::Outline, p);
-                self.button("Delete", Rect { x: rect.x + self.s(98.), y, width: self.su(80.), height }, Hit::Command(Command::DeleteFile), Look::Outline, p);
-            }
+            self.hits.push((line, Hit::Node(row.id.clone())));
+        }
+        // Totals
+        let state = self.project.as_ref().unwrap();
+        let total = state.core.manuscript_words();
+        let goal = state.core.manifest.settings.goals.project_words as u64;
+        let foot = Rect { y: rect.y + rect.height as i32 - footer as i32, height: footer, ..rect };
+        self.renderer.fill(Rect { height: 1, ..foot }, p.border);
+        let label = if goal > 0 { format!("{} of {} words", thousands(total), thousands(goal)) } else { format!("{} words", thousands(total)) };
+        self.put(&label, Rect { x: foot.x + self.s(14.), y: foot.y + self.s(2.), width: foot.width - self.su(28.), height: self.su(22.) }, 11.5, p.muted, Face::Normal, Align::Left);
+        if goal > 0 {
+            let bar = Rect { x: foot.x + self.s(14.), y: foot.y + foot.height as i32 - self.s(10.), width: foot.width - self.su(28.), height: self.su(4.) };
+            self.renderer.fill_round(bar, self.su(2.), p.border);
+            let done = ((total as f64 / goal as f64).min(1.) * bar.width as f64) as u32;
+            self.renderer.fill_round(Rect { width: done.max(1), ..bar }, self.su(2.), p.accent);
         }
         self.hits.push((
             Rect { x: rect.x + rect.width as i32 - self.s(3.), width: self.su(6.), ..rect },
             Hit::TreeResize,
         ));
     }
-    pub(super) fn scroll_outline(&mut self, rows: i32) {
-        let Some(tab) = self.active_id().and_then(|id| self.tabs.get(&id)) else {
-            return;
-        };
-        let headings = &tab.blocks.headings;
-        for _ in 0..rows.abs() {
-            let next = if rows > 0 {
-                headings.range(self.outline_top + 1..).next().map(|(l, _)| *l)
-            } else {
-                headings.range(..self.outline_top).next_back().map(|(l, _)| *l)
-            };
-            if let Some(line) = next {
-                self.outline_top = line;
-            }
-        }
+    pub(super) fn scroll_panel(&mut self, rows: i32) {
+        self.outline_top = (self.outline_top as i32 + rows).max(0) as usize;
     }
-    pub(super) fn paint_outline(&mut self, rect: Rect, p: Palette) {
+    pub(super) fn paint_panel(&mut self, rect: Rect, p: Palette) {
         self.renderer.fill(rect, p.surface);
         self.renderer.fill(Rect { width: 1, ..rect }, p.border);
-        let head = Rect { x: rect.x + self.s(16.), y: rect.y + self.s(8.), width: rect.width.saturating_sub(self.su(30.)), height: self.su(28.) };
-        self.put("OUTLINE", head, 11., p.muted, Face::Bold, Align::Left);
-        let Some(id) = self.active_id() else {
+        let Some(state) = &self.project else {
             return;
         };
-        let tab = &self.tabs[&id];
-        if tab.blocks.headings.is_empty() {
-            let note = Rect { x: rect.x + self.s(16.), y: rect.y + self.s(46.), width: rect.width.saturating_sub(self.su(30.)), height: self.su(40.) };
-            self.label("Headings appear here. Start a line with # to make one.", note, 11.5 * self.scale, p.muted);
-            return;
-        }
-        let current = tab.document.text.char_to_line(tab.document.cursor);
-        let active_heading = tab.blocks.headings.range(..=current).next_back().map(|(line, _)| *line);
-        let row_height = self.s(28.);
-        let mut rows = Vec::new();
-        let mut from = self.outline_top;
-        while (rows.len() as i32) < (rect.height as i32 - self.s(50.)) / row_height {
-            let Some((&line, (level, name))) = tab.blocks.headings.range(from..).next() else {
-                break;
-            };
-            rows.push((line, *level, name.clone()));
-            if self.folded.contains(&line) {
-                let next = tab.blocks.levels[..*level as usize]
-                    .iter()
-                    .filter_map(|level| level.range(line + 1..).next().map(|(&line, _)| line))
-                    .min();
-                if let Some(next) = next {
-                    from = next;
-                } else {
-                    break;
-                }
-            } else {
-                from = line + 1;
+        let panel = state.panel;
+        let open = state.comments.comments.iter().filter(|c| c.status == CommentStatus::Open).count();
+        // Tabs
+        let tab_height = self.su(34.);
+        let half = rect.width / 2;
+        for (index, (label, which)) in [("Scenes".to_owned(), Panel::Scenes), (if open > 0 { format!("Comments ({open})") } else { "Comments".to_owned() }, Panel::Comments)].into_iter().enumerate() {
+            let cell = Rect { x: rect.x + index as i32 * half as i32, width: half, height: tab_height, ..rect };
+            let on = panel == which;
+            if on {
+                self.renderer.fill(Rect { y: cell.y + cell.height as i32 - self.s(2.), height: self.su(2.), ..cell }, p.accent);
+            } else if self.hot(cell) {
+                self.renderer.fill(cell, hovered(p.surface, p));
             }
+            self.put(&label, cell, 12.5, if on { p.text } else { p.muted }, if on { Face::Bold } else { Face::Normal }, Align::Center);
+            self.hits.push((cell, Hit::Do(Act::Panel(which))));
         }
-        for (index, (line, level, name)) in rows.into_iter().enumerate() {
-            let row = Rect {
-                x: rect.x + self.s(7.),
-                y: rect.y + self.s(42.) + index as i32 * row_height,
-                width: rect.width.saturating_sub(self.su(14.)),
-                height: row_height as u32 - 1,
-            };
-            if active_heading == Some(line) {
-                self.renderer.fill_round(row, self.su(5.), selected_fill(p.surface, p));
-            } else if self.hot(row) {
-                self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
-            }
-            let offset = (level as i32 - 1) * self.s(10.);
-            let arrow = Rect { x: row.x + self.s(2.) + offset, width: self.su(18.), ..row };
-            self.put(if self.folded.contains(&line) { "▸" } else { "▾" }, arrow, 11., p.muted, Face::Normal, Align::Center);
-            let text_x = row.x + self.s(22.) + offset;
-            let width = (row.x + row.width as i32 - text_x).max(10);
-            let text = self.fit(&name, width as f32, 12.5);
-            self.put(
-                &text,
-                Rect { x: text_x, width: width as u32, ..row },
-                12.5,
-                if active_heading == Some(line) { p.text } else { p.muted },
-                if active_heading == Some(line) { Face::Bold } else { Face::Normal },
-                Align::Left,
-            );
-            self.hits.push((row, Hit::Heading(line, false)));
-            self.hits.push((arrow, Hit::Heading(line, true)));
+        self.renderer.fill(Rect { y: rect.y + tab_height as i32, height: 1, ..rect }, p.border);
+        let body = Rect { y: rect.y + tab_height as i32 + 1, height: rect.height - tab_height - 1, ..rect };
+        match panel {
+            Panel::Scenes => self.paint_scenes(body, p),
+            Panel::Comments => self.paint_comments(body, p),
         }
         self.hits.push((
             Rect { x: rect.x - self.s(3.), width: self.su(6.), ..rect },
             Hit::OutlineResize,
         ));
     }
-
+    fn paint_scenes(&mut self, rect: Rect, p: Palette) {
+        let Some(id) = self.active_id() else { return };
+        let tab = &self.tabs[&id];
+        let text = &tab.document.text;
+        let cursor_line = text.char_to_line(tab.document.cursor.min(text.len_chars()));
+        let mut starts: Vec<usize> = vec![0];
+        starts.extend(tab.blocks.scenes.iter().copied().filter(|l| *l < text.len_lines()));
+        let current = starts.iter().rposition(|l| *l <= cursor_line).unwrap_or(0);
+        let snippets: Vec<String> = starts
+            .iter()
+            .enumerate()
+            .map(|(n, line)| {
+                (*line..text.len_lines())
+                    .skip(usize::from(n > 0))
+                    .take(40)
+                    .map(|l| text.line(l).to_string().trim().to_owned())
+                    .find(|l| !l.is_empty() && !prose::is_scene_break(l))
+                    .unwrap_or_default()
+            })
+            .collect();
+        let head = Rect { x: rect.x + self.s(14.), y: rect.y + self.s(8.), width: rect.width.saturating_sub(self.su(28.)), height: self.su(22.) };
+        self.put(&format!("{} scene{} in this chapter", starts.len(), if starts.len() == 1 { "" } else { "s" }), head, 11.5, p.muted, Face::Normal, Align::Left);
+        let row_height = self.s(48.);
+        let top = rect.y + self.s(36.);
+        let capacity = ((rect.height as i32 - self.s(40.)) / row_height).max(1) as usize;
+        self.outline_top = self.outline_top.min(starts.len().saturating_sub(capacity));
+        for (n, line) in starts.iter().enumerate().skip(self.outline_top).take(capacity) {
+            let row = Rect { x: rect.x + self.s(7.), y: top + (n - self.outline_top) as i32 * row_height, width: rect.width.saturating_sub(self.su(14.)), height: row_height as u32 - 2 };
+            if n == current {
+                self.renderer.fill_round(row, self.su(5.), selected_fill(p.surface, p));
+            } else if self.hot(row) {
+                self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
+            }
+            self.put(&format!("Scene {}", n + 1), Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(20.) }, 11., if n == current { p.accent } else { p.muted }, Face::Bold, Align::Left);
+            let snippet = self.fit(if snippets[n].is_empty() { "(empty)" } else { &snippets[n] }, row.width as f32 - self.s(20.) as f32, 12.5);
+            self.put(&snippet, Rect { x: row.x + self.s(10.), y: row.y + self.s(22.), width: row.width - self.su(20.), height: self.su(22.) }, 12.5, p.text, Face::Normal, Align::Left);
+            self.hits.push((row, Hit::Scene(*line)));
+        }
+    }
+    fn paint_comments(&mut self, rect: Rect, p: Palette) {
+        let Some(state) = &self.project else { return };
+        let filter = state.filter.clone();
+        let active_item = self.active_item();
+        let tree = &state.core.manifest.tree;
+        let order: Vec<String> = [manifest::Section::Manuscript, manifest::Section::Notes]
+            .into_iter()
+            .flat_map(|s| tree.leaves(s).into_iter().map(|(n, _)| n.id().to_owned()).collect::<Vec<_>>())
+            .collect();
+        let query = crate::core::comments::Filter {
+            status: filter.status,
+            tag: filter.tag.clone(),
+            item: if filter.this_chapter { active_item.clone() } else { None },
+            orphaned: None,
+        };
+        let mut list: Vec<crate::core::comments::Comment> = state.comments.query(&query).into_iter().cloned().collect();
+        list.sort_by_key(|c| (order.iter().position(|o| *o == c.item).unwrap_or(usize::MAX), c.anchor.start));
+        let titles: HashMap<String, String> = order.iter().filter_map(|id| Some((id.clone(), tree.find(id)?.title().to_owned()))).collect();
+        let active = state.active_comment.clone();
+        let total = state.comments.comments.len();
+        // Filters
+        let bar_y = rect.y + self.s(8.);
+        let mut x = rect.x + self.s(10.);
+        let height = self.su(26.);
+        let chips: [(String, bool, &'static str); 3] = [
+            (match filter.status { None => "All".into(), Some(CommentStatus::Open) => "Open".into(), Some(CommentStatus::Resolved) => "Resolved".into() }, filter.status.is_some(), "status"),
+            (filter.tag.clone().map_or("Any tag".into(), |t| t), filter.tag.is_some(), "tag"),
+            ("This chapter".into(), filter.this_chapter, "chapter"),
+        ];
+        for (label, on, key) in chips {
+            let width = self.measure(&label, 11.5 * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
+            if x + width as i32 > rect.x + rect.width as i32 - self.s(8.) {
+                break;
+            }
+            self.button(&label, Rect { x, y: bar_y, width, height }, Hit::Do(Act::CommentFilter(key)), if on { Look::Active } else { Look::Outline }, p);
+            x += width as i32 + self.s(4.);
+        }
+        let top = bar_y + height as i32 + self.s(8.);
+        if list.is_empty() {
+            let message = if total == 0 { "No comments yet. Select some text and press Ctrl+Alt+M to leave a note for yourself or a reader." } else { "No comments match these filters." };
+            self.label(message, Rect { x: rect.x + self.s(14.), y: top + self.s(6.), width: rect.width.saturating_sub(self.su(28.)), height: self.su(80.) }, 12. * self.scale, p.muted);
+            return;
+        }
+        let card_height = self.s(164.);
+        let capacity = ((rect.y + rect.height as i32 - top) / card_height).max(1) as usize;
+        self.outline_top = self.outline_top.min(list.len().saturating_sub(capacity));
+        let now = jw::time::now();
+        for (n, c) in list.iter().enumerate().skip(self.outline_top).take(capacity) {
+            let card = Rect { x: rect.x + self.s(8.), y: top + (n - self.outline_top) as i32 * card_height, width: rect.width.saturating_sub(self.su(16.)), height: card_height as u32 - self.su(8.) };
+            let is_active = active.as_deref() == Some(c.id.as_str());
+            let fill = if is_active { mix(p.surface, p.accent, 0.12) } else { p.raised };
+            self.renderer.framed(card, self.su(7.), fill, if is_active { p.accent } else { mix(p.border, p.text, 0.1) });
+            self.hits.push((card, Hit::Comment(c.id.clone())));
+            let inner_x = card.x + self.s(10.);
+            let inner_w = card.width.saturating_sub(self.su(20.));
+            let quote: String = c.quote.replace('\n', " ");
+            let quote = self.fit(&format!("“{quote}”"), inner_w as f32, 11.5);
+            self.put(&quote, Rect { x: inner_x, y: card.y + self.s(6.), width: inner_w, height: self.su(20.) }, 11.5, p.muted, Face::Italic, Align::Left);
+            self.label(&c.body, Rect { x: inner_x, y: card.y + self.s(28.), width: inner_w, height: self.su(58.) }, 12.5 * self.scale, if c.status == CommentStatus::Resolved { p.muted } else { p.text });
+            let mut meta = String::new();
+            if !c.tag.is_empty() {
+                meta.push_str(&format!("{} · ", c.tag));
+            }
+            meta.push_str(titles.get(&c.item).map_or("(deleted chapter)", String::as_str));
+            meta.push_str(&format!(" · {}", jw::time::ago(c.created, now)));
+            if c.status == CommentStatus::Resolved {
+                meta.push_str(" · resolved");
+            }
+            let meta = self.fit(&meta, inner_w as f32, 10.5);
+            self.put(&meta, Rect { x: inner_x, y: card.y + self.s(88.), width: inner_w, height: self.su(18.) }, 10.5, p.muted, Face::Normal, Align::Left);
+            if c.orphaned {
+                self.put("The commented text was deleted", Rect { x: inner_x, y: card.y + self.s(104.), width: inner_w, height: self.su(18.) }, 10.5, 0xd08a50, Face::Normal, Align::Left);
+            } else if let Some(reply) = c.replies.last() {
+                let text = self.fit(&format!("↳ {} repl{}: {}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }, reply.body.replace('\n', " ")), inner_w as f32, 10.5);
+                self.put(&text, Rect { x: inner_x, y: card.y + self.s(104.), width: inner_w, height: self.su(18.) }, 10.5, p.muted, Face::Normal, Align::Left);
+            }
+            let by = card.y + card.height as i32 - self.s(30.);
+            let mut bx = inner_x;
+            let resolve = if c.status == CommentStatus::Open { ("Resolve", "resolve") } else { ("Reopen", "reopen") };
+            for (label, key) in [resolve, ("Reply", "reply"), ("Edit", "edit"), ("Delete", "delete")] {
+                let width = self.measure(label, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(14.);
+                if bx + width as i32 > card.x + card.width as i32 - self.s(4.) {
+                    break;
+                }
+                self.button(label, Rect { x: bx, y: by, width, height: self.su(24.) }, Hit::Do(Act::CommentDo(key, c.id.clone())), Look::Plain, p);
+                bx += width as i32 + self.s(2.);
+            }
+        }
+    }
     pub(super) fn paint_footer(&mut self, rect: Rect, p: Palette) {
         self.renderer.fill(rect, p.surface);
         self.renderer.fill(Rect { height: 1, ..rect }, p.border);
@@ -1115,8 +1184,8 @@ impl App {
             ("Settings", Command::Settings, false),
             ("Focus", Command::Focus, false),
             ("Split", Command::SplitRight, false),
-            ("Outline", Command::ToggleOutline, self.show_outline),
-            ("Files", Command::ToggleTree, self.show_tree),
+            ("Panel", Command::TogglePanel, self.show_outline),
+            ("Chapters", Command::ToggleTree, self.show_tree),
         ];
         for (text, command, on) in buttons {
             let width = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
@@ -1125,23 +1194,27 @@ impl App {
             x -= self.s(2.);
         }
         let active = self.active_id().and_then(|id| self.tabs.get(&id));
-        let place = active.map(|tab| {
-            let line = tab.document.text.char_to_line(tab.document.cursor);
-            let column = tab.document.cursor - tab.document.text.line_to_char(line) + 1;
-            format!(
-                "Ln {}, Col {}  ·  {}",
-                line + 1,
-                column,
-                if tab.document.line_ending == "\r\n" { "CRLF" } else { "LF" }
-            )
-        });
+        let mut stats = String::new();
+        if let Some(state) = &self.project {
+            let goals = &state.core.manifest.settings.goals;
+            let chapter = self.active_item().and_then(|id| state.core.manifest.tree.find(&id).map(|n| n.words()));
+            if let Some(words) = chapter {
+                stats.push_str(&format!("This chapter {} words", thousands(words as u64)));
+            }
+            let written = format!("Session +{}", thousands(state.core.session_words()));
+            if !stats.is_empty() {
+                stats.push_str("  ·  ");
+            }
+            stats.push_str(&written);
+            if goals.session_words > 0 {
+                stats.push_str(&format!(" of {}", thousands(goals.session_words as u64)));
+            }
+        }
         let busy = active.map_or("", |t| {
             if t.loading {
                 "Loading…"
             } else if t.saving {
                 "Saving…"
-            } else if t.document.dirty() && t.path.is_none() {
-                "Not saved yet · File ▸ Save to choose a name"
             } else if t.document.dirty() && self.settings.autosave {
                 "Unsaved · autosaves shortly"
             } else if t.document.dirty() {
@@ -1151,10 +1224,10 @@ impl App {
             }
         });
         let mut right = x - self.s(12.);
-        if let Some(place) = place {
-            let width = self.measure(&place, 11.5 * self.scale, Face::Normal).ceil() as i32;
+        if !stats.is_empty() {
+            let width = self.measure(&stats, 11.5 * self.scale, Face::Normal).ceil() as i32;
             right -= width;
-            self.put(&place, Rect { x: right, y: rect.y, width: width as u32 + 4, height: rect.height }, 11.5, p.muted, Face::Normal, Align::Left);
+            self.put(&stats, Rect { x: right, y: rect.y, width: width as u32 + 4, height: rect.height }, 11.5, p.muted, Face::Normal, Align::Left);
             right -= self.s(16.);
         }
         let message = if let Some((_, tip)) = self.tip_at_mouse() {
@@ -1165,19 +1238,55 @@ impl App {
             busy.into()
         };
         let area = Rect { x: rect.x + self.s(14.), y: rect.y, width: (right - rect.x - self.s(20.)).max(10) as u32, height: rect.height };
+        let message = self.fit(&message, area.width as f32, 11.5);
         self.put(&message, area, 11.5, p.muted, Face::Normal, Align::Left);
     }
-
-    // ---- overlays -------------------------------------------------------------------------
-
-    fn scrim(&mut self, window: Rect, dismiss: bool, p: Palette) {
+    pub(super) fn paint_welcome(&mut self, rect: Rect, p: Palette) {
+        let width = rect.width.saturating_sub(self.su(48.)).min(self.su(560.));
+        let x = rect.x + (rect.width.saturating_sub(width) / 2) as i32;
+        let mut y = rect.y + (rect.height as i32 / 5).max(self.s(40.));
+        self.put("JustWrite", Rect { x, y, width, height: self.su(46.) }, 30., p.text, Face::Bold, Align::Left);
+        y += self.s(52.);
+        self.put("A quiet place for your manuscript.", Rect { x, y, width, height: self.su(26.) }, 14., p.muted, Face::Normal, Align::Left);
+        y += self.s(52.);
+        let height = self.su(38.);
+        let mut bx = x;
+        for (text, command, look) in [("New project…", Command::NewProject, Look::Primary), ("Open project…", Command::OpenProject, Look::Outline), ("Import a manuscript…", Command::Import, Look::Outline)] {
+            let w = self.measure(text, 13. * self.scale, Face::Normal).ceil() as u32 + self.su(36.);
+            self.button(text, Rect { x: bx, y, width: w, height }, Hit::Command(command), look, p);
+            bx += w as i32 + self.s(10.);
+        }
+        y += self.s(66.);
+        let recent: Vec<PathBuf> = self.recent.iter().filter(|r| r.is_file()).take(6).cloned().collect();
+        if !recent.is_empty() {
+            self.section("RECENT PROJECTS", x, y, width, p);
+            y += self.s(26.);
+            for (index, path) in recent.into_iter().enumerate() {
+                let row = Rect { x, y, width, height: self.su(44.) };
+                if self.hot(row) {
+                    self.renderer.fill_round(row, self.su(6.), hovered(p.background, p));
+                }
+                let name = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                self.put(&name, Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(24.) }, 14., p.text, Face::Normal, Align::Left);
+                let place = self.fit(&path.to_string_lossy(), row.width as f32 - self.s(20.) as f32, 11.);
+                self.put(&place, Rect { x: row.x + self.s(10.), y: row.y + self.s(22.), width: row.width - self.su(20.), height: self.su(20.) }, 11., p.muted, Face::Normal, Align::Left);
+                self.hits.push((row, Hit::Do(Act::OpenRecent(index))));
+                y += self.s(48.);
+            }
+        }
+        let status = self.status.clone();
+        if !status.is_empty() {
+            self.label(&status, Rect { x, y: rect.y + rect.height as i32 - self.s(60.), width, height: self.su(40.) }, 12.5 * self.scale, p.muted);
+        }
+    }
+    pub(super) fn scrim(&mut self, window: Rect, dismiss: bool, p: Palette) {
         self.renderer.shade(window, 0x000000, if p.light { 70 } else { 120 });
         self.hits.push((
             window,
             Hit::Do(if dismiss { Act::Dismiss } else { Act::Block }),
         ));
     }
-    fn dialog_box(&mut self, window: Rect, width: f32, height: u32, p: Palette) -> Rect {
+    pub(super) fn dialog_box(&mut self, window: Rect, width: f32, height: u32, p: Palette) -> Rect {
         let width = self.su(width).min(window.width.saturating_sub(self.su(24.)));
         let height = height.min(window.height.saturating_sub(self.su(24.)));
         let rect = Rect {
@@ -1191,7 +1300,7 @@ impl App {
         self.hits.push((rect, Hit::Do(Act::Block)));
         rect
     }
-    fn field(&mut self, rect: Rect, text: &str, placeholder: &str, caret: Option<usize>, focused: bool, hit: Act, p: Palette) {
+    pub(super) fn field(&mut self, rect: Rect, text: &str, placeholder: &str, caret: Option<usize>, focused: bool, hit: Act, p: Palette) {
         self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent } else { mix(p.border, p.text, 0.12) });
         let inner = Rect { x: rect.x + self.s(12.), width: rect.width.saturating_sub(self.su(24.)), ..rect };
         if text.is_empty() && !(focused && caret.is_some()) {
@@ -1224,18 +1333,15 @@ impl App {
             return;
         }
         let dialog = overlay.is_dialog();
-        let settings = overlay.kind == Kind::Settings;
         let searching = matches!(overlay.kind, Kind::Find | Kind::Replace);
         self.in_modal = true;
         if searching {
             // Keep the document undimmed so matches stay visible behind the search box.
             self.hits.push((window, Hit::Do(Act::Dismiss)));
         } else {
-            self.scrim(window, !dialog || settings, p);
+            self.scrim(window, !dialog, p);
         }
-        if settings {
-            self.paint_settings(window, p);
-        } else if dialog {
+        if dialog {
             self.paint_dialog(window, p);
         } else {
             self.paint_list(window, top, p);
@@ -1257,8 +1363,8 @@ impl App {
         let placeholder = overlay.placeholder().to_owned();
         let pending = overlay.pending;
         let (selected, scroll) = (overlay.selected, overlay.scroll);
-        let searching = matches!(kind, Kind::Find | Kind::Replace | Kind::FolderSearch);
-        let keymap = matches!(kind, Kind::Keymap | Kind::Palette | Kind::HeadingLevels);
+        let searching = matches!(kind, Kind::Find | Kind::Replace | Kind::ProjectSearch);
+        let keymap = matches!(kind, Kind::Keymap | Kind::Palette);
         let width = window.width.saturating_sub(self.su(40.)).min(self.su(720.));
         let x = (window.width - width) as i32 / 2;
         let y = top + self.s(40.);
@@ -1393,7 +1499,7 @@ impl App {
             self.renderer.fill_round(Rect { y: track.y + offset as i32, height: thumb, ..track }, self.su(2.), p.border);
         }
     }
-    fn dialog_buttons(&mut self, rect: Rect, buttons: &[(&str, Act, Look)], p: Palette) {
+    pub(super) fn dialog_buttons(&mut self, rect: Rect, buttons: &[(&str, Act, Look)], p: Palette) {
         let height = self.su(34.);
         let y = rect.y + rect.height as i32 - height as i32 - self.s(18.);
         let mut x = rect.x + rect.width as i32 - self.s(20.);
@@ -1412,7 +1518,7 @@ impl App {
         let (query, caret, note, title) = (overlay.query.clone(), overlay.caret, overlay.note.clone(), overlay.title().to_owned());
         let dirty = self.tabs.values().filter(|t| t.document.dirty()).count();
         let name_of = |id: u64| self.tabs.get(&id).map(|t| t.name()).unwrap_or_default();
-        let base = |path: &Path| path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let title_of = |id: &str| self.node_title(id).unwrap_or_default();
         let (message, input, buttons): (String, bool, Vec<(&str, Act, Look)>) = match &kind {
             Kind::Close(id) => (
                 format!("Do you want to save the changes you made to {}?\nYour changes will be lost if you don't save them.", name_of(*id)),
@@ -1425,34 +1531,22 @@ impl App {
                 vec![("Exit without saving", Act::Press("discard"), Look::Outline), ("Cancel", Act::Press("escape"), Look::Outline), ("Save all & exit", Act::Press("save"), Look::Primary)],
             ),
             Kind::ChangeWorkspace(_) => (
-                format!("{dirty} open file{} ha{} unsaved changes.\nSave before switching folders?", if dirty == 1 { "" } else { "s" }, if dirty == 1 { "s" } else { "ve" }),
+                format!("{dirty} open chapter{} ha{} unsaved changes.\nSave before opening another project?", if dirty == 1 { "" } else { "s" }, if dirty == 1 { "s" } else { "ve" }),
                 false,
-                vec![("Discard & switch", Act::Press("discard"), Look::Outline), ("Cancel", Act::Press("escape"), Look::Outline), ("Save all & switch", Act::Press("save"), Look::Primary)],
+                vec![("Discard & open", Act::Press("discard"), Look::Outline), ("Cancel", Act::Press("escape"), Look::Outline), ("Save all & open", Act::Press("save"), Look::Primary)],
             ),
-            Kind::Delete(path) => (
-                format!("Move \"{}\" to the Recycle Bin?\nYou can restore it from there later.", base(path)),
+            Kind::Delete(id) => (
+                format!("Delete \"{}\"?\nA snapshot is saved first, so the text can be brought back from History.", title_of(id)),
                 false,
-                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Move to Recycle Bin", Act::Press("enter"), Look::Danger)],
+                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Delete", Act::Press("enter"), Look::Danger)],
             ),
             Kind::GotoLine => (
                 "Enter a line number.".into(),
                 true,
                 vec![("Cancel", Act::Press("escape"), Look::Outline), ("Go", Act::Press("enter"), Look::Primary)],
             ),
-            Kind::Create => (
-                "Name the new note. It is created inside the workspace,
-and .md is added if you leave it out.".into(),
-                true,
-                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Create", Act::Press("enter"), Look::Primary)],
-            ),
-            Kind::CreateFolder => (
-                "Name the new folder, relative to the workspace folder.".into(),
-                true,
-                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Create", Act::Press("enter"), Look::Primary)],
-            ),
-            Kind::Rename(old) => (
-                format!("Rename \"{}\".
-Type a different folder path to move it as well.", base(old)),
+            Kind::Rename(id) => (
+                format!("Rename \"{}\".", title_of(id)),
                 true,
                 vec![("Cancel", Act::Press("escape"), Look::Outline), ("Rename", Act::Press("enter"), Look::Primary)],
             ),
@@ -1500,12 +1594,12 @@ Type a different folder path to move it as well.", base(old)),
         }
         self.dialog_buttons(rect, &buttons, p);
     }
-    fn section(&mut self, text: &str, x: i32, y: i32, width: u32, p: Palette) {
+    pub(super) fn section(&mut self, text: &str, x: i32, y: i32, width: u32, p: Palette) {
         let area = Rect { x, y, width, height: self.su(22.) };
         self.put(text, area, 10.5, mix(p.muted, p.accent, 0.35), Face::Bold, Align::Left);
     }
     /// Two or more options in one rounded track; the chosen one is highlighted.
-    fn segmented(&mut self, rect: Rect, options: &[(&str, bool, Act)], p: Palette) {
+    pub(super) fn segmented(&mut self, rect: Rect, options: &[(&str, bool, Act)], p: Palette) {
         self.renderer
             .framed(rect, self.su(7.), p.background, mix(p.border, p.text, 0.14));
         let each = (rect.width - self.su(4.)) / options.len() as u32;
@@ -1527,203 +1621,13 @@ Type a different folder path to move it as well.", base(old)),
             self.hits.push((cell, Hit::Do(act.clone())));
         }
     }
-    /// A `−  value  +` control.
-    fn stepper(&mut self, rect: Rect, value: &str, key: &'static str, p: Palette) {
-        self.renderer
-            .framed(rect, self.su(7.), p.background, mix(p.border, p.text, 0.14));
-        let side = self.su(34.);
-        let minus = Rect { width: side, ..rect };
-        let plus = Rect { x: rect.x + rect.width as i32 - side as i32, width: side, ..rect };
-        for (cell, glyph, direction) in [(minus, "−", -1), (plus, "+", 1)] {
-            if self.hot(cell) {
-                let inset = Rect {
-                    x: cell.x + 2,
-                    y: cell.y + 2,
-                    width: cell.width - 4,
-                    height: cell.height - 4,
-                };
-                self.renderer.fill_round(inset, self.su(5.), hovered(p.background, p));
-            }
-            self.put(glyph, cell, 15., p.text, Face::Normal, Align::Center);
-            self.hits.push((cell, Hit::Do(Act::Step(key, direction))));
-        }
-        for x in [minus.x + side as i32, plus.x] {
-            self.renderer.fill(
-                Rect { x, y: rect.y + self.s(6.), width: 1, height: rect.height - self.su(12.) },
-                p.border,
-            );
-        }
-        let middle = Rect { x: minus.x + side as i32, width: rect.width - side * 2, ..rect };
-        self.put(value, middle, 13., p.text, Face::Normal, Align::Center);
-    }
-    fn paint_settings(&mut self, window: Rect, p: Palette) {
-        let s = self.settings.clone();
-        // Short windows get tighter rows and no description lines so everything still fits.
-        let roomy = self.su(58.) + 3 * self.su(34.) + 8 * self.su(30.) + 3 * self.su(42.) + self.su(88.);
-        let compact = window.height < roomy + self.su(24.);
-        let base = if compact { self.s(26.) } else { ((window.height.saturating_sub(self.su(260.)) / 11).clamp(self.su(30.), self.su(38.))) as i32 };
-        let extra = if compact { 0 } else { self.s(12.) };
-        let heading = if compact { self.s(26.) } else { self.s(34.) };
-        let height = self.su(58.) + (3 * heading) as u32 + (8 * base + 3 * (base + extra)) as u32 + if compact { self.su(70.) } else { self.su(88.) };
-        let rect = self.dialog_box(window, 580., height, p);
-        let pad = self.s(28.);
-        let mut y = rect.y + self.s(14.);
-        let head = Rect { x: rect.x + pad, y, width: rect.width - pad as u32 * 2, height: self.su(32.) };
-        self.put("Settings", head, 16., p.text, Face::Bold, Align::Left);
-        let close = Rect { x: rect.x + rect.width as i32 - self.s(48.), y: y + self.s(1.), width: self.su(30.), height: self.su(30.) };
-        self.button("×", close, Hit::Do(Act::Dismiss), Look::Plain, p);
-        y += self.s(46.);
-        self.renderer.fill(Rect { x: rect.x + 1, y, width: rect.width - 2, height: 1 }, p.border);
-        y += self.s(4.);
-        let right = rect.x + rect.width as i32 - pad;
-        let inner_width = rect.width - pad as u32 * 2;
-        let left = rect.x + pad;
-        let control_height = if compact { self.su(23.) } else { self.su(30.) };
-        // Draws "title" (and optional description) and returns the y that centres a control.
-        let label = |app: &mut App, y: i32, row: i32, text: &str, note: Option<&str>| {
-            let area = Rect { x: left, y, width: inner_width.saturating_sub(app.su(210.)), height: row as u32 };
-            match note {
-                Some(note) => {
-                    app.put(text, Rect { y: y - app.s(8.), ..area }, 13., p.text, Face::Normal, Align::Left);
-                    app.put(note, Rect { y: y + app.s(10.), ..area }, 11., p.muted, Face::Normal, Align::Left);
-                }
-                None => app.put(text, area, 13., p.text, Face::Normal, Align::Left),
-            }
-            y + (row - control_height as i32) / 2
-        };
-
-        self.section("APPEARANCE", left, y + self.s(8.), inner_width, p);
-        y += heading;
-        let by = label(self, y, base, "Theme", None);
-        self.segmented(
-            Rect { x: right - self.s(240.), y: by, width: self.su(240.), height: control_height },
-            &[
-                ("Light", s.theme == "light", Act::Theme("light")),
-                ("Dark", s.theme == "dark", Act::Theme("dark")),
-                ("System", s.theme == "system", Act::Theme("system")),
-            ],
-            p,
-        );
-        y += base;
-        label(self, y, base, "Accent colour", None);
-        let size = self.su(20.);
-        let gap = self.s(10.);
-        for (index, colour) in ACCENTS.into_iter().enumerate() {
-            let swatch = Rect {
-                x: right - (ACCENTS.len() - index) as i32 * (size as i32 + gap) + gap - self.s(3.),
-                y: y + (base - size as i32) / 2,
-                width: size,
-                height: size,
-            };
-            let hover = self.hot(swatch);
-            if s.accent_color() == colour || hover {
-                let ring = |app: &App, grow: i32| Rect {
-                    x: swatch.x - app.s(grow as f32),
-                    y: swatch.y - app.s(grow as f32),
-                    width: size + app.su(grow as f32 * 2.),
-                    height: size + app.su(grow as f32 * 2.),
-                };
-                let (outer, inner) = (ring(self, 4), ring(self, 2));
-                let tone = if s.accent_color() == colour { colour } else { p.border };
-                self.renderer.fill_round(outer, outer.width / 2, tone);
-                self.renderer.fill_round(inner, inner.width / 2, p.raised);
-            }
-            self.renderer.fill_round(swatch, size / 2, colour);
-            self.hits.push((swatch, Hit::Do(Act::Accent(colour))));
-        }
-        y += base;
-        let by = label(self, y, base, "Interface font", None);
-        let button = Rect { x: right - self.s(230.), y: by, width: self.su(230.), height: control_height };
-        let name = self.fit(&s.interface_font, button.width as f32 - self.s(44.) as f32, 13.);
-        self.button(&format!("{name}  ▾"), button, Hit::Do(Act::Font("interface_font")), Look::Outline, p);
-        y += base;
-
-        self.section("EDITOR", left, y + self.s(8.), inner_width, p);
-        y += heading;
-        for (text, key, value) in [
-            ("Editor font", "editor_font", s.editor_font.clone()),
-            ("Code font", "code_font", s.code_font.clone()),
-        ] {
-            let by = label(self, y, base, text, None);
-            let button = Rect { x: right - self.s(230.), y: by, width: self.su(230.), height: control_height };
-            let name = self.fit(&value, button.width as f32 - self.s(44.) as f32, 13.);
-            self.button(&format!("{name}  ▾"), button, Hit::Do(Act::Font(key)), Look::Outline, p);
-            y += base;
-        }
-        for (text, key, value) in [
-            ("Font size", "font_size", format!("{} pt", s.font_size)),
-            ("Maximum line width", "max_width", s.max_width.map_or("Unlimited".into(), |w| format!("{w} px"))),
-        ] {
-            let by = label(self, y, base, text, None);
-            self.stepper(Rect { x: right - self.s(190.), y: by, width: self.su(190.), height: control_height }, &value, key, p);
-            y += base;
-        }
-        let switches = [
-            ("Show Markdown symbols", Some("Keep # and ** visible on every line, not just the current one"), "show_markers", s.show_markers),
-            ("Typewriter scrolling", Some("Keep the line you are typing in the middle of the screen"), "typewriter", s.typewriter),
-        ];
-        for (text, note, key, on) in switches {
-            y = self.switch_row(rect, y, base + extra, text, if compact { None } else { note }, key, on, p);
-        }
-        self.section("GENERAL", left, y + self.s(8.), inner_width, p);
-        y += heading;
-        y = self.switch_row(rect, y, base + extra, "Autosave", if compact { None } else { Some("Save shortly after you stop typing") }, "autosave", s.autosave, p);
-        let by = label(self, y, base, "Keyboard shortcuts", None);
-        let button = Rect { x: right - self.s(140.), y: by, width: self.su(140.), height: control_height };
-        self.button("Customize…", button, Hit::Do(Act::Run(Command::Keymap)), Look::Outline, p);
-
-        let foot = Rect { x: rect.x + pad, y: rect.y + rect.height as i32 - self.s(52.), width: rect.width - pad as u32 * 2, height: self.su(34.) };
-        self.renderer.fill(Rect { x: rect.x + 1, y: foot.y - self.s(10.), width: rect.width - 2, height: 1 }, p.border);
-        self.put("Changes apply immediately and are saved to settings.toml.", foot, 11.5, p.muted, Face::Normal, Align::Left);
-        let done = Rect { x: right - self.s(90.), width: self.su(90.), ..foot };
-        self.button("Done", done, Hit::Do(Act::Dismiss), Look::Primary, p);
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn switch_row(&mut self, rect: Rect, y: i32, row: i32, text: &str, note: Option<&str>, key: &'static str, on: bool, p: Palette) -> i32 {
-        let pad = self.s(28.);
-        let line = Rect { x: rect.x + self.s(10.), y, width: rect.width - self.su(20.), height: row as u32 };
-        if self.hot(line) {
-            self.renderer.fill_round(line, self.su(7.), hovered(p.raised, p));
-        }
-        let area = Rect { x: rect.x + pad, width: rect.width - pad as u32 * 2 - self.su(60.), ..line };
-        match note {
-            Some(note) => {
-                self.put(text, Rect { y: y - self.s(9.), ..area }, 13., p.text, Face::Normal, Align::Left);
-                self.put(note, Rect { y: y + self.s(10.), ..area }, 11., p.muted, Face::Normal, Align::Left);
-            }
-            None => self.put(text, area, 13., p.text, Face::Normal, Align::Left),
-        }
-        let track = Rect {
-            x: rect.x + rect.width as i32 - pad - self.s(40.),
-            y: y + (row - self.s(22.)) / 2,
-            width: self.su(40.),
-            height: self.su(22.),
-        };
-        let off = mix(p.border, p.text, if p.light { 0.22 } else { 0.28 });
-        self.renderer.fill_round(track, track.height / 2, if on { p.accent } else { off });
-        let knob = track.height - self.su(6.);
-        let travel = (track.width - knob) as i32 - self.s(3.);
-        self.renderer.fill_round(
-            Rect { x: track.x + if on { travel } else { self.s(3.) }, y: track.y + self.s(3.), width: knob, height: knob },
-            knob / 2,
-            0xffffff,
-        );
-        self.hits.push((line, Hit::Do(Act::Toggle(key))));
-        y + row
-    }
-    fn icon_doc(&mut self, x: i32, y: i32, color: u32, background: u32) {
+    pub(super) fn icon_doc(&mut self, x: i32, y: i32, color: u32, background: u32) {
         let rect = Rect { x, y, width: self.su(11.), height: self.su(14.) };
         self.renderer.framed(rect, self.su(2.), background, color);
         for line in 0..3 {
             let bar = Rect { x: x + self.s(3.), y: y + self.s(4.) + line * self.s(3.), width: self.su(5.), height: 1 };
             self.renderer.fill(bar, color);
         }
-    }
-    fn icon_folder(&mut self, x: i32, y: i32, color: u32) {
-        let tab = Rect { x, y: y + self.s(1.), width: self.su(6.), height: self.su(5.) };
-        self.renderer.fill_round(tab, self.su(2.), color);
-        let body = Rect { x, y: y + self.s(3.), width: self.su(15.), height: self.su(10.) };
-        self.renderer.fill_round(body, self.su(2.), color);
     }
     pub(super) fn dividers_for(&mut self, center: Rect) {
         self.dividers.clear();
@@ -1743,4 +1647,17 @@ fn face_attrs(font: &str, tint: u32, face: Face) -> Attrs<'_> {
         Face::Italic => attrs.style(FontStyle::Italic),
         Face::Normal => attrs,
     }
+}
+
+/// `12,345`
+pub(super) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }

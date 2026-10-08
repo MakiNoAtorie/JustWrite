@@ -14,7 +14,6 @@ winit = "0.30"
 softbuffer = "0.4"
 cosmic-text = "0.19"
 ropey = "1.6"
-pulldown-cmark = "0.13"
 arboard = { version = "3.6", default-features = false }
 notify = "8.2"
 tempfile = "3.27"

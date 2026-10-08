@@ -3,10 +3,12 @@ use crate::{
     core::{
         commands::{self, COMMANDS, Command},
         config::{Session, SessionSplit, SessionTab, Settings, WindowState},
-        markdown::{self, BlockIndex},
-        storage::{Entry, LocalStorage, ReadEvent, Storage, read_complete},
+        prose::{self, BlockIndex},
+        storage::{Entry, LocalStorage, ReadEvent, ReadSink, Storage, read_complete},
         workspace,
     },
+    core::comments::Status as CommentStatus,
+    jw::{self, manifest},
     platform::{self, Clipboard},
     render::{
         CpuRenderer, Rect, Renderer,
@@ -14,13 +16,22 @@ use crate::{
     },
     ui::{
         layout::{Divider, Pane, Split},
-        menu::{HEADING_MENU, Popup},
+        menu::Popup,
         overlay::{Action, Kind, Overlay, Row},
         tab::Tab,
     },
 };
 #[path = "gui.rs"]
 mod gui;
+#[path = "project.rs"]
+pub mod project;
+#[path = "forms.rs"]
+pub mod forms;
+#[path = "screens.rs"]
+pub mod screens;
+use forms::{ExportRequest, Form};
+use project::{DropTarget, Panel, ProjectState};
+use screens::{Screen, ScreenAct};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Motion, Shaping, fontdb};
 use ropey::Rope;
 use std::{
@@ -44,41 +55,41 @@ use winit::{
 };
 
 pub enum UserEvent {
-    TabWatched(u64, notify::RecommendedWatcher),
-    TabChanged(u64),
     Chosen(Option<PathBuf>, Choose),
     Read(u64, ReadEvent),
     Saved(u64, u64, Rope, Result<(), String>),
     Indexed(u64, u64, u64, BlockIndex),
     Fonts(fontdb::Database),
-    Watched(u64, notify::RecommendedWatcher),
-    Changed(u64, PathBuf),
-    External(u64, u64, u64, Rope),
-    Listed(u64, PathBuf, Vec<Entry>),
-    Files(u64, Arc<Vec<PathBuf>>),
     Rows(u64, Vec<Row>),
     Config(Result<(Settings, Option<Session>), String>),
-    Operation(u64, FileOp, Result<(), String>),
     Error(String),
     SessionSaved(Result<(), String>),
     Replaced(u64, u64, u64, Rope),
     ConfigWatch(notify::RecommendedWatcher),
     ConfigChanged,
     SettingsUpdated(Result<Settings, String>),
-    OpenResolved(Option<(PathBuf, PathBuf)>),
+    /// A project finished opening, or could not be opened (`Err(Err(conflict))` means it is in use).
+    ProjectOpened(PathBuf, Result<Box<crate::jw::project::Opened>, Result<String, crate::jw::lock::Conflict>>),
+    /// A chapter file was written, with its word count.
+    ChapterSaved(String, usize),
+    /// The `.jw` was rewritten; `Err(None)` means it changed outside the program meanwhile.
+    Packed(Result<(), Option<String>>),
+    Exported(Result<PathBuf, String>),
+    Preview(u64, Result<Arc<crate::export::typeset::Typeset>, String>),
+    Imported(Result<Box<crate::import::split::Imported>, String>),
+    ImportRead(PathBuf, Result<Box<crate::import::Raw>, String>),
+    PreviewPage(u64, usize, u32, Arc<crate::export::typeset::Bitmap>),
 }
 #[derive(Clone, Copy)]
 pub enum Choose {
-    Folder,
-    File,
-    Save(u64),
-}
-#[derive(Clone)]
-pub enum FileOp {
-    Create(PathBuf),
-    CreateFolder(PathBuf),
-    Rename(PathBuf, PathBuf),
-    Delete(PathBuf),
+    OpenProject,
+    /// The title of the new project.
+    NewProject,
+    SaveProjectAs,
+    ImportFile,
+    Cover,
+    /// Where to write an export.
+    Export,
 }
 struct Scan {
     tab: u64,
@@ -86,14 +97,19 @@ struct Scan {
     revision: u64,
     rope: Option<Rope>,
     dirty: std::ops::Range<usize>,
+    marker: crate::core::notes::Marker,
 }
 #[derive(Clone)]
 enum Hit {
     Command(Command),
     Tab(u64, usize),
     Close(u64),
-    Tree(PathBuf, bool),
-    Heading(usize, bool),
+    /// A chapter, part or page in the project tree.
+    Node(String),
+    /// The arrow of a part.
+    Fold(String),
+    Scene(usize),
+    Comment(String),
     Row(usize),
     TreeResize,
     OutlineResize,
@@ -105,28 +121,38 @@ enum Hit {
 #[derive(Clone)]
 enum Act {
     Menu(usize),
-    Heading,
     Run(Command),
+    Panel(Panel),
     Dismiss,
     Block,
     Press(&'static str),
     Field(bool),
     Case,
     Replace(bool),
-    Theme(&'static str),
-    Toggle(&'static str),
-    Accent(u32),
-    Step(&'static str, i32),
-    Font(&'static str),
     ClearShortcut,
     ResetShortcut,
     MatchStep(i32),
     ToggleReplace,
+    Screen(ScreenAct),
+    CommentDo(&'static str, String),
+    CommentFilter(&'static str),
+    OpenRecent(usize),
+    FormFocus(usize),
+    FormToggle(usize),
+    FormSegment(usize, usize),
+    FormDrop(usize),
+    FormPick(usize, usize),
+    FormStep(usize, i32),
+    FormButton(usize),
+    FormExtra(&'static str),
+    FormSubmit,
+    FormCloseDrop,
 }
 #[derive(Clone)]
 enum Drag {
     Selection(u64),
     Tab(u64, u64, PhysicalPosition<f64>),
+    Node(String, PhysicalPosition<f64>),
     TreeResize,
     OutlineResize,
     Scrollbar(u64),
@@ -153,17 +179,12 @@ pub struct App {
     active_pane: u64,
     next_id: u64,
     scanner: mpsc::Sender<Scan>,
+    /// The working copy of the open project; chapters are files below it.
     root: Option<PathBuf>,
     storage: Option<Arc<dyn Storage>>,
-    watcher: Option<notify::RecommendedWatcher>,
-    generation: u64,
-    tree: BTreeMap<PathBuf, Vec<Entry>>,
-    expanded: BTreeSet<PathBuf>,
-    tree_selected: Option<PathBuf>,
+    project: Option<ProjectState>,
     tree_top: usize,
     outline_top: usize,
-    folded: BTreeSet<usize>,
-    files: Arc<Vec<PathBuf>>,
     show_tree: bool,
     show_outline: bool,
     tree_width: f32,
@@ -205,6 +226,18 @@ pub struct App {
     hover_since: Option<Instant>,
     recent: Vec<PathBuf>,
     saved_window: Option<WindowState>,
+    pending_session: Option<SessionSplit>,
+    /// Dialogs with several fields, and the large screens (history, compare, preview).
+    form: Option<Form>,
+    /// The export dialog, kept while its preview is on screen.
+    parked_form: Option<Form>,
+    screen: Option<Screen>,
+    preview_version: u64,
+    pending_export: Option<(ExportRequest, String)>,
+    import_raw: Option<Arc<crate::import::Raw>>,
+    import_into_new: bool,
+    pending_import: Option<crate::import::split::Imported>,
+    pending_jump: Option<String>,
 }
 /// Word around `pos` for double-click selection; scans at most 256 chars each way.
 fn word_bounds(text: &Rope, pos: usize) -> (usize, usize) {
@@ -229,6 +262,27 @@ fn word_bounds(text: &Rope, pos: usize) -> (usize, usize) {
     }
     (start, end)
 }
+/// The paragraph (run of non-blank lines) around `pos`, as a char range without its line ending.
+fn paragraph_around(text: &Rope, pos: usize) -> std::ops::Range<usize> {
+    let blank = |l: usize| text.line(l).chars().all(char::is_whitespace);
+    let line = text.char_to_line(pos.min(text.len_chars()));
+    if blank(line) {
+        return pos..pos;
+    }
+    let (mut first, mut last) = (line, line);
+    while first > 0 && !blank(first - 1) {
+        first -= 1;
+    }
+    while last + 1 < text.len_lines() && !blank(last + 1) {
+        last += 1;
+    }
+    let start = text.line_to_char(first);
+    let mut end = if last + 1 < text.len_lines() { text.line_to_char(last + 1) } else { text.len_chars() };
+    while end > start && matches!(text.char(end - 1), '\n' | '\r') {
+        end -= 1;
+    }
+    start..end
+}
 impl App {
     pub fn new(proxy: EventLoopProxy<UserEvent>, started: Instant) -> Self {
         let (scanner, receiver) = mpsc::channel::<Scan>();
@@ -245,7 +299,7 @@ impl App {
                 if blocks.lines.is_empty() {
                     request.dirty = 0..rope.len_lines();
                 }
-                blocks.update_range(&rope, request.dirty);
+                blocks.update_range(&rope, request.dirty, &request.marker);
                 let _ = scan_proxy.send_event(UserEvent::Indexed(
                     request.tab,
                     request.epoch,
@@ -278,15 +332,9 @@ impl App {
             scanner,
             root: None,
             storage: None,
-            watcher: None,
-            generation: 0,
-            tree: BTreeMap::new(),
-            expanded: BTreeSet::from([PathBuf::from(".")]),
-            tree_selected: None,
+            project: None,
             tree_top: 0,
             outline_top: 0,
-            folded: BTreeSet::new(),
-            files: Arc::new(Vec::new()),
             show_tree: true,
             show_outline: true,
             tree_width: 218.,
@@ -328,6 +376,16 @@ impl App {
             hover_since: None,
             recent: Vec::new(),
             saved_window: None,
+            pending_session: None,
+            form: None,
+            parked_form: None,
+            screen: None,
+            preview_version: 0,
+            pending_export: None,
+            import_raw: None,
+            import_into_new: true,
+            pending_import: None,
+            pending_jump: None,
         }
     }
     fn id(&mut self) -> u64 {
@@ -392,11 +450,13 @@ impl App {
                 revision: tab.document.revision,
                 rope: Some(tab.document.text.clone()),
                 dirty,
+                marker: self.marker(),
             });
         }
     }
     fn edited(&mut self, id: u64) {
         self.dirty_session();
+        self.follow_edits(id);
         if let Some(tab) = self.tabs.get_mut(&id) {
             tab.edited = Some(Instant::now());
             tab.view.ensure_cursor(&tab.document);
@@ -420,143 +480,18 @@ impl App {
     fn choose(&self, choice: Choose) {
         let proxy = self.proxy.clone();
         let parent = self.window.clone();
+        let name = self.project.as_ref().map(|p| p.core.title().to_owned());
         std::thread::spawn(move || {
+            let jw: &[platform::Filter] = &[("JustWrite project", &["jw"])];
             let path = match choice {
-                Choose::Folder => platform::choose_folder(parent, "Choose a folder"),
-                Choose::File => platform::choose_file(parent, "Open a file", &[]),
-                Choose::Save(_) => platform::choose_save(parent, "Save as", "Untitled.md", &[]),
+                Choose::OpenProject => platform::choose_file(parent, "Open a project", jw),
+                Choose::NewProject => platform::choose_save(parent, "Create a project", "My novel.jw", jw).map(|p| p.with_extension("jw")),
+                Choose::SaveProjectAs => platform::choose_save(parent, "Save a copy as", &format!("{}.jw", name.unwrap_or_else(|| "My novel".into())), jw).map(|p| p.with_extension("jw")),
+                Choose::ImportFile => platform::choose_file(parent, "Import a manuscript", &[("Manuscripts", &["docx", "md", "markdown", "txt"])]),
+                Choose::Cover => platform::choose_file(parent, "Choose a cover image", &[("Images", &["jpg", "jpeg", "png"])]),
+                Choose::Export => None,
             };
-            let path = path.and_then(|path| {
-                if matches!(choice, Choose::Save(_)) {
-                    platform::save_destination(&path)
-                } else {
-                    Some(path)
-                }
-            });
             let _ = proxy.send_event(UserEvent::Chosen(path, choice));
-        });
-    }
-    /// Opens `root` as the workspace, asking first when there are unsaved edits.
-    fn switch_workspace(&mut self, root: PathBuf) {
-        if self.tabs.values().any(|t| t.document.dirty()) {
-            self.show(Kind::ChangeWorkspace(root));
-        } else {
-            self.clear_tabs();
-            self.set_workspace(root);
-        }
-    }
-    fn set_workspace(&mut self, root: PathBuf) {
-        self.recent.retain(|r| r != &root);
-        self.recent.insert(0, root.clone());
-        self.recent.truncate(10);
-        self.dirty_session();
-        self.generation += 1;
-        self.root = Some(root.clone());
-        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(root));
-        self.storage = Some(storage.clone());
-        self.watcher = None;
-        self.tree.clear();
-        self.files = Arc::new(Vec::new());
-        self.tree_top = 0;
-        self.expanded = BTreeSet::from([PathBuf::from(".")]);
-        self.list(PathBuf::from("."));
-        self.index_files();
-        let proxy = self.proxy.clone();
-        let generation = self.generation;
-        std::thread::spawn(move || {
-            let change_proxy = proxy.clone();
-            match storage.watch(Arc::new(move |path| {
-                let _ = change_proxy.send_event(UserEvent::Changed(generation, path));
-            })) {
-                Ok(watcher) => {
-                    let _ = proxy.send_event(UserEvent::Watched(generation, watcher));
-                }
-                Err(error) => {
-                    let _ = proxy.send_event(UserEvent::Error(format!(
-                        "File watching unavailable: {error}"
-                    )));
-                }
-            }
-        });
-        self.redraw();
-    }
-    fn list(&self, folder: PathBuf) {
-        if let Some(storage) = &self.storage {
-            let storage = storage.clone();
-            let proxy = self.proxy.clone();
-            let generation = self.generation;
-            std::thread::spawn(move || match storage.list(&folder) {
-                Ok(mut entries) => {
-                    entries.retain(|e| {
-                        let hidden = e.path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
-                        !hidden && (e.directory || workspace::markdown_file(&e.path))
-                    });
-                    entries.sort_by_key(|e| (!e.directory, e.path.clone()));
-                    let _ = proxy.send_event(UserEvent::Listed(generation, folder, entries));
-                }
-                Err(error) => {
-                    let _ = proxy.send_event(UserEvent::Error(error.to_string()));
-                }
-            });
-        }
-    }
-    fn index_files(&self) {
-        if let Some(storage) = &self.storage {
-            let storage = storage.clone();
-            let proxy = self.proxy.clone();
-            let generation = self.generation;
-            std::thread::spawn(move || {
-                let files = workspace::index(&*storage);
-                let _ = proxy.send_event(UserEvent::Files(generation, Arc::new(files)));
-            });
-        }
-    }
-    fn watch_tab(&self, id: u64) {
-        let Some(tab) = self.tabs.get(&id).filter(|t| t.root != self.root) else {
-            return;
-        };
-        let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else {
-            return;
-        };
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let change_proxy = proxy.clone();
-            match storage.watch(Arc::new(move |changed| {
-                if changed == path {
-                    let _ = change_proxy.send_event(UserEvent::TabChanged(id));
-                }
-            })) {
-                Ok(watcher) => {
-                    let _ = proxy.send_event(UserEvent::TabWatched(id, watcher));
-                }
-                Err(error) => {
-                    let _ = proxy.send_event(UserEvent::Error(format!(
-                        "File watching unavailable: {error}"
-                    )));
-                }
-            }
-        });
-    }
-    fn check_external(&self, id: u64) {
-        let Some(tab) = self.tabs.get(&id).filter(|t| !t.loading && !t.saving) else {
-            return;
-        };
-        let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else {
-            return;
-        };
-        let saved = tab.document.saved_snapshot();
-        let revision = tab.document.revision;
-        let epoch = tab.disk_epoch;
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || match read_complete(&*storage, &path) {
-            Ok(text) if text != saved => {
-                let _ = proxy.send_event(UserEvent::External(id, epoch, revision, text));
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let _ =
-                    proxy.send_event(UserEvent::Error(format!("External file change: {error}")));
-            }
         });
     }
     fn open_relative(&mut self, path: PathBuf, position: usize) -> Option<u64> {
@@ -618,8 +553,8 @@ impl App {
         tab.storage = Some(storage.clone());
         tab.loading = true;
         tab.restore_cursor = Some(position);
-        tab.guard_save = true;
         self.tabs.insert(id, tab);
+        self.refresh_titles();
         let proxy = self.proxy.clone();
         storage.read(
             &path,
@@ -631,22 +566,6 @@ impl App {
         self.redraw();
         Some(id)
     }
-    fn open_absolute(&mut self, path: PathBuf) {
-        if let Some(root) = &self.root {
-            if let Ok(relative) = path.strip_prefix(root) {
-                self.open_relative(relative.to_path_buf(), 0);
-                return;
-            }
-        }
-        if self.tabs.values().any(|t| t.document.dirty()) {
-            self.status = "Save your edits before changing workspace.".into();
-            return;
-        }
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::OpenResolved(platform::workspace_file(&path)));
-        });
-    }
     fn clear_tabs(&mut self) {
         for id in self.tabs.keys() {
             let _ = self.scanner.send(Scan {
@@ -655,6 +574,7 @@ impl App {
                 revision: 0,
                 rope: None,
                 dirty: 0..0,
+                marker: Default::default(),
             });
         }
         let old = std::mem::take(&mut self.tabs);
@@ -668,7 +588,8 @@ impl App {
         self.active_pane = pane;
         self.new_tab(pane);
     }
-    fn save(&mut self, id: u64, save_as: bool) {
+    fn save(&mut self, id: u64, _save_as: bool) {
+        self.sync_marks_to_project(id);
         let Some(tab) = self.tabs.get_mut(&id) else {
             return;
         };
@@ -676,46 +597,22 @@ impl App {
             return;
         }
         if tab.loading || tab.failed {
-            self.status = "Saving is disabled until the complete UTF-8 file has loaded.".into();
-            return;
-        }
-        if save_as || tab.path.is_none() {
-            tab.edited = None;
-            self.choose(Choose::Save(id));
+            self.status = "Saving is disabled until the whole chapter has loaded.".into();
             return;
         }
         let (Some(storage), Some(path)) = (&tab.storage, &tab.path) else {
+            tab.edited = None;
             return;
         };
         let storage = storage.clone();
         let path = path.clone();
         let snapshot = tab.document.text.clone();
         let revision = tab.document.revision;
-        let epoch = tab.disk_epoch;
         let proxy = self.proxy.clone();
-        let expected = if tab.guard_save && tab.external.is_none() {
-            Some(tab.document.saved_snapshot())
-        } else {
-            None
-        };
         tab.saving = true;
         tab.edited = None;
         std::thread::spawn(move || {
-            let result = if let Some(expected) = expected {
-                match storage.write_checked(&path, &snapshot, &expected) {
-                    Ok(Some(disk)) => {
-                        let _ = proxy.send_event(UserEvent::External(id, epoch, revision, disk));
-                        Err(
-                            "Changed on disk: Ctrl+S keeps edits · Ctrl+R loads the disk version"
-                                .into(),
-                        )
-                    }
-                    Ok(None) => Ok(()),
-                    Err(error) => Err(error.to_string()),
-                }
-            } else {
-                storage.write(&path, &snapshot).map_err(|e| e.to_string())
-            };
+            let result = storage.write(&path, &snapshot).map_err(|e| e.to_string());
             let _ = proxy.send_event(UserEvent::Saved(id, revision, snapshot, result));
         });
     }
@@ -732,13 +629,10 @@ impl App {
                 revision: 0,
                 rope: None,
                 dirty: 0..0,
+                marker: Default::default(),
             });
             if let Some(path) = &tab.path {
                 self.closed.push(SessionTab {
-                    root: tab
-                        .root
-                        .clone()
-                        .filter(|root| Some(root) != self.root.as_ref()),
                     path: path.clone(),
                     cursor: tab.document.cursor,
                     top: tab.view.top,
@@ -857,7 +751,7 @@ impl App {
     }
     /// A menu or dialog that blocks the rest of the window (the docked find bar does not).
     fn modal(&self) -> bool {
-        self.popup.is_some() || self.overlay.as_ref().is_some_and(|o| !o.docked())
+        self.popup.is_some() || self.form.is_some() || self.overlay.as_ref().is_some_and(|o| !o.docked())
     }
     fn show(&mut self, kind: Kind) {
         let searching = matches!(kind, Kind::Find | Kind::Replace);
@@ -895,10 +789,9 @@ impl App {
         overlay.scroll = 0;
         overlay.rows.clear();
         match &kind {
-            Kind::Palette | Kind::HeadingLevels | Kind::Keymap => {
+            Kind::Palette | Kind::Keymap => {
                 let mut rows: Vec<_> = COMMANDS
                     .iter()
-                    .filter(|c| kind != Kind::HeadingLevels || matches!(c.id, Command::Heading(_)))
                     .filter_map(|command| {
                         let score = workspace::fuzzy(&query, command.name)?;
                         let shortcut = self
@@ -934,15 +827,16 @@ impl App {
                 overlay.rows = rows.into_iter().map(|(_, row)| row).collect();
             }
             Kind::Recent => {
+                let current = self.project.as_ref().map(|p| p.core.path.clone());
                 overlay.rows = self
                     .recent
                     .iter()
-                    .filter(|path| Some(*path) != self.root.as_ref() && path.is_dir())
+                    .filter(|path| Some(*path) != current.as_ref() && path.is_file())
                     .filter(|path| workspace::fuzzy(&query, &path.to_string_lossy()).is_some())
                     .map(|path| Row {
-                        label: path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+                        label: path.file_stem().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
                         hint: path.to_string_lossy().into_owned(),
-                        action: Action::Folder(path.clone()),
+                        action: Action::Project(path.clone()),
                     })
                     .collect();
             }
@@ -959,51 +853,85 @@ impl App {
                     })
                     .collect();
             }
-            Kind::Headings => {
-                if let Some(id) = self.active_id() {
-                    let blocks = self.tabs[&id].blocks.clone();
-                    let proxy = self.proxy.clone();
-                    let version = self.search_version.fetch_add(1, Ordering::Relaxed) + 1;
-                    let cancellation = self.search_version.clone();
-                    if let Some(overlay) = &mut self.overlay {
-                        overlay.version = version;
-                        overlay.pending = true;
+            Kind::Scenes => {
+                let mut rows = Vec::new();
+                let active = self.split.pane(self.active_pane).and_then(Pane::tab);
+                if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
+                    let text = &tab.document.text;
+                    let mut lines: Vec<usize> = vec![0];
+                    lines.extend(tab.blocks.scenes.iter().copied());
+                    for (n, line) in lines.into_iter().enumerate() {
+                        if line >= text.len_lines() {
+                            continue;
+                        }
+                        let snippet = (line..text.len_lines())
+                            .skip(usize::from(n > 0))
+                            .map(|l| text.line(l).to_string())
+                            .map(|l| l.trim().to_owned())
+                            .find(|l| !l.is_empty() && !prose::is_scene_break(l))
+                            .unwrap_or_default();
+                        let snippet: String = snippet.chars().take(90).collect();
+                        if let Some(score) = workspace::fuzzy(&query, &snippet) {
+                            rows.push((score, Row {
+                                label: if snippet.is_empty() { "(empty scene)".into() } else { snippet },
+                                hint: format!("Scene {} · line {}", n + 1, line + 1),
+                                action: Action::Scene(line),
+                            }));
+                        }
                     }
-                    std::thread::spawn(move || {
-                        let rows = blocks
-                            .headings
-                            .iter()
-                            .filter_map(|(&line, (level, name))| {
-                                if cancellation.load(Ordering::Relaxed) != version {
-                                    return None;
-                                }
-                                workspace::fuzzy(&query, name).map(|score| {
-                                    (
-                                        score,
-                                        Row {
-                                            label: name.clone(),
-                                            hint: format!("H{level} · line {}", line + 1),
-                                            action: Action::Heading(line),
-                                        },
-                                    )
-                                })
-                            })
-                            .collect::<Vec<_>>();
-                        let mut rows = rows;
+                    if !query.is_empty() {
                         rows.sort_by_key(|(score, _)| -score);
-                        let _ = proxy.send_event(UserEvent::Rows(
-                            version,
-                            rows.into_iter().take(200).map(|(_, row)| row).collect(),
-                        ));
-                    });
+                    }
                 }
+                overlay.rows = rows.into_iter().map(|(_, row)| row).collect();
             }
-            Kind::QuickOpen | Kind::Find | Kind::Replace | Kind::FolderSearch => {
+            Kind::QuickOpen => {
+                let mut rows = Vec::new();
+                if let Some(state) = &self.project {
+                    let tree = &state.core.manifest.tree;
+                    for (section, label) in [(manifest::Section::Manuscript, "Manuscript"), (manifest::Section::Notes, "Notes & research")] {
+                        for (node, part) in tree.leaves(section) {
+                            let Some(file) = node.file() else { continue };
+                            let name = match part {
+                                Some(part) => format!("{} · {}", part.title(), node.title()),
+                                None => node.title().to_owned(),
+                            };
+                            if let Some(score) = workspace::fuzzy(&query, &name) {
+                                rows.push((score, Row {
+                                    label: node.title().to_owned(),
+                                    hint: match part {
+                                        Some(part) => format!("{label} · {}", part.title()),
+                                        None => label.to_owned(),
+                                    },
+                                    action: Action::File(PathBuf::from(file), 0),
+                                }));
+                            }
+                        }
+                    }
+                }
+                if !query.is_empty() {
+                    rows.sort_by_key(|(score, _)| -score);
+                }
+                overlay.rows = rows.into_iter().map(|(_, row)| row).collect();
+            }
+            Kind::Find | Kind::Replace | Kind::ProjectSearch => {
                 let version = self.search_version.fetch_add(1, Ordering::Relaxed) + 1;
                 let cancellation = self.search_version.clone();
                 let proxy = self.proxy.clone();
-                let files = self.files.clone();
                 let storage = self.storage.clone();
+                // Chapters and pages in reading order, with the titles shown beside matches.
+                let files: Vec<(PathBuf, String)> = self
+                    .project
+                    .as_ref()
+                    .map(|state| {
+                        let tree = &state.core.manifest.tree;
+                        [manifest::Section::Manuscript, manifest::Section::Notes]
+                            .into_iter()
+                            .flat_map(|s| tree.leaves(s))
+                            .filter_map(|(n, _)| Some((PathBuf::from(n.file()?), n.title().to_owned())))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let snapshot = self
                     .active_id()
                     .and_then(|id| self.tabs.get(&id))
@@ -1020,33 +948,6 @@ impl App {
                 std::thread::spawn(move || {
                     let mut rows = Vec::new();
                     match kind {
-                        Kind::QuickOpen => {
-                            let mut scored = Vec::new();
-                            for path in files.iter() {
-                                if cancellation.load(Ordering::Relaxed) != version {
-                                    return;
-                                }
-                                if let Some(score) =
-                                    workspace::fuzzy(&query, &path.to_string_lossy())
-                                {
-                                    scored.push((score, path.clone()));
-                                }
-                            }
-                            scored.sort_by_key(|(score, _)| -score);
-                            rows = scored
-                                .into_iter()
-                                .take(200)
-                                .map(|(_, path)| Row {
-                                    label: path
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned(),
-                                    hint: path.to_string_lossy().into_owned(),
-                                    action: Action::File(path, 0),
-                                })
-                                .collect();
-                        }
                         Kind::Find | Kind::Replace => {
                             if let Some((text, path)) = snapshot {
                                 rows = workspace::find(&text, &query, case, 500)
@@ -1065,10 +966,10 @@ impl App {
                                     .collect();
                             }
                         }
-                        Kind::FolderSearch => {
+                        _ => {
                             if let Some(storage) = storage {
                                 if !query.is_empty() {
-                                    for path in files.iter() {
+                                    for (path, title) in files.iter() {
                                         if cancellation.load(Ordering::Relaxed) != version {
                                             return;
                                         }
@@ -1078,11 +979,7 @@ impl App {
                                             {
                                                 rows.push(Row {
                                                     label: preview.clone(),
-                                                    hint: format!(
-                                                        "{}:{}",
-                                                        path.display(),
-                                                        line + 1
-                                                    ),
+                                                    hint: format!("{title} · line {}", line + 1),
                                                     action: Action::Match(workspace::Match {
                                                         path: path.clone(),
                                                         start,
@@ -1100,7 +997,6 @@ impl App {
                                 }
                             }
                         }
-                        _ => {}
                     }
                     if cancellation.load(Ordering::Relaxed) == version {
                         let _ = proxy.send_event(UserEvent::Rows(version, rows));
@@ -1127,24 +1023,6 @@ impl App {
         self.apply_window_theme();
         self.redraw();
     }
-    fn operation(&mut self, operation: FileOp) {
-        let Some(storage) = self.storage.clone() else {
-            self.status = "Open a workspace folder first.".into();
-            return;
-        };
-        let generation = self.generation;
-        let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
-            let result = match &operation {
-                FileOp::Create(path) => storage.create(path, false),
-                FileOp::CreateFolder(path) => storage.create(path, true),
-                FileOp::Rename(from, to) => storage.rename(from, to),
-                FileOp::Delete(path) => storage.remove(path),
-            }
-            .map_err(|e| e.to_string());
-            let _ = proxy.send_event(UserEvent::Operation(generation, operation, result));
-        });
-    }
     fn activate_row(&mut self, row: Row) {
         match row.action {
             Action::Command(command) => {
@@ -1155,7 +1033,7 @@ impl App {
                 self.overlay = None;
                 self.open_relative(path, position);
             }
-            Action::Heading(line) => {
+            Action::Scene(line) => {
                 if let Some(id) = self.active_id() {
                     if let Some(tab) = self.tabs.get_mut(&id) {
                         let position = tab
@@ -1170,7 +1048,7 @@ impl App {
             }
             Action::Match(found) => {
                 let kind = self.overlay.as_ref().map(|o| o.kind.clone());
-                if kind == Some(Kind::FolderSearch) {
+                if kind == Some(Kind::ProjectSearch) {
                     self.open_relative(found.path, found.start);
                     self.overlay = None;
                 } else if let Some(id) = self.active_id() {
@@ -1185,9 +1063,9 @@ impl App {
                 }
             }
             Action::Setting(key) => self.pick_font(&key),
-            Action::Folder(path) => {
+            Action::Project(path) => {
                 self.overlay = None;
-                self.switch_workspace(path);
+                self.open_project(path, false);
             }
             Action::Shortcut(key) => {
                 let query = self
@@ -1223,35 +1101,6 @@ impl App {
         self.after_save = None;
         self.status.clear();
         self.redraw();
-    }
-    fn target_path(&self) -> Option<PathBuf> {
-        self.tree_selected.clone().or_else(|| {
-            self.active_id()
-                .and_then(|id| self.tabs.get(&id))
-                .filter(|t| t.root == self.root)
-                .and_then(|t| t.path.clone())
-        })
-    }
-    /// Folder (workspace-relative, with trailing slash) that new notes should start in.
-    fn selected_folder(&self) -> String {
-        let Some(path) = &self.tree_selected else {
-            return String::new();
-        };
-        let directory = self
-            .tree
-            .values()
-            .flatten()
-            .find(|e| &e.path == path)
-            .is_none_or(|e| e.directory);
-        let folder = if directory {
-            Some(path.as_path())
-        } else {
-            path.parent()
-        };
-        folder
-            .filter(|f| !f.as_os_str().is_empty() && *f != Path::new("."))
-            .map(|f| format!("{}/", f.to_string_lossy().replace('\\', "/")))
-            .unwrap_or_default()
     }
     fn step_match(&mut self, delta: i32) {
         let Some(overlay) = &mut self.overlay else {
@@ -1305,11 +1154,10 @@ impl App {
             self.change(|s| match field.as_str() {
                 "editor_font" => s.editor_font = name,
                 "interface_font" => s.interface_font = name,
-                "code_font" => s.code_font = name,
                 _ => {}
             });
         }
-        self.show(Kind::Settings);
+        self.open_settings();
     }
     fn bind_shortcut(&mut self, command: &str, value: String) {
         let parsed = commands::parse_shortcut(&value).ok().flatten();
@@ -1373,9 +1221,10 @@ impl App {
             match kind {
                 Kind::Close(id) => self.close_tab(id, true),
                 Kind::Quit => self.persist_session(true),
-                Kind::ChangeWorkspace(root) => {
+                Kind::ChangeWorkspace(path) => {
+                    self.shutdown_project();
                     self.clear_tabs();
-                    self.set_workspace(root);
+                    self.open_project(path, false);
                 }
                 _ => {}
             }
@@ -1408,36 +1257,6 @@ impl App {
             tab.view.top = position;
         }
         self.overlay = None;
-    }
-    fn submit_name(&mut self, kind: Kind, query: String) {
-        let text = query.trim().replace('\\', "/");
-        if text.is_empty() || text.ends_with('/') {
-            self.note("Enter a name.");
-            return;
-        }
-        let markdown = kind == Kind::Create
-            || matches!(&kind, Kind::Rename(old) if workspace::markdown_file(old));
-        let path = PathBuf::from(&text);
-        let path = if markdown && !workspace::markdown_file(&path) {
-            if kind == Kind::Create {
-                PathBuf::from(format!("{text}.md"))
-            } else {
-                self.note("Markdown files must keep a .md extension.");
-                return;
-            }
-        } else {
-            path
-        };
-        if !workspace::valid_relative(&path) {
-            self.note("Use a name inside the workspace: no drive letters or \"..\".");
-            return;
-        }
-        self.overlay = None;
-        self.operation(match kind {
-            Kind::Rename(old) => FileOp::Rename(old, path),
-            Kind::CreateFolder => FileOp::CreateFolder(path),
-            _ => FileOp::Create(path),
-        });
     }
     fn replace(&mut self, all: bool) {
         let Some(overlay) = &self.overlay else {
@@ -1510,14 +1329,23 @@ impl App {
     fn act(&mut self, act: Act, rect: Rect) {
         match act {
             Act::Menu(index) => self.open_menu(index, rect),
-            Act::Heading => self.open_popup(HEADING_MENU, rect.x, rect.y + rect.height as i32),
+            Act::Panel(panel) => {
+                if let Some(state) = &mut self.project {
+                    state.panel = panel;
+                }
+                self.show_outline = true;
+            }
             Act::Run(command) => {
                 self.popup = None;
                 self.command(command);
             }
             Act::Dismiss => {
                 if self.popup.take().is_none() {
-                    self.close_overlay();
+                    if self.form.is_some() {
+                        self.close_form();
+                    } else {
+                        self.close_overlay();
+                    }
                 }
             }
             Act::Block => {}
@@ -1544,29 +1372,24 @@ impl App {
                 self.refresh_overlay();
             }
             Act::Replace(all) => self.replace(all),
-            Act::Theme(name) => self.change(|s| s.theme = name.into()),
-            Act::Toggle(key) => self.change(|s| match key {
-                "show_markers" => s.show_markers = !s.show_markers,
-                "typewriter" => s.typewriter = !s.typewriter,
-                _ => s.autosave = !s.autosave,
-            }),
-            Act::Accent(colour) => self.change(|s| s.accent = format!("#{colour:06x}")),
-            Act::Step(key, direction) => self.change(|s| {
-                if key == "font_size" {
-                    s.font_size = (s.font_size + direction as f32).clamp(10., 48.);
-                } else {
-                    // Above 3000 px the width limit turns off; stepping down from "unlimited" restarts at 3000.
-                    s.max_width = match s.max_width {
-                        None if direction < 0 => Some(3000.),
-                        None => None,
-                        Some(w) => {
-                            let next = w + 40. * direction as f32;
-                            (next <= 3000.).then_some(next.max(240.))
-                        }
-                    };
+            Act::Screen(action) => self.screen_act(action),
+            Act::OpenRecent(index) => {
+                if let Some(path) = self.recent.iter().filter(|r| r.is_file()).nth(index).cloned() {
+                    self.open_project_checked(path);
                 }
-            }),
-            Act::Font(key) => self.open_font(key),
+            }
+            Act::CommentFilter(key) => self.comment_filter(key),
+            Act::CommentDo(action, id) => self.comment_action(action, &id),
+            Act::FormFocus(_)
+            | Act::FormToggle(_)
+            | Act::FormSegment(..)
+            | Act::FormDrop(_)
+            | Act::FormPick(..)
+            | Act::FormStep(..)
+            | Act::FormButton(_)
+            | Act::FormExtra(_)
+            | Act::FormSubmit
+            | Act::FormCloseDrop => self.form_act(&act),
             Act::ClearShortcut | Act::ResetShortcut => {
                 if let Some(Kind::Shortcut(key)) = self.overlay.as_ref().map(|o| o.kind.clone()) {
                     let value = if matches!(act, Act::ResetShortcut) {
@@ -1659,12 +1482,20 @@ impl App {
         if matches!(key, Key::Named(NamedKey::Enter)) {
             let query = overlay.query.clone();
             match kind {
-                Kind::Delete(path) => {
+                Kind::Delete(id) => {
                     self.overlay = None;
-                    self.operation(FileOp::Delete(path));
+                    self.delete_node(&id);
                 }
                 Kind::GotoLine => self.goto_line(&query),
-                Kind::Create | Kind::CreateFolder | Kind::Rename(_) => self.submit_name(kind, query),
+                Kind::Rename(id) => {
+                    let title = query.trim().to_owned();
+                    if title.is_empty() {
+                        self.note("Enter a title.");
+                    } else {
+                        self.overlay = None;
+                        self.rename_node(&id, &title);
+                    }
+                }
                 Kind::Replace if primary || overlay.secondary => self.replace(primary),
                 Kind::Find | Kind::Replace => {
                     let backwards = self.modifiers.shift_key();
@@ -1746,33 +1577,52 @@ impl App {
         self.dirty_session();
         let active = self.active_id();
         match command {
-            Command::Open => self.choose(Choose::Folder),
-            Command::OpenFile => self.choose(Choose::File),
-            Command::New => {
-                self.new_tab(self.active_pane);
-            }
-            Command::Save | Command::SaveAs => {
-                if let Some(id) = active {
-                    self.save(id, command == Command::SaveAs);
+            Command::NewProject => self.choose(Choose::NewProject),
+            Command::OpenProject => self.choose(Choose::OpenProject),
+            Command::Recent => self.show(Kind::Recent),
+            Command::Import => self.choose(Choose::ImportFile),
+            Command::Save => self.save_all(),
+            Command::SaveAs => {
+                if self.project.is_some() {
+                    self.choose(Choose::SaveProjectAs);
+                } else {
+                    self.status = "Open or create a project first.".into();
                 }
             }
-            Command::Reload => {
-                if let Some(id) = self.active_id() {
-                    let tab = self.tabs.get_mut(&id).unwrap();
-                    if let Some(text) = tab.external.take() {
-                        tab.disk_epoch += 1;
-                        let cursor = tab.document.cursor;
-                        let old = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(text),
-                        );
-                        std::thread::spawn(move || drop(old));
-                        tab.document.select(cursor, false);
-                        tab.view.clear_cache();
-                        tab.edited = None;
-                        self.scan(id, true);
+            Command::CloseProject => {
+                if self.tabs.values().any(|t| t.document.dirty()) {
+                    self.save_all();
+                    self.status = "Saving… close the project again once it is saved.".into();
+                } else {
+                    self.shutdown_project();
+                    self.clear_tabs();
+                    self.title();
+                }
+            }
+            Command::NewChapter => self.new_node("chapter"),
+            Command::NewPart => self.new_node("part"),
+            Command::NewPage => self.new_node("page"),
+            Command::Rename => match self.selected_item() {
+                Some(id) => {
+                    let mut overlay = Overlay::new(Kind::Rename(id.clone()));
+                    overlay.query = self.node_title(&id).unwrap_or_default();
+                    overlay.select_all = true;
+                    self.overlay = Some(overlay);
+                }
+                None => self.status = "Click a chapter, part or page in the tree first.".into(),
+            },
+            Command::Delete => match self.selected_item() {
+                Some(id) => self.overlay = Some(Overlay::new(Kind::Delete(id))),
+                None => self.status = "Click a chapter, part or page in the tree first.".into(),
+            },
+            Command::MoveUp | Command::MoveDown => {
+                let current = self.selected_item();
+                if let Some(state) = &mut self.project {
+                    if state.selected.is_none() {
+                        state.selected = current;
                     }
                 }
+                self.move_selected(command == Command::MoveDown);
             }
             Command::CloseTab => {
                 if let Some(id) = active {
@@ -1813,6 +1663,7 @@ impl App {
                         }
                     }
                     self.edited(id);
+                    self.retry_orphans(id);
                 }
             }
             Command::SelectAll => {
@@ -1855,72 +1706,38 @@ impl App {
                     }
                 }
             }
-            Command::Bold
-            | Command::Italic
-            | Command::Strike
-            | Command::Heading(_)
-            | Command::Bullet
-            | Command::Numbered
-            | Command::InlineCode
-            | Command::CodeBlock
-            | Command::Link
-            | Command::Indent
-            | Command::Outdent => {
+            Command::Bold | Command::Italic => {
                 if let Some(id) = active {
                     let doc = &mut self.tabs.get_mut(&id).unwrap().document;
-                    match command {
-                        Command::Bold => doc.surround("**", "**"),
-                        Command::Italic => doc.surround("*", "*"),
-                        Command::Strike => doc.surround("~~", "~~"),
-                        Command::Heading(level) => {
-                            doc.prefix(&format!("{} ", "#".repeat(level as usize)), true)
-                        }
-                        Command::Bullet => doc.prefix("- ", false),
-                        Command::Numbered => doc.prefix("1. ", false),
-                        Command::InlineCode => doc.surround("`", "`"),
-                        Command::CodeBlock => {
-                            let eol = doc.line_ending;
-                            doc.surround(&format!("```{eol}"), &format!("{eol}```"));
-                        }
-                        Command::Link => {
-                            let had_text = !doc.selection().is_empty();
-                            doc.surround("[", "](https://)");
-                            if had_text {
-                                // Select the placeholder address so it can be typed over.
-                                doc.anchor = doc.cursor + 2;
-                                doc.cursor = doc.anchor + "https://".len();
-                            }
-                        }
-                        Command::Indent => doc.indent(false),
-                        Command::Outdent => doc.indent(true),
-                        _ => {}
-                    }
+                    doc.toggle_emphasis(if command == Command::Bold { "**" } else { "*" });
                     self.edited(id);
                 }
             }
-            Command::Palette => self.show(Kind::Palette),
-            Command::QuickOpen => self.show(Kind::QuickOpen),
-            Command::JumpHeading => self.show(Kind::Headings),
-            Command::GotoLine => self.show(Kind::GotoLine),
-            Command::WordCount => {
-                if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
-                    let doc = &tab.document;
-                    let range = doc.selection();
-                    let (text, what) = if range.is_empty() {
-                        (doc.text.slice(..), "")
-                    } else {
-                        (doc.text.slice(range), " selected")
-                    };
-                    self.status = format!(
-                        "{} words · {} characters{what}",
-                        crate::core::buffer::word_count(text),
-                        text.len_chars()
-                    );
+            Command::ToggleNote | Command::NoteParagraph => {
+                if let Some(id) = active {
+                    let marker = self.marker();
+                    let doc = &mut self.tabs.get_mut(&id).unwrap().document;
+                    let selection = if command == Command::NoteParagraph { paragraph_around(&doc.text, doc.cursor) } else { doc.selection() };
+                    match crate::core::notes::toggle(&doc.text, selection, &marker) {
+                        Some(toggle) => {
+                            doc.replace(toggle.range, &toggle.text);
+                            doc.anchor = toggle.select.start;
+                            doc.cursor = toggle.select.end;
+                            self.edited(id);
+                        }
+                        None => self.status = "Nothing to turn into a note here.".into(),
+                    }
                 }
             }
+            Command::AddComment => self.add_comment_form(),
+            Command::Palette => self.show(Kind::Palette),
+            Command::QuickOpen => self.show(Kind::QuickOpen),
+            Command::JumpScene => self.show(Kind::Scenes),
+            Command::GotoLine => self.show(Kind::GotoLine),
+            Command::WordCount => self.show_word_count(),
             Command::Find => self.show(Kind::Find),
             Command::Replace => self.show(Kind::Replace),
-            Command::FolderSearch => self.show(Kind::FolderSearch),
+            Command::ProjectSearch => self.show(Kind::ProjectSearch),
             Command::SplitRight | Command::SplitDown => {
                 self.split_pane(command == Command::SplitDown, None)
             }
@@ -1942,14 +1759,32 @@ impl App {
                     self.status = "There is only one pane.".into();
                 }
             }
-            Command::Recent => self.show(Kind::Recent),
+            Command::ShowComments => {
+                if let Some(state) = &mut self.project {
+                    state.panel = Panel::Comments;
+                }
+                self.show_outline = true;
+            }
+            Command::ShowHistory => self.open_history(),
+            Command::Snapshot => self.snapshot_form(),
+            Command::Export => self.export_form(),
+            Command::Preview => self.open_preview(),
+            Command::BookDetails => self.book_form(),
+            Command::ProjectSettings => self.project_form(),
             Command::ToggleTree => self.show_tree = !self.show_tree,
-            Command::ToggleOutline => self.show_outline = !self.show_outline,
+            Command::TogglePanel => self.show_outline = !self.show_outline,
             Command::ToggleMarkers => {
                 self.settings.show_markers = !self.settings.show_markers;
                 self.save_settings();
             }
-            Command::Settings => self.show(Kind::Settings),
+            Command::HideNotes => {
+                self.settings.hide_notes = !self.settings.hide_notes;
+                self.save_settings();
+                for id in self.tabs.keys().copied().collect::<Vec<_>>() {
+                    self.scan(id, true);
+                }
+            }
+            Command::Settings => self.open_settings(),
             Command::Keymap => self.show(Kind::Keymap),
             Command::Focus => {
                 if let Some(window) = &self.window {
@@ -1960,51 +1795,6 @@ impl App {
                     } else {
                         None
                     });
-                }
-            }
-            Command::CreateFile => {
-                if self.root.is_none() {
-                    self.status = "Choose a folder to keep your notes in first.".into();
-                    self.choose(Choose::Folder);
-                } else {
-                    let mut overlay = Overlay::new(Kind::Create);
-                    overlay.query = self.selected_folder();
-                    self.overlay = Some(overlay);
-                }
-            }
-            Command::CreateFolder => {
-                if self.root.is_none() {
-                    self.status = "Choose a folder to keep your notes in first.".into();
-                    self.choose(Choose::Folder);
-                } else {
-                    let mut overlay = Overlay::new(Kind::CreateFolder);
-                    overlay.query = self.selected_folder();
-                    self.overlay = Some(overlay);
-                }
-            }
-            Command::RenameFile => {
-                if let Some(path) = self.target_path() {
-                    let mut overlay = Overlay::new(Kind::Rename(path.clone()));
-                    overlay.query = path.to_string_lossy().replace('\\', "/");
-                    self.overlay = Some(overlay);
-                } else {
-                    self.status = "Click a file or folder in the tree first.".into();
-                }
-            }
-            Command::DeleteFile => {
-                if let Some(path) = self.target_path() {
-                    if self.tabs.values().any(|t| {
-                        t.root == self.root
-                            && t.path.as_ref().is_some_and(|p| p.starts_with(&path))
-                            && t.document.dirty()
-                    }) {
-                        self.status =
-                            "Save or close your edits before deleting this file or folder.".into();
-                    } else {
-                        self.overlay = Some(Overlay::new(Kind::Delete(path)));
-                    }
-                } else {
-                    self.status = "Click a file or folder in the tree first.".into();
                 }
             }
             Command::Quit => {
@@ -2094,7 +1884,14 @@ impl App {
             return;
         }
         self.shortcut_key = shortcut_key.clone();
+        if self.form.is_some() {
+            self.form_key(&key, text);
+            return;
+        }
         if self.overlay_key(&key, text) {
+            return;
+        }
+        if self.screen_key(&key) {
             return;
         }
         let primary = platform::primary(self.modifiers);
@@ -2137,10 +1934,20 @@ impl App {
             }
             return;
         }
+        if self.screen.is_some() || self.project.is_none() {
+            return;
+        }
         let Some(id) = self.active_id() else {
             return;
         };
+        let typography = self
+            .project
+            .as_ref()
+            .map(|p| (p.core.manifest.settings.typography.clone(), p.core.manifest.settings.language));
         let tab = self.tabs.get_mut(&id).unwrap();
+        if tab.loading || tab.failed || self.project.is_none() {
+            return;
+        }
         let mut edited = false;
         match key {
             Key::Named(NamedKey::ArrowLeft) => {
@@ -2222,7 +2029,7 @@ impl App {
                 if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
             {
                 if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
-                    tab.document.type_text(text);
+                    tab.document.type_text(text, typography.as_ref().map(|(t, l)| (t, *l)));
                     edited = true;
                 }
             }
@@ -2243,10 +2050,6 @@ impl App {
                     .filter_map(|id| {
                         let tab = self.tabs.get(id)?;
                         Some(SessionTab {
-                            root: tab
-                                .root
-                                .clone()
-                                .filter(|root| Some(root) != self.root.as_ref()),
                             path: tab.path.clone()?,
                             cursor: tab.document.cursor,
                             top: tab.view.top,
@@ -2286,7 +2089,7 @@ impl App {
             return;
         }
         let session = Session {
-            workspace: self.root.clone(),
+            project: self.project.as_ref().map(|p| p.core.path.clone()),
             split: Some(self.session_split(&self.split)),
             tree_width: self.tree_width,
             outline_width: self.outline_width,
@@ -2302,6 +2105,10 @@ impl App {
                 return;
             }
         };
+        if close {
+            self.flush_tabs();
+            self.shutdown_project();
+        }
         let storage = self.config_storage.clone();
         let proxy = self.proxy.clone();
         self.session_closing = close;
@@ -2318,24 +2125,21 @@ impl App {
                 let pane = self.id();
                 let mut ids = Vec::new();
                 for saved in tabs {
-                    if !workspace::valid_relative(&saved.path) {
+                    let known = self
+                        .project
+                        .as_ref()
+                        .is_some_and(|p| p.core.id_of_file(&saved.path.to_string_lossy().replace('\\', "/")).is_some());
+                    if !known {
                         continue;
                     }
                     let id = self.id();
                     let mut tab = Tab::new(id);
                     tab.path = Some(saved.path.clone());
-                    tab.root = saved.root.or_else(|| self.root.clone());
-                    tab.storage = if tab.root == self.root {
-                        self.storage.clone()
-                    } else {
-                        tab.root
-                            .clone()
-                            .map(|root| Arc::new(LocalStorage::new(root)) as Arc<dyn Storage>)
-                    };
+                    tab.root = self.root.clone();
+                    tab.storage = self.storage.clone();
                     tab.loading = true;
                     tab.restore_cursor = Some(saved.cursor);
                     tab.view.top = saved.top;
-                    tab.guard_save = true;
                     if let Some(storage) = &tab.storage {
                         let proxy = self.proxy.clone();
                         storage.read(
@@ -2346,7 +2150,6 @@ impl App {
                         );
                     }
                     self.tabs.insert(id, tab);
-                    self.watch_tab(id);
                     ids.push(id);
                 }
                 if ids.is_empty() {
@@ -2416,39 +2219,13 @@ impl App {
                 next = Some(next.map_or(due, |other: Instant| other.min(due)));
             }
         }
+        if let Some(due) = self.project_tick(now) {
+            next = Some(next.map_or(due, |other: Instant| other.min(due)));
+        }
         for id in save {
             self.save(id, false);
         }
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
-    }
-    fn tree_rows(
-        &self,
-        folder: &Path,
-        depth: usize,
-        seen: &mut usize,
-        output: &mut Vec<(Entry, usize)>,
-        limit: usize,
-    ) {
-        if output.len() >= limit {
-            return;
-        }
-        if let Some(entries) = self.tree.get(folder) {
-            for entry in entries {
-                if *seen >= self.tree_top {
-                    output.push((entry.clone(), depth));
-                }
-                *seen += 1;
-                if output.len() >= limit {
-                    return;
-                }
-                if entry.directory && self.expanded.contains(&entry.path) {
-                    self.tree_rows(&entry.path, depth + 1, seen, output, limit);
-                }
-                if output.len() >= limit {
-                    return;
-                }
-            }
-        }
     }
     fn frame(&mut self, event_loop: &ActiveEventLoop) {
         let frame_started = Instant::now();
@@ -2476,12 +2253,13 @@ impl App {
         let footer = if focus { 0 } else { self.su(28.) };
         let body = size.height.saturating_sub(footer + menubar);
         let logical_width = size.width as f32 / self.scale;
-        let tree = if !focus && self.show_tree && logical_width > 640. {
+        let on_screen = self.screen.is_some();
+        let tree = if !focus && !on_screen && self.show_tree && logical_width > 640. {
             (self.tree_width * self.scale) as u32
         } else {
             0
         };
-        let outline = if !focus && self.show_outline && logical_width > 820. {
+        let outline = if !focus && !on_screen && self.show_outline && logical_width > 820. {
             (self.outline_width * self.scale) as u32
         } else {
             0
@@ -2504,7 +2282,7 @@ impl App {
                 height: body,
             };
             self.outline_rect = Some(rect);
-            self.paint_outline(rect, palette);
+            self.paint_panel(rect, palette);
         }
         let center = Rect {
             x: tree as i32,
@@ -2512,15 +2290,23 @@ impl App {
             width: size.width.saturating_sub(tree + outline).max(1),
             height: body,
         };
-        if focus {
-            self.pane_rects.push((self.active_pane, center));
+        if on_screen {
             self.dividers.clear();
+            self.paint_screen(center, palette);
+        } else if self.project.is_none() {
+            self.dividers.clear();
+            self.paint_welcome(center, palette);
         } else {
-            self.split.leaves(center, &mut self.pane_rects);
-            self.dividers_for(center);
-        }
-        for (pane, rect) in self.pane_rects.clone() {
-            self.paint_pane(pane, rect, focus, palette);
+            if focus {
+                self.pane_rects.push((self.active_pane, center));
+                self.dividers.clear();
+            } else {
+                self.split.leaves(center, &mut self.pane_rects);
+                self.dividers_for(center);
+            }
+            for (pane, rect) in self.pane_rects.clone() {
+                self.paint_pane(pane, rect, focus, palette);
+            }
         }
         if focus {
             let hint = Rect {
@@ -2569,6 +2355,7 @@ impl App {
             }
         }
         self.paint_overlay(full, menubar as i32, palette);
+        self.paint_form(full, palette);
         self.paint_popup(full, palette);
         self.paint_tooltip(full, palette);
         if let Some(Drag::Tab(tab, _, origin)) = self.drag.clone() {
@@ -2716,39 +2503,6 @@ impl App {
                     .is_some_and(|view| y >= view.y as f64 - self.s(27.) as f64)
         })
     }
-    /// Text of the line holding char `pos` (clipped for huge lines) and the column within it.
-    fn line_around(doc: &Rope, pos: usize) -> (String, usize) {
-        let line = doc.char_to_line(pos.min(doc.len_chars()));
-        let start = doc.line_to_char(line);
-        let end = if line + 1 < doc.len_lines() { doc.line_to_char(line + 1) } else { doc.len_chars() };
-        let from = start.max(pos.saturating_sub(1000));
-        let to = end.min(pos + 1000);
-        (doc.slice(from..to).to_string(), pos - from)
-    }
-    fn open_link(&mut self, id: u64, pos: usize) -> bool {
-        let Some(tab) = self.tabs.get(&id) else {
-            return false;
-        };
-        let (line, col) = Self::line_around(&tab.document.text, pos);
-        let Some(url) = markdown::link_at(&line, col) else {
-            return false;
-        };
-        if platform::open_url(&url) {
-            self.status = format!("Opened {url}");
-            return true;
-        }
-        // A relative link to another note opens in the editor.
-        let relative = Path::new(&url);
-        if !url.contains(':') && workspace::markdown_file(relative) {
-            let base = tab.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default();
-            let target: PathBuf = base.join(relative).components().filter(|c| matches!(c, std::path::Component::Normal(_))).collect();
-            if tab.root == self.root && self.open_relative(target, 0).is_some() {
-                return true;
-            }
-        }
-        self.status = format!("Can't open this link: {url}");
-        true
-    }
     fn editor_click(&mut self, x: f64, y: f64) {
         if !self.over_editor(x, y) {
             return;
@@ -2772,24 +2526,6 @@ impl App {
         let Some(tab) = self.tabs.get_mut(&id) else {
             return;
         };
-        if count == 1 && platform::primary(self.modifiers) {
-            if let Some(cursor) = tab.view.hit(x as f32, y as f32) {
-                if self.open_link(id, cursor) {
-                    return;
-                }
-            }
-        }
-        let Some(tab) = self.tabs.get_mut(&id) else {
-            return;
-        };
-        if count == 1 {
-            if let Some((index, checked)) = tab.view.checkbox_at(x as f32, y as f32) {
-                tab.document
-                    .replace(index..index + 1, if checked { " " } else { "x" });
-                self.edited(id);
-                return;
-            }
-        }
         let Some(cursor) = tab.view.hit(x as f32, y as f32) else {
             return;
         };
@@ -2835,7 +2571,11 @@ impl App {
                             p.active = *index;
                         }
                     }
-                    Some(Hit::Tree(path, _)) => self.tree_selected = Some(path.clone()),
+                    Some(Hit::Node(id)) => {
+                        if let Some(state) = &mut self.project {
+                            state.selected = Some(id.clone());
+                        }
+                    }
                     None if self.over_editor(x, y) => {
                         let empty = self
                             .active_id()
@@ -2875,34 +2615,23 @@ impl App {
                 }
             }
             Some(Hit::Close(id)) => self.close_tab(id, false),
-            Some(Hit::Tree(path, directory)) => {
-                self.tree_selected = Some(path.clone());
-                if directory {
-                    if self.expanded.contains(&path) {
-                        self.expanded.remove(&path);
-                    } else {
-                        self.expanded.insert(path.clone());
-                        if !self.tree.contains_key(&path) {
-                            self.list(path);
-                        }
-                    }
-                } else {
-                    self.open_relative(path, 0);
+            Some(Hit::Node(id)) => {
+                if let Some(state) = &mut self.project {
+                    state.selected = Some(id.clone());
                 }
-            }
-            Some(Hit::Heading(line, fold)) => {
-                if fold {
-                    if !self.folded.remove(&line) {
-                        self.folded.insert(line);
-                    }
+                let is_part = self.project.as_ref().and_then(|p| p.core.manifest.tree.find(&id)).is_some_and(manifest::Node::is_part);
+                if is_part {
+                    self.toggle_fold(&id);
                 } else {
-                    self.activate_row(Row {
-                        label: String::new(),
-                        hint: String::new(),
-                        action: Action::Heading(line),
-                    });
+                    self.open_item(&id);
                 }
+                self.drag = Some(Drag::Node(id, self.mouse));
             }
+            Some(Hit::Fold(id)) => self.toggle_fold(&id),
+            Some(Hit::Scene(line)) => {
+                self.activate_row(Row { label: String::new(), hint: String::new(), action: Action::Scene(line) });
+            }
+            Some(Hit::Comment(id)) => self.jump_to_comment(&id),
             Some(Hit::Row(index)) => {
                 if let Some(o) = &mut self.overlay {
                     o.selected = index;
@@ -3044,6 +2773,13 @@ impl App {
         }
     }
     fn mouse_up(&mut self) {
+        if let Some(Drag::Node(id, origin)) = self.drag.take() {
+            if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() >= 8. {
+                self.finish_node_drag(&id);
+            }
+            self.redraw();
+            return;
+        }
         if let Some(Drag::Tab(tab, source, origin)) = self.drag.take() {
             if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() < 8. {
                 return;
@@ -3135,67 +2871,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::OpenResolved(Some((root, relative))) => {
-                if self.tabs.values().any(|t| t.document.dirty()) {
-                    self.status = "Save your edits before changing workspace.".into();
-                } else {
-                    self.clear_tabs();
-                    self.set_workspace(root);
-                    self.open_relative(relative, 0);
-                }
-            }
-            UserEvent::OpenResolved(None) => self.status = "Cannot open this file".into(),
-            UserEvent::Chosen(Some(root), Choose::Folder) => self.switch_workspace(root),
-            UserEvent::Chosen(Some(path), Choose::File) => self.open_absolute(path),
-            UserEvent::Chosen(Some(path), Choose::Save(id)) => {
-                if self.tabs.get(&id).is_some_and(|t| t.saving) {
-                    self.status =
-                        "A save is in progress. Please retry Save as when it finishes.".into();
-                    self.after_save = None;
-                    self.redraw();
-                    return;
-                }
-                let (root, relative) = if let Some(root) = &self.root {
-                    match path.strip_prefix(root) {
-                        Ok(relative) => (root.clone(), relative.to_path_buf()),
-                        Err(_) => (
-                            path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                            path.file_name().map(PathBuf::from).unwrap_or_default(),
-                        ),
-                    }
-                } else {
-                    (
-                        path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-                        path.file_name().map(PathBuf::from).unwrap_or_default(),
-                    )
-                };
-                if self.root.is_none() {
-                    self.set_workspace(root.clone());
-                }
-                let storage: Arc<dyn Storage> = if self.root.as_ref() == Some(&root) {
-                    self.storage.clone().unwrap()
-                } else {
-                    Arc::new(LocalStorage::new(root.clone()))
-                };
-                if let Some(tab) = self.tabs.get_mut(&id) {
-                    tab.path = Some(relative);
-                    tab.root = Some(root);
-                    tab.watcher = None;
-                    tab.storage = Some(storage);
-                    tab.guard_save = false;
-                    tab.disk_epoch += 1;
-                    self.save(id, false);
-                    self.watch_tab(id);
-                }
-            }
-            UserEvent::Chosen(None, Choose::Save(id)) => {
-                if let Some(tab) = self.tabs.get_mut(&id).filter(|t| t.document.dirty()) {
-                    tab.edited = Some(Instant::now());
-                }
-                self.after_save = None;
-            }
+            UserEvent::Chosen(Some(path), choice) => self.chosen(path, choice),
             UserEvent::Chosen(None, _) => {
                 self.after_save = None;
+                self.pending_import = None;
+                self.pending_export = None;
             }
             UserEvent::Read(id, event) => {
                 if let Some(tab) = self.tabs.get_mut(&id) {
@@ -3223,6 +2903,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 tab.document.select(cursor, false);
                             }
                             self.scan(id, true);
+                            self.rebuild_marks(id);
+                            self.apply_jump();
                         }
                         ReadEvent::Error(error) => {
                             tab.loading = false;
@@ -3238,9 +2920,6 @@ impl ApplicationHandler<UserEvent> for App {
                     match result {
                         Ok(()) => {
                             tab.document.mark_saved(revision, snapshot);
-                            tab.guard_save = true;
-                            tab.disk_epoch += 1;
-                            tab.external = None;
                             if tab.document.dirty() {
                                 tab.edited = Some(Instant::now());
                             }
@@ -3266,9 +2945,10 @@ impl ApplicationHandler<UserEvent> for App {
                             match after {
                                 Kind::Close(id) => self.close_tab(id, true),
                                 Kind::Quit => self.persist_session(true),
-                                Kind::ChangeWorkspace(root) => {
+                                Kind::ChangeWorkspace(path) => {
+                                    self.shutdown_project();
                                     self.clear_tabs();
-                                    self.set_workspace(root);
+                                    self.open_project(path, false);
                                 }
                                 _ => {}
                             }
@@ -3300,90 +2980,6 @@ impl ApplicationHandler<UserEvent> for App {
                     tab.view.clear_cache();
                 }
             }
-            UserEvent::Watched(generation, watcher) if generation == self.generation => {
-                self.watcher = Some(watcher)
-            }
-            UserEvent::Changed(generation, path) if generation == self.generation => {
-                self.list(
-                    path.parent()
-                        .filter(|p| !p.as_os_str().is_empty())
-                        .unwrap_or(Path::new("."))
-                        .to_path_buf(),
-                );
-                self.index_files();
-                let ids: Vec<_> = self
-                    .tabs
-                    .iter()
-                    .filter(|(_, t)| {
-                        t.path.as_ref() == Some(&path)
-                            && t.root == self.root
-                            && !t.loading
-                            && !t.saving
-                    })
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in ids {
-                    let tab = &self.tabs[&id];
-                    let Some(storage) = tab.storage.clone() else {
-                        continue;
-                    };
-                    let saved = tab.document.saved_snapshot();
-                    let path = path.clone();
-                    let proxy = self.proxy.clone();
-                    let revision = tab.document.revision;
-                    let epoch = tab.disk_epoch;
-                    std::thread::spawn(move || match read_complete(&*storage, &path) {
-                        Ok(text) if text != saved => {
-                            let _ =
-                                proxy.send_event(UserEvent::External(id, epoch, revision, text));
-                        }
-                        Ok(_) => {}
-                        Err(error) => {
-                            let _ = proxy.send_event(UserEvent::Error(format!(
-                                "External file change: {error}"
-                            )));
-                        }
-                    });
-                }
-            }
-            UserEvent::External(id, epoch, revision, text) => {
-                if let Some(tab) = self.tabs.get_mut(&id).filter(|tab| tab.disk_epoch == epoch) {
-                    if tab.document.dirty() || tab.document.revision != revision {
-                        tab.external = Some(text);
-                        tab.edited = None;
-                    } else {
-                        tab.disk_epoch += 1;
-                        let cursor = tab.document.cursor;
-                        let old = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(text),
-                        );
-                        std::thread::spawn(move || drop(old));
-                        tab.document.select(cursor, false);
-                        tab.view.clear_cache();
-                        self.scan(id, true);
-                    }
-                }
-            }
-            UserEvent::Listed(generation, folder, entries) if generation == self.generation => {
-                self.tree.insert(folder, entries);
-            }
-            UserEvent::TabWatched(id, watcher) => {
-                if let Some(tab) = self.tabs.get_mut(&id) {
-                    tab.watcher = Some(watcher);
-                }
-            }
-            UserEvent::TabChanged(id) => self.check_external(id),
-            UserEvent::Files(generation, files) if generation == self.generation => {
-                self.files = files;
-                if self
-                    .overlay
-                    .as_ref()
-                    .is_some_and(|o| matches!(o.kind, Kind::QuickOpen))
-                {
-                    self.refresh_overlay();
-                }
-            }
             UserEvent::Rows(version, rows) => {
                 if let Some(overlay) = &mut self.overlay {
                     if overlay.version == version {
@@ -3403,86 +2999,32 @@ impl ApplicationHandler<UserEvent> for App {
                     let argument = std::env::args_os()
                         .skip(1)
                         .find(|s| !s.to_string_lossy().starts_with("--"));
-                    if self.tabs.values().all(|t| !t.document.dirty()) {
+                    if let Some(session) = &session {
+                        self.tree_width = if (130.0..=420.0).contains(&session.tree_width) { session.tree_width } else { 218. };
+                        self.outline_width = if (130.0..=420.0).contains(&session.outline_width) { session.outline_width } else { 200. };
+                        self.recent = session.recent.clone();
+                        self.show_tree = session.show_tree;
+                        self.show_outline = session.show_outline;
+                    }
+                    if self.project.is_none() {
                         if let Some(path) = argument {
-                            self.open_absolute(PathBuf::from(path));
-                        } else if let Some(session) = session {
-                            if let Some(root) = session.workspace {
-                                self.set_workspace(root);
-                            }
-                            self.tree_width = if (130.0..=420.0).contains(&session.tree_width) {
-                                session.tree_width
-                            } else {
-                                218.
-                            };
-                            self.outline_width = if (130.0..=420.0).contains(&session.outline_width)
-                            {
-                                session.outline_width
-                            } else {
-                                200.
-                            };
-                            self.recent = session.recent.clone();
-                            self.show_tree = session.show_tree;
-                            self.show_outline = session.show_outline;
-                            if let Some(split) = session.split {
-                                self.tabs.clear();
-                                self.split = self.restore_split(split);
-                                self.active_pane = self.split.first_pane();
-                            }
+                            self.open_project(PathBuf::from(path), false);
+                        } else if let Some(path) = session.as_ref().and_then(|s| s.project.clone()).filter(|p| p.is_file()) {
+                            self.pending_session = session.and_then(|s| s.split);
+                            self.open_project(path, false);
                         }
                     }
                 }
                 Err(error) => self.status = format!("Settings error: {error}"),
             },
-            UserEvent::Operation(generation, operation, result)
-                if generation == self.generation =>
-            {
-                match result {
-                    Ok(()) => {
-                        match operation {
-                            FileOp::Create(path) => {
-                                self.open_relative(path, 0);
-                            }
-                            FileOp::CreateFolder(path) => {
-                                self.tree_selected = Some(path);
-                            }
-                            FileOp::Rename(from, to) => {
-                                for tab in
-                                    self.tabs.values_mut().filter(|tab| tab.root == self.root)
-                                {
-                                    if let Some(rest) =
-                                        tab.path.as_ref().and_then(|p| p.strip_prefix(&from).ok())
-                                    {
-                                        tab.path = Some(to.join(rest));
-                                    }
-                                }
-                                self.tree_selected = Some(to);
-                            }
-                            FileOp::Delete(path) => {
-                                let ids: Vec<_> = self
-                                    .tabs
-                                    .iter()
-                                    .filter(|(_, t)| {
-                                        t.root == self.root
-                                            && t.path.as_ref().is_some_and(|p| p.starts_with(&path))
-                                    })
-                                    .map(|(id, _)| *id)
-                                    .collect();
-                                for id in ids {
-                                    self.close_tab(id, true);
-                                }
-                                self.tree_selected = None;
-                            }
-                        }
-                        let folders: Vec<_> = self.expanded.iter().cloned().collect();
-                        for folder in folders {
-                            self.list(folder);
-                        }
-                        self.index_files();
-                    }
-                    Err(error) => self.status = error,
-                }
-            }
+            UserEvent::ProjectOpened(path, result) => self.project_opened(path, result),
+            UserEvent::ChapterSaved(rel, words) => self.chapter_saved(&rel, words),
+            UserEvent::Packed(result) => self.packed(result),
+            UserEvent::Exported(result) => self.exported(result),
+            UserEvent::Preview(version, result) => self.preview_ready(version, result),
+            UserEvent::Imported(result) => self.imported(result),
+            UserEvent::ImportRead(path, result) => self.import_read(path, result),
+            UserEvent::PreviewPage(version, page, q, bitmap) => self.preview_page(version, page, q, bitmap),
             UserEvent::SessionSaved(result) => match result {
                 Ok(()) if self.session_closing => event_loop.exit(),
                 Ok(()) => {}
@@ -3586,9 +3128,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.preedit.clear();
-                if let Some(overlay) = self.overlay.as_mut().filter(|o| o.focused) {
+                if self.form.is_some() {
+                    self.form_text(&text);
+                } else if let Some(overlay) = self.overlay.as_mut().filter(|o| o.focused) {
                     overlay.type_text(&text);
                     self.refresh_overlay();
+                } else if self.screen.is_some() || self.project.is_none() {
                 } else if let Some(id) = self.active_id() {
                     self.tabs.get_mut(&id).unwrap().document.insert(&text);
                     self.edited(id);
@@ -3637,18 +3182,20 @@ impl ApplicationHandler<UserEvent> for App {
                         .map(|p| p.id),
                     _ => None,
                 });
-                if let Some(o) = self.overlay.as_mut().filter(|o| !o.docked()) {
-                    if o.kind != Kind::Settings {
-                        let last = o.rows.len().saturating_sub(o.visible);
-                        o.scroll = (o.scroll as i32 + rows).clamp(0, last as i32) as usize;
-                    }
+                if self.form.is_some() {
+                    self.form_scroll(rows);
+                } else if let Some(o) = self.overlay.as_mut().filter(|o| !o.docked()) {
+                    let last = o.rows.len().saturating_sub(o.visible);
+                    o.scroll = (o.scroll as i32 + rows).clamp(0, last as i32) as usize;
+                } else if self.screen.is_some() {
+                    self.screen_scroll(rows, false);
                 } else if let Some(pane) = tab_strip {
                     self.active_pane = pane;
                     self.command(if rows > 0 { Command::NextTab } else { Command::PreviousTab });
                 } else if self.tree_rect.is_some_and(|r| contains(r, x, y)) {
                     self.tree_top = (self.tree_top as i32 + rows).max(0) as usize;
                 } else if self.outline_rect.is_some_and(|r| contains(r, x, y)) {
-                    self.scroll_outline(rows);
+                    self.scroll_panel(rows);
                 } else if let Some((pane, _)) = self
                     .pane_rects
                     .iter()
@@ -3662,392 +3209,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.redraw();
             }
-            WindowEvent::DroppedFile(path) => self.open_absolute(path),
+            WindowEvent::DroppedFile(path) => self.dropped(path),
             WindowEvent::Focused(false) => {
                 self.drag = None;
                 self.modifiers = ModifiersState::empty();
             }
             _ => {}
         }
-    }
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    use super::*;
-    struct Smoke {
-        app: App,
-        folder: tempfile::TempDir,
-        outside: tempfile::TempDir,
-        phase: u8,
-        first: u64,
-        second: u64,
-        session_saved: bool,
-        started: Instant,
-    }
-    impl ApplicationHandler<UserEvent> for Smoke {
-        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            self.app.resumed(event_loop);
-            self.app.first_frame = true; // Use isolated fixtures, never the user's settings or session.
-            self.app
-                .set_workspace(self.folder.path().canonicalize().unwrap());
-            self.first = self.app.open_relative("first.md".into(), 0).unwrap();
-        }
-        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
-            if matches!(&event, UserEvent::SessionSaved(Ok(()))) {
-                self.session_saved = true;
-            }
-            self.app.user_event(event_loop, event);
-        }
-        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
-            self.app.window_event(event_loop, id, event);
-            self.about_to_wait(event_loop);
-        }
-        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-            assert!(
-                self.started.elapsed() < Duration::from_secs(15),
-                "Native smoke test timed out at phase {}: {}",
-                self.phase,
-                self.app.status
-            );
-            self.app.autosave(event_loop);
-            match self.phase {
-                0 if !self.app.tabs[&self.first].loading => {
-                    self.app
-                        .user_event(event_loop, UserEvent::Fonts(platform::fallback_fonts()));
-                    if let Some(path) = std::env::var_os("JAME_PREVIEW_PATH") {
-                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
-                        let document = std::mem::replace(
-                            &mut tab.document,
-                            crate::core::buffer::Document::new(Rope::from_str(include_str!(
-                                "../../examples/welcome.md"
-                            ))),
-                        );
-                        let blocks = std::mem::take(&mut tab.blocks);
-                        tab.blocks.update(&tab.document.text, 0);
-                        tab.view.clear_cache();
-                        self.app.frame(event_loop);
-                        let width = self.app.renderer.width;
-                        let height = self.app.renderer.height;
-                        let mut bytes = Vec::new();
-                        bytes.extend_from_slice(b"BM");
-                        bytes.extend_from_slice(&(54 + width * height * 4).to_le_bytes());
-                        bytes.extend_from_slice(&[0; 4]);
-                        bytes.extend_from_slice(&54u32.to_le_bytes());
-                        bytes.extend_from_slice(&40u32.to_le_bytes());
-                        bytes.extend_from_slice(&width.to_le_bytes());
-                        bytes.extend_from_slice(&height.to_le_bytes());
-                        bytes.extend_from_slice(&1u16.to_le_bytes());
-                        bytes.extend_from_slice(&32u16.to_le_bytes());
-                        bytes.extend_from_slice(&[0; 24]);
-                        for row in self.app.renderer.pixels().chunks(width as usize).rev() {
-                            for pixel in row {
-                                bytes.extend_from_slice(&pixel.to_le_bytes());
-                            }
-                        }
-                        std::fs::write(path, bytes).unwrap();
-                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
-                        tab.document = document;
-                        tab.blocks = blocks;
-                        tab.view.clear_cache();
-                    }
-                    self.app.frame(event_loop);
-                    assert!(!self.app.tabs[&self.first].view.tiles.is_empty());
-                    let before = self.app.tabs[&self.first].document.text.clone();
-                    let end = before.len_chars();
-                    self.app
-                        .tabs
-                        .get_mut(&self.first)
-                        .unwrap()
-                        .document
-                        .select(end, false);
-                    let window = self.app.window.as_ref().unwrap().id();
-                    self.app.window_event(
-                        event_loop,
-                        window,
-                        WindowEvent::Ime(Ime::Preedit("日本語".into(), Some((0, 9)))),
-                    );
-                    assert_eq!(self.app.tabs[&self.first].document.text, before);
-                    self.app.window_event(
-                        event_loop,
-                        window,
-                        WindowEvent::Ime(Ime::Commit("日本語".into())),
-                    );
-                    assert!(
-                        self.app.tabs[&self.first]
-                            .document
-                            .text
-                            .to_string()
-                            .ends_with("日本語")
-                    );
-                    self.app.command(Command::Undo);
-                    assert_eq!(self.app.tabs[&self.first].document.text, before);
-                    self.app.command(Command::Redo);
-                    self.app.split_pane(false, None);
-                    self.second = self.app.open_relative("second.md".into(), 0).unwrap();
-                    self.phase = 1;
-                }
-                1 if !self.app.tabs[&self.second].loading => {
-                    let source = self.app.active_pane;
-                    let target = self.app.split.first_pane();
-                    self.app.move_tab(self.second, source, target, 1);
-                    self.app.move_tab(self.first, target, target, 2);
-                    assert_eq!(
-                        self.app.split.pane(target).unwrap().tabs,
-                        vec![self.second, self.first]
-                    );
-                    self.app.split_pane(true, None);
-                    let empty = self.app.active_id().unwrap();
-                    self.app.close_tab(empty, true);
-                    assert!(matches!(self.app.split, Split::Pane(_)));
-                    self.app.open_relative("first.md".into(), 0);
-                    self.app.show(Kind::Replace);
-                    self.app.modifiers = ModifiersState::CONTROL;
-                    let before = self.app.tabs[&self.first].document.text.clone();
-                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
-                    assert_eq!(self.app.tabs[&self.first].document.text, before);
-                    self.app.modifiers = ModifiersState::empty();
-                    let overlay = self.app.overlay.as_mut().unwrap();
-                    overlay.query = "body".into();
-                    overlay.replacement = "changed".into();
-                    overlay.secondary = true;
-                    overlay.rows = vec![Row {
-                        label: String::new(),
-                        hint: String::new(),
-                        action: Action::Match(workspace::Match {
-                            path: "first.md".into(),
-                            start: 1000,
-                            end: 1004,
-                            line: 0,
-                            preview: String::new(),
-                        }),
-                    }];
-                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
-                    assert_eq!(self.app.tabs[&self.first].document.text, before);
-                    self.phase = 2;
-                }
-                2 if self
-                    .app
-                    .overlay
-                    .as_ref()
-                    .is_some_and(|o| !o.pending && !o.rows.is_empty()) =>
-                {
-                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
-                    assert!(
-                        self.app.tabs[&self.first]
-                            .document
-                            .text
-                            .to_string()
-                            .contains("changed")
-                    );
-                    self.app.overlay = None;
-                    self.phase = 3;
-                }
-                3 if !self.app.tabs[&self.first].document.dirty() && self.app.watcher.is_some() => {
-                    let saved = read_complete(
-                        &*self.app.storage.as_ref().unwrap().clone(),
-                        Path::new("first.md"),
-                    )
-                    .unwrap();
-                    assert_eq!(saved, self.app.tabs[&self.first].document.text);
-                    self.app
-                        .storage
-                        .as_ref()
-                        .unwrap()
-                        .write(
-                            Path::new("first.md"),
-                            &Rope::from_str("# Disk\r\nclean reload\r\n"),
-                        )
-                        .unwrap();
-                    self.phase = 4;
-                }
-                4 if self.app.tabs[&self.first]
-                    .document
-                    .text
-                    .to_string()
-                    .contains("clean reload") =>
-                {
-                    self.app
-                        .tabs
-                        .get_mut(&self.first)
-                        .unwrap()
-                        .document
-                        .select(0, false);
-                    self.app
-                        .tabs
-                        .get_mut(&self.first)
-                        .unwrap()
-                        .document
-                        .insert("mine ");
-                    self.app.edited(self.first);
-                    self.app
-                        .storage
-                        .as_ref()
-                        .unwrap()
-                        .write(
-                            Path::new("first.md"),
-                            &Rope::from_str("the external version"),
-                        )
-                        .unwrap();
-                    self.phase = 5;
-                }
-                5 if self.app.tabs[&self.first].external.is_some() => {
-                    assert!(
-                        self.app.tabs[&self.first]
-                            .document
-                            .text
-                            .to_string()
-                            .starts_with("mine ")
-                    );
-                    assert!(self.app.tabs[&self.first].edited.is_none());
-                    self.app.save(self.first, false);
-                    self.phase = 6;
-                }
-                6 if !self.app.tabs[&self.first].document.dirty()
-                    && !self.app.tabs[&self.first].saving =>
-                {
-                    assert!(self.app.tabs[&self.first].external.is_none());
-                    let destination =
-                        platform::save_destination(&self.outside.path().join("first.md")).unwrap();
-                    self.app.user_event(
-                        event_loop,
-                        UserEvent::Chosen(Some(destination), Choose::Save(self.first)),
-                    );
-                    self.phase = 10;
-                }
-                10 if !self.app.tabs[&self.first].saving
-                    && self.app.tabs[&self.first].watcher.is_some() =>
-                {
-                    self.app.tabs[&self.first]
-                        .storage
-                        .as_ref()
-                        .unwrap()
-                        .write(
-                            Path::new("first.md"),
-                            &Rope::from_str("mine outside document\r\n"),
-                        )
-                        .unwrap();
-                    self.phase = 11;
-                }
-                11 if self.app.tabs[&self.first]
-                    .document
-                    .text
-                    .to_string()
-                    .contains("outside document") =>
-                {
-                    self.app
-                        .operation(FileOp::Rename("first.md".into(), "renamed.md".into()));
-                    self.phase = 12;
-                }
-                12 if self.app.files.iter().any(|p| p == Path::new("renamed.md")) => {
-                    assert_eq!(
-                        self.app.tabs[&self.first].path.as_deref(),
-                        Some(Path::new("first.md"))
-                    );
-                    // Go to line clamps, word count reports, export writes next to the file.
-                    self.app.goto_line("2");
-                    let doc = &self.app.tabs[&self.first].document;
-                    assert_eq!(doc.cursor, doc.text.line_to_char(1));
-                    self.app.goto_line("99999");
-                    let doc = &self.app.tabs[&self.first].document;
-                    assert_eq!(doc.cursor, doc.text.line_to_char(doc.text.len_lines() - 1));
-                    self.app.goto_line("abc");
-                    self.app.command(Command::WordCount);
-                    assert!(self.app.status.starts_with("3 words"), "{}", self.app.status);
-                    self.phase = 13;
-                }
-                13 if self.app.status.starts_with("Exported") => {
-                    let html =
-                        std::fs::read_to_string(self.outside.path().join("first.html")).unwrap();
-                    assert!(html.contains("<p>mine outside document</p>"), "{html}");
-                    // Later phases expect the cursor where the earlier phases left it.
-                    self.app.tabs.get_mut(&self.first).unwrap().document.select(5, false);
-                    self.app.persist_session(false);
-                    self.phase = 7;
-                }
-                7 if self.session_saved => {
-                    let text = read_complete(&*self.app.config_storage, Path::new("session.toml"))
-                        .unwrap();
-                    let session: Session = toml::from_str(&text.to_string()).unwrap();
-                    self.app.clear_tabs();
-                    let split = session.split.unwrap();
-                    self.app.split = self.app.restore_split(split);
-                    self.app.active_pane = self.app.split.first_pane();
-                    self.phase = 8;
-                }
-                8 if self
-                    .app
-                    .tabs
-                    .values()
-                    .filter(|t| t.path.is_some())
-                    .all(|t| !t.loading) =>
-                {
-                    let restored = self
-                        .app
-                        .tabs
-                        .values()
-                        .find(|t| t.path.as_deref() == Some(Path::new("first.md")))
-                        .unwrap();
-                    assert_eq!(restored.document.cursor, 5);
-                    assert!(restored.document.text.to_string().starts_with("mine "));
-                    assert!(
-                        restored
-                            .document
-                            .text
-                            .to_string()
-                            .contains("outside document")
-                    );
-                    assert_eq!(
-                        restored.root,
-                        Some(self.outside.path().canonicalize().unwrap())
-                    );
-                    assert_eq!(
-                        self.app
-                            .split
-                            .pane(self.app.active_pane)
-                            .unwrap()
-                            .tabs
-                            .len(),
-                        2
-                    );
-                    event_loop.exit();
-                    self.phase = 9;
-                }
-                _ => {}
-            }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(10),
-            ));
-        }
-    }
-    #[test]
-    fn native_window_edit_save_conflict_tabs_and_session() {
-        let folder = tempfile::tempdir().unwrap();
-        let config = tempfile::tempdir().unwrap();
-        let store = LocalStorage::new(folder.path().to_path_buf());
-        store
-            .write(
-                Path::new("first.md"),
-                &Rope::from_str("# First\r\nbody\r\n"),
-            )
-            .unwrap();
-        store
-            .write(Path::new("second.md"), &Rope::from_str("# Second\n"))
-            .unwrap();
-        let event_loop = platform::test_event_loop();
-        let mut app = App::new(event_loop.create_proxy(), Instant::now());
-        app.config_storage = Arc::new(LocalStorage::new(config.path().to_path_buf()));
-        let mut smoke = Smoke {
-            app,
-            folder,
-            outside: tempfile::tempdir().unwrap(),
-            phase: 0,
-            first: 0,
-            second: 0,
-            session_saved: false,
-            started: Instant::now(),
-        };
-        event_loop.run_app(&mut smoke).unwrap();
-        assert_eq!(smoke.phase, 9);
     }
 }

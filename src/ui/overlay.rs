@@ -5,21 +5,19 @@ use std::path::PathBuf;
 pub enum Kind {
     Palette,
     QuickOpen,
-    Headings,
+    Scenes,
     GotoLine,
-    HeadingLevels,
     Find,
     Replace,
-    FolderSearch,
+    ProjectSearch,
     Recent,
-    Settings,
     Keymap,
     Setting(String),
     Shortcut(String),
-    Create,
-    CreateFolder,
-    Rename(PathBuf),
-    Delete(PathBuf),
+    /// Rename the chapter, part or page with this id.
+    Rename(String),
+    /// Delete the chapter, part or page with this id.
+    Delete(String),
     Close(u64),
     Quit,
     ChangeWorkspace(PathBuf),
@@ -28,9 +26,9 @@ pub enum Kind {
 pub enum Action {
     Command(Command),
     File(PathBuf, usize),
-    Heading(usize),
+    Scene(usize),
     Match(Match),
-    Folder(PathBuf),
+    Project(PathBuf),
     Setting(String),
     Shortcut(String),
     None,
@@ -88,37 +86,33 @@ impl Overlay {
     pub fn title(&self) -> &str {
         match &self.kind {
             Kind::Palette => "Command palette",
-            Kind::QuickOpen => "Go to file",
-            Kind::Headings => "Jump to heading",
-            Kind::HeadingLevels => "Heading level",
-            Kind::Find => "Find in this file",
+            Kind::QuickOpen => "Go to chapter or page",
+            Kind::Scenes => "Jump to scene",
+            Kind::Find => "Find in this chapter",
             Kind::Replace => "Find and replace",
-            Kind::FolderSearch => "Search the workspace",
-            Kind::Recent => "Open recent folder",
-            Kind::Settings => "Settings",
+            Kind::ProjectSearch => "Search the project",
+            Kind::Recent => "Open recent project",
             Kind::Keymap => "Keyboard shortcuts",
             Kind::Setting(_) => "Choose a font",
             Kind::Shortcut(_) => "Change shortcut",
             Kind::GotoLine => "Go to line",
-            Kind::Create => "New Markdown file",
             Kind::Rename(_) => "Rename",
-            Kind::CreateFolder => "New folder",
-            Kind::Delete(_) => "Move to Recycle Bin",
+            Kind::Delete(_) => "Delete",
             Kind::Close(_) | Kind::Quit | Kind::ChangeWorkspace(_) => "Unsaved changes",
         }
     }
     pub fn placeholder(&self) -> &str {
         match &self.kind {
             Kind::Palette => "Type a command…",
-            Kind::QuickOpen => "Type a file name…",
-            Kind::Headings => "Type a heading…",
+            Kind::QuickOpen => "Type a chapter or page name…",
+            Kind::Scenes => "Type words from a scene…",
             Kind::Find | Kind::Replace => "Find…",
-            Kind::FolderSearch => "Search all notes…",
+            Kind::ProjectSearch => "Search all chapters and pages…",
             Kind::Setting(_) => "Type to filter fonts…",
             Kind::Keymap => "Filter commands…",
-            Kind::Recent => "Type a folder name…",
+            Kind::Recent => "Type a project name…",
             Kind::GotoLine => "Line number",
-            Kind::Create | Kind::Rename(_) | Kind::CreateFolder => "folder/name.md",
+            Kind::Rename(_) => "New title",
             _ => "",
         }
     }
@@ -126,11 +120,8 @@ impl Overlay {
     pub fn is_dialog(&self) -> bool {
         matches!(
             self.kind,
-            Kind::Settings
-                | Kind::Shortcut(_)
+            Kind::Shortcut(_)
                 | Kind::GotoLine
-                | Kind::Create
-                | Kind::CreateFolder
                 | Kind::Rename(_)
                 | Kind::Delete(_)
                 | Kind::Close(_)
@@ -141,8 +132,7 @@ impl Overlay {
     pub fn has_input(&self) -> bool {
         !matches!(
             self.kind,
-            Kind::Settings
-                | Kind::Shortcut(_)
+            Kind::Shortcut(_)
                 | Kind::Delete(_)
                 | Kind::Close(_)
                 | Kind::Quit

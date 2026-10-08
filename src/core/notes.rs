@@ -273,6 +273,10 @@ impl Remap {
             None => pos,
         }
     }
+    /// The conversion in the other direction.
+    pub fn inverse(&self) -> Remap {
+        Remap { spans: self.spans.iter().map(|&(src, len, dst, dlen)| (dst, dlen, src, len)).collect() }
+    }
     pub fn map_range(&self, range: Range<usize>) -> Range<usize> {
         self.map(range.start)..self.map(range.end)
     }
@@ -734,6 +738,21 @@ mod tests {
         let (_, back) = to_display(&neutral, &m());
         let ne = neutral.chars().position(|c| c == 'e').unwrap();
         assert_eq!(display.chars().nth(back.map(ne)), Some('e'));
+    }
+
+    #[test]
+    fn inverse_maps_back_positions_outside_markers() {
+        let display = "ab $$ cd $$ ef \\$$ gh";
+        let (neutral, forward) = to_neutral(display, &m());
+        let back = forward.inverse();
+        for (i, c) in display.chars().enumerate() {
+            if c.is_alphabetic() {
+                let there = forward.map(i);
+                assert_eq!(neutral.chars().nth(there), Some(c));
+                assert_eq!(back.map(there), i);
+            }
+        }
+        assert_eq!(back.map(neutral.chars().count()), display.chars().count());
     }
 
     #[test]
