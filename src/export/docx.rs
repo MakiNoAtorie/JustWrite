@@ -570,9 +570,9 @@ pub(crate) mod tests {
         let mut out = BTreeMap::new();
         for i in 0..archive.len() {
             let mut f = archive.by_index(i).unwrap();
-            let mut s = String::new();
-            f.read_to_string(&mut s).unwrap();
-            out.insert(f.name().to_owned(), s);
+            let mut bytes = Vec::new();
+            f.read_to_end(&mut bytes).unwrap();
+            out.insert(f.name().to_owned(), String::from_utf8_lossy(&bytes).into_owned());
         }
         out
     }
