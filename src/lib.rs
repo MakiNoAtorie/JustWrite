@@ -1,6 +1,7 @@
 pub mod core;
 pub mod jw;
 pub mod fonts;
+pub mod history;
 pub mod platform;
 pub mod render;
 pub mod ui;

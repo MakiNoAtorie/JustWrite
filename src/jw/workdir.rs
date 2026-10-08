@@ -100,6 +100,26 @@ impl WorkDir {
         self.write(rel, bytes)?;
         Ok(true)
     }
+    /// Appends to a file (creating it); for logs that only grow. A write cut short by a crash
+    /// leaves at most one broken last line.
+    pub fn append(&self, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        let target = self.path(rel)?;
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = OpenOptions::new().create(true).append(true).open(target)?;
+        file.write_all(bytes)?;
+        self.journal("write", rel);
+        Ok(())
+    }
+    pub fn list(&self, rel: &str) -> io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in fs::read_dir(self.path(rel)?)? {
+            names.push(entry?.file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        Ok(names)
+    }
     pub fn remove(&self, rel: &str) -> io::Result<()> {
         let target = self.path(rel)?;
         let result = if target.is_dir() { fs::remove_dir_all(&target) } else { fs::remove_file(&target) };
