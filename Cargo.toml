@@ -27,6 +27,11 @@ blake3 = { version = "1", default-features = false, features = ["std", "pure"] }
 jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
 similar = "3"
 quick-xml = "0.42"
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+typst-render = "0.15.1"
+typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [profile.release]
