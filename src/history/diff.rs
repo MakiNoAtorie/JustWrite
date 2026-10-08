@@ -50,6 +50,10 @@ pub fn compare(a: &State, b: &State) -> Comparison {
             .collect()
     };
     let (oa, ob) = (order(a), order(b));
+    // Position of each chapter among those both states hold, to notice chapters that moved.
+    let (in_a, in_b): (std::collections::HashSet<&String>, std::collections::HashSet<&String>) = (oa.iter().collect(), ob.iter().collect());
+    let rank_a: std::collections::HashMap<&String, usize> = oa.iter().filter(|o| in_b.contains(o)).enumerate().map(|(i, o)| (o, i)).collect();
+    let rank_b: std::collections::HashMap<&String, usize> = ob.iter().filter(|o| in_a.contains(o)).enumerate().map(|(i, o)| (o, i)).collect();
     let mut seen = BTreeSet::new();
     let mut items = Vec::new();
     // Newer order first, then what only the older state had.
@@ -71,8 +75,7 @@ pub fn compare(a: &State, b: &State) -> Comparison {
             (Some(x), Some(y)) if x.title() != y.title() => Some(x.title().to_owned()),
             _ => None,
         };
-        let rank = |order: &Vec<String>| order.iter().filter(|o| ob.contains(o) && oa.contains(o)).position(|o| o == id);
-        let moved = ea.is_some() && eb.is_some() && rank(&oa) != rank(&ob);
+        let moved = ea.is_some() && eb.is_some() && rank_a.get(id) != rank_b.get(id);
         items.push(ItemChange {
             id: id.clone(),
             section,

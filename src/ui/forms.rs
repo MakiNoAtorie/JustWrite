@@ -404,6 +404,7 @@ fn preset_fields(p: &Preset) -> Vec<Field> {
         Field::toggle("include_notes", "Include notes", p.include_notes).hint("Notes are removed unless this is on"),
         Field::choice("comments", "Review comments", labels(&["Leave out", "As Word comments (DOCX)", "Appendix after the last chapter"]), position(&COMMENT_MODES, p.comments)),
         Field::toggle("comments_open_only", "Only open comments", p.comments_open_only).when("comments", &[1, 2]),
+        Field::toggle("clean_whitespace", "Clean up extra spaces", p.clean_whitespace).hint("Runs of spaces and tabs become one space"),
         Field::heading("Front and back matter"),
         Field::toggle("title_page", "Title page", p.title_page),
         Field::toggle("title_page_contact", "Contact details on the title page", p.title_page_contact),
@@ -469,6 +470,7 @@ fn read_preset(form: &Form, base: &Preset) -> Preset {
     p.include_notes = form.on("include_notes");
     p.comments = COMMENT_MODES[form.choice("comments").min(2)];
     p.comments_open_only = form.on("comments_open_only");
+    p.clean_whitespace = form.on("clean_whitespace");
     p.title_page = form.on("title_page");
     p.title_page_contact = form.on("title_page_contact");
     p.rounded_word_count = form.on("rounded_word_count");

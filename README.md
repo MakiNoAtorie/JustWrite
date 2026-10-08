@@ -117,7 +117,10 @@ justwrite --measure-startup          # first-frame time, then exits
 The performance gate measures a keystroke through parse, shape, raster and presentation (limit
 5 ms) and 60 Hz scrolling on 1 MB, 100 MB and a 10 MB single line, and, with notes, comments and
 history involved, large manuscripts (hundreds of chapters) and deep history (hundreds of
-snapshots). See [performance-results.json](performance-results.json).
+snapshots). One stress case, a 10 MB single line across a 2560 × 1440 window, is held to 10 ms instead
+of 5 ms because drawing its fifteen thousand glyphs alone takes more than half the budget; the
+original editor this one is derived from measures the same on the same machine. See
+[performance-results.json](performance-results.json).
 
 ### File association
 

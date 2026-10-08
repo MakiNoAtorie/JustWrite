@@ -323,7 +323,13 @@ impl App {
                 view.hide_notes = !view.hide_notes;
                 self.load_compare_rows(&mut view);
             }
-            ScreenAct::ShowComments => view.show_comments = !view.show_comments,
+            ScreenAct::ShowComments => {
+                view.show_comments = !view.show_comments;
+                if !view.show_comments && view.selected.is_none() && !view.items.is_empty() {
+                    view.selected = Some(0);
+                    self.load_compare_rows(&mut view);
+                }
+            }
             _ => {}
         }
         self.screen = Some(Screen::Compare(view));
@@ -711,7 +717,8 @@ impl App {
         self.put(&summary, Rect { x: list.x + self.s(12.), y: list.y + self.s(6.), width: list.width - self.su(24.), height: self.su(24.) }, 11.5, p.muted, Face::Normal, Align::Left);
         let row_height = self.s(50.);
         let top = list.y + self.s(34.);
-        let comments_row = if v.comment_lines.is_empty() { 0 } else { row_height };
+        let show_comment_entry = v.show_comments && !v.comment_lines.is_empty();
+        let comments_row = if show_comment_entry { row_height } else { 0 };
         let visible = ((list.height as i32 - self.s(34.) - comments_row) / row_height).max(1) as usize;
         v.list_scroll = v.list_scroll.min(v.items.len().saturating_sub(visible));
         for (n, item) in v.items.iter().enumerate().skip(v.list_scroll).take(visible) {
@@ -736,7 +743,7 @@ impl App {
             self.put(&format!("{label} · {} → {} words", item.words_a, item.words_b), Rect { x: row.x + self.s(10.), y: row.y + self.s(24.), width: row.width - self.su(20.), height: self.su(20.) }, 11., tint, Face::Normal, Align::Left);
             self.hits.push((row, Hit::Do(Act::Screen(ScreenAct::Pick(n)))));
         }
-        if !v.comment_lines.is_empty() {
+        if show_comment_entry {
             let row = Rect { x: list.x + self.s(6.), y: list.y + list.height as i32 - row_height, width: list.width - self.su(14.), height: row_height as u32 - 4 };
             if v.selected.is_none() {
                 self.renderer.fill_round(row, self.su(6.), selected_fill(p.surface, p));

@@ -1,7 +1,6 @@
 /target/
 /dist/
 /.tools/
-/performance-results.json
 /startup-results.txt
 /screenshots/
 *.bmp

@@ -330,6 +330,27 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
     blocks
 }
 
+/// Runs of spaces and tabs inside a paragraph become one space, also across style changes.
+pub fn collapse_spaces(blocks: &mut [Block]) {
+    for block in blocks {
+        let Block::Paragraph(inlines) = block else { continue };
+        let mut after_space = false;
+        for inline in inlines {
+            let Inline::Run(run) = inline else { continue };
+            let mut cleaned = String::with_capacity(run.text.len());
+            for c in run.text.chars() {
+                let space = c == ' ' || c == '\t';
+                if space && after_space {
+                    continue;
+                }
+                after_space = space;
+                cleaned.push(if space { ' ' } else { c });
+            }
+            run.text = cleaned;
+        }
+    }
+}
+
 /// Plain paragraphs of front and back matter (author-written, with `*emphasis*`).
 pub fn parse_matter(text: &str) -> Vec<Vec<Inline>> {
     parse_text(text, false, &[])
@@ -449,7 +470,10 @@ pub fn build(source: &Source, scope: &Scope, preset: &Preset) -> Doc {
                 appendix.push(entry);
             }
         }
-        let blocks = parse_text(text, preset.include_notes, &marks);
+        let mut blocks = parse_text(text, preset.include_notes, &marks);
+        if preset.clean_whitespace {
+            collapse_spaces(&mut blocks);
+        }
         let chapter_words = word_count(text);
         words += chapter_words as u64;
         chapters.push(Chapter {
@@ -707,5 +731,19 @@ mod tests {
                 let _ = parse_text(&text, keep, &marks);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod whitespace_tests {
+    use super::*;
+
+    #[test]
+    fn extra_spaces_collapse_across_runs() {
+        let mut blocks = parse_text("A  *b*   c\t\td", false, &[]);
+        collapse_spaces(&mut blocks);
+        let Block::Paragraph(inlines) = &blocks[0] else { panic!() };
+        let text: String = inlines.iter().filter_map(|i| if let Inline::Run(r) = i { Some(r.text.as_str()) } else { None }).collect();
+        assert_eq!(text, "A b c d");
     }
 }

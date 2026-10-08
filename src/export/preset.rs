@@ -149,6 +149,8 @@ pub struct Preset {
     pub comments: CommentsMode,
     /// Leave out comments that are marked resolved.
     pub comments_open_only: bool,
+    /// Collapse runs of spaces and tabs inside paragraphs.
+    pub clean_whitespace: bool,
 
     // Matter
     pub title_page: bool,
@@ -231,6 +233,7 @@ impl Default for Preset {
             include_notes: false,
             comments: CommentsMode::Off,
             comments_open_only: true,
+            clean_whitespace: true,
             title_page: true,
             title_page_contact: false,
             rounded_word_count: false,

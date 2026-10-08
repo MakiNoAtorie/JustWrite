@@ -13,6 +13,10 @@ use cosmic_text::{
 use std::collections::VecDeque;
 
 const CHUNK: usize = 1024;
+/// A number that depends only on the six characters ending at `at`.
+fn fingerprint(text: &ropey::Rope, at: usize) -> u32 {
+    text.slice(at.saturating_sub(5)..=at).chars().fold(0u32, |h, c| h.wrapping_mul(31).wrapping_add(c as u32))
+}
 pub struct Tile {
     pub start: usize,
     pub y: f32,
@@ -206,15 +210,28 @@ impl EditorView {
                 doc.text.len_chars()
             };
             let mut end = (start + CHUNK).min(line_end);
-            // Long lines are cut after a space, so words are not split between chunks.
+            // Long lines are cut after a space, so words are not split between chunks. The cut
+            // is chosen from the words around it, not from the distance to the chunk's start, so
+            // typing moves the cuts only near the caret and the chunks after it stay cached.
             if end < line_end {
-                let floor = end.saturating_sub(80).max(start + 1);
-                let mut at = end;
-                while at > floor && doc.text.char(at - 1) != ' ' {
-                    at -= 1;
+                let mut cut = None;
+                for (i, c) in doc.text.slice(start..end).chars().enumerate() {
+                    if i >= CHUNK / 2 && c == ' ' && fingerprint(&doc.text, start + i) % 24 == 0 {
+                        cut = Some(start + i + 1);
+                        break;
+                    }
                 }
-                if at > floor {
+                if let Some(at) = cut {
                     end = at;
+                } else {
+                    let floor = end.saturating_sub(80).max(start + 1);
+                    let mut at = end;
+                    while at > floor && doc.text.char(at - 1) != ' ' {
+                        at -= 1;
+                    }
+                    if at > floor {
+                        end = at;
+                    }
                 }
             }
             // Don't split a CRLF pair between virtual chunks.
@@ -322,7 +339,20 @@ impl EditorView {
             if tile.preview.hidden {
                 continue;
             }
-            for run in tile.buffer.layout_runs() {
+            // Most tiles carry no selection, match, comment or misspelling: skip the per-glyph pass.
+            let span = tile.start..tile.start + tile.preview.end + 1;
+            let near = |ranges: &[(usize, usize)]| {
+                let hi = ranges.partition_point(|r| r.0 < span.end);
+                ranges[hi.saturating_sub(8)..hi].iter().any(|r| r.1 > span.start)
+            };
+            let decorated = (!selection.is_empty() && selection.start < span.end && selection.end > span.start)
+                || near(&self.highlights)
+                || near(&self.misspelled)
+                || {
+                    let hi = self.marks.partition_point(|m| m.start < span.end);
+                    self.marks[hi.saturating_sub(8)..hi].iter().any(|m| m.end > span.start)
+                };
+            for run in tile.buffer.layout_runs().filter(|_| decorated) {
                 let y = rect.y + (tile.y + run.line_top) as i32;
                 if y >= rect.y + rect.height as i32 {
                     break;
