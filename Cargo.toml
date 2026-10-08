@@ -1,0 +1,39 @@
+[package]
+name = "justwrite"
+version = "0.1.0"
+edition = "2024"
+description = "A light native desktop app for writing fiction manuscripts"
+license = "MIT"
+
+[lib]
+name = "justwrite"
+path = "src/lib.rs"
+
+[dependencies]
+winit = "0.30"
+softbuffer = "0.4"
+cosmic-text = "0.19"
+ropey = "1.6"
+pulldown-cmark = "0.13"
+arboard = { version = "3.6", default-features = false }
+notify = "8.2"
+tempfile = "3.27"
+im = "15.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[[bin]]
+name = "justwrite"
+path = "src/main.rs"
+
+[[bin]]
+name = "performance-check"
+path = "src/bin/performance-check.rs"

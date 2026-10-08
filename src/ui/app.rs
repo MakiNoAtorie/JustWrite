@@ -1,0 +1,4053 @@
+use crate::{
+    APP_NAME,
+    core::{
+        commands::{self, COMMANDS, Command},
+        config::{Session, SessionSplit, SessionTab, Settings, WindowState},
+        markdown::{self, BlockIndex},
+        storage::{Entry, LocalStorage, ReadEvent, Storage, read_complete},
+        workspace,
+    },
+    platform::{self, Clipboard},
+    render::{
+        CpuRenderer, Rect, Renderer,
+        theme::{Palette, color},
+    },
+    ui::{
+        layout::{Divider, Pane, Split},
+        menu::{HEADING_MENU, Popup},
+        overlay::{Action, Kind, Overlay, Row},
+        tab::Tab,
+    },
+};
+#[path = "gui.rs"]
+mod gui;
+use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Motion, Shaping, fontdb};
+use ropey::Rope;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
+use winit::{
+    application::ApplicationHandler,
+    dpi::{LogicalSize, PhysicalPosition},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
+    keyboard::{Key, ModifiersState, NamedKey},
+    window::{CursorIcon, Fullscreen, Theme, Window, WindowId},
+};
+
+pub enum UserEvent {
+    TabWatched(u64, notify::RecommendedWatcher),
+    TabChanged(u64),
+    Chosen(Option<PathBuf>, Choose),
+    Read(u64, ReadEvent),
+    Saved(u64, u64, Rope, Result<(), String>),
+    Indexed(u64, u64, u64, BlockIndex),
+    Fonts(fontdb::Database),
+    Watched(u64, notify::RecommendedWatcher),
+    Changed(u64, PathBuf),
+    External(u64, u64, u64, Rope),
+    Listed(u64, PathBuf, Vec<Entry>),
+    Files(u64, Arc<Vec<PathBuf>>),
+    Rows(u64, Vec<Row>),
+    Config(Result<(Settings, Option<Session>), String>),
+    Operation(u64, FileOp, Result<(), String>),
+    Error(String),
+    SessionSaved(Result<(), String>),
+    Replaced(u64, u64, u64, Rope),
+    ConfigWatch(notify::RecommendedWatcher),
+    ConfigChanged,
+    SettingsUpdated(Result<Settings, String>),
+    OpenResolved(Option<(PathBuf, PathBuf)>),
+}
+#[derive(Clone, Copy)]
+pub enum Choose {
+    Folder,
+    File,
+    Save(u64),
+}
+#[derive(Clone)]
+pub enum FileOp {
+    Create(PathBuf),
+    CreateFolder(PathBuf),
+    Rename(PathBuf, PathBuf),
+    Delete(PathBuf),
+}
+struct Scan {
+    tab: u64,
+    epoch: u64,
+    revision: u64,
+    rope: Option<Rope>,
+    dirty: std::ops::Range<usize>,
+}
+#[derive(Clone)]
+enum Hit {
+    Command(Command),
+    Tab(u64, usize),
+    Close(u64),
+    Tree(PathBuf, bool),
+    Heading(usize, bool),
+    Row(usize),
+    TreeResize,
+    OutlineResize,
+    Scrollbar(u64),
+    Divider(usize),
+    Do(Act),
+}
+/// Clicks on custom-drawn controls; handled in `App::act`.
+#[derive(Clone)]
+enum Act {
+    Menu(usize),
+    Heading,
+    Run(Command),
+    Dismiss,
+    Block,
+    Press(&'static str),
+    Field(bool),
+    Case,
+    Replace(bool),
+    Theme(&'static str),
+    Toggle(&'static str),
+    Accent(u32),
+    Step(&'static str, i32),
+    Font(&'static str),
+    ClearShortcut,
+    ResetShortcut,
+    MatchStep(i32),
+    ToggleReplace,
+}
+#[derive(Clone)]
+enum Drag {
+    Selection(u64),
+    Tab(u64, u64, PhysicalPosition<f64>),
+    TreeResize,
+    OutlineResize,
+    Scrollbar(u64),
+    Divider(usize),
+}
+fn contains(rect: Rect, x: f64, y: f64) -> bool {
+    x >= rect.x as f64
+        && y >= rect.y as f64
+        && x < rect.x as f64 + rect.width as f64
+        && y < rect.y as f64 + rect.height as f64
+}
+
+pub struct App {
+    proxy: EventLoopProxy<UserEvent>,
+    window: Option<Arc<Window>>,
+    surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+    renderer: CpuRenderer,
+    fonts: FontSystem,
+    labels: HashMap<String, Buffer>,
+    font_names: Vec<String>,
+    settings: Settings,
+    tabs: BTreeMap<u64, Tab>,
+    split: Split,
+    active_pane: u64,
+    next_id: u64,
+    scanner: mpsc::Sender<Scan>,
+    root: Option<PathBuf>,
+    storage: Option<Arc<dyn Storage>>,
+    watcher: Option<notify::RecommendedWatcher>,
+    generation: u64,
+    tree: BTreeMap<PathBuf, Vec<Entry>>,
+    expanded: BTreeSet<PathBuf>,
+    tree_selected: Option<PathBuf>,
+    tree_top: usize,
+    outline_top: usize,
+    folded: BTreeSet<usize>,
+    files: Arc<Vec<PathBuf>>,
+    show_tree: bool,
+    show_outline: bool,
+    tree_width: f32,
+    outline_width: f32,
+    closed: Vec<SessionTab>,
+    overlay: Option<Overlay>,
+    hits: Vec<(Rect, Hit)>,
+    pane_rects: Vec<(u64, Rect)>,
+    drag: Option<Drag>,
+    mouse: PhysicalPosition<f64>,
+    modifiers: ModifiersState,
+    clipboard: Clipboard,
+    preedit: String,
+    status: String,
+    search_version: Arc<AtomicU64>,
+    config_storage: Arc<dyn Storage>,
+    config_watcher: Option<notify::RecommendedWatcher>,
+    session_closing: bool,
+    after_save: Option<Kind>,
+    scale: f32,
+    started: Instant,
+    first_frame: bool,
+    measuring: bool,
+    popup: Option<Popup>,
+    hover: Option<usize>,
+    cursor_icon: CursorIcon,
+    dividers: Vec<Divider>,
+    widths: HashMap<String, f32>,
+    in_modal: bool,
+    preview_font: Option<String>,
+    shortcut_key: String,
+    tree_rect: Option<Rect>,
+    outline_rect: Option<Rect>,
+    clicks: (Instant, PhysicalPosition<f64>, u8),
+    wheel: f32,
+    session_due: Option<Instant>,
+    system_light: bool,
+    scale_override: Option<f32>,
+    hover_since: Option<Instant>,
+    recent: Vec<PathBuf>,
+    saved_window: Option<WindowState>,
+}
+/// Word around `pos` for double-click selection; scans at most 256 chars each way.
+fn word_bounds(text: &Rope, pos: usize) -> (usize, usize) {
+    let len = text.len_chars();
+    let pos = pos.min(len);
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let probe = if pos < len && text.char(pos) != '\n' {
+        text.char(pos)
+    } else if pos > 0 {
+        text.char(pos - 1)
+    } else {
+        return (0, 0);
+    };
+    let class = word(probe);
+    let same = |c: char| word(c) == class && !matches!(c, '\n' | '\r');
+    let (mut start, mut end) = (pos, pos);
+    while start > 0 && pos - start < 256 && same(text.char(start - 1)) {
+        start -= 1;
+    }
+    while end < len && end - pos < 256 && same(text.char(end)) {
+        end += 1;
+    }
+    (start, end)
+}
+impl App {
+    pub fn new(proxy: EventLoopProxy<UserEvent>, started: Instant) -> Self {
+        let (scanner, receiver) = mpsc::channel::<Scan>();
+        let scan_proxy = proxy.clone();
+        std::thread::spawn(move || {
+            let mut indexes: HashMap<u64, BlockIndex> = HashMap::new();
+            while let Ok(mut request) = receiver.recv() {
+                let Some(rope) = request.rope else {
+                    indexes.remove(&request.tab);
+                    continue;
+                };
+                // Multiple documents share this worker, preserving each request's order.
+                let blocks = indexes.entry(request.tab).or_default();
+                if blocks.lines.is_empty() {
+                    request.dirty = 0..rope.len_lines();
+                }
+                blocks.update_range(&rope, request.dirty);
+                let _ = scan_proxy.send_event(UserEvent::Indexed(
+                    request.tab,
+                    request.epoch,
+                    request.revision,
+                    blocks.clone(),
+                ));
+            }
+        });
+        let config_storage: Arc<dyn Storage> =
+            Arc::new(LocalStorage::new(platform::data_directory()));
+        let mut tabs = BTreeMap::new();
+        tabs.insert(1, Tab::new(1));
+        Self {
+            proxy,
+            window: None,
+            surface: None,
+            renderer: CpuRenderer::default(),
+            fonts: platform::font_system(),
+            labels: HashMap::new(),
+            font_names: Vec::new(),
+            settings: Settings::default(),
+            tabs,
+            split: Split::Pane(Pane {
+                id: 2,
+                tabs: vec![1],
+                active: 0,
+            }),
+            active_pane: 2,
+            next_id: 3,
+            scanner,
+            root: None,
+            storage: None,
+            watcher: None,
+            generation: 0,
+            tree: BTreeMap::new(),
+            expanded: BTreeSet::from([PathBuf::from(".")]),
+            tree_selected: None,
+            tree_top: 0,
+            outline_top: 0,
+            folded: BTreeSet::new(),
+            files: Arc::new(Vec::new()),
+            show_tree: true,
+            show_outline: true,
+            tree_width: 218.,
+            outline_width: 200.,
+            closed: Vec::new(),
+            overlay: None,
+            hits: Vec::new(),
+            pane_rects: Vec::new(),
+            drag: None,
+            mouse: PhysicalPosition::new(0., 0.),
+            modifiers: ModifiersState::empty(),
+            clipboard: Clipboard::default(),
+            preedit: String::new(),
+            status: String::new(),
+            search_version: Arc::new(AtomicU64::new(0)),
+            config_storage,
+            config_watcher: None,
+            session_closing: false,
+            after_save: None,
+            scale: 1.,
+            started,
+            first_frame: false,
+            measuring: std::env::args().any(|a| a == "--measure-startup"),
+            popup: None,
+            hover: None,
+            cursor_icon: CursorIcon::Default,
+            dividers: Vec::new(),
+            widths: HashMap::new(),
+            in_modal: false,
+            preview_font: None,
+            shortcut_key: String::new(),
+            tree_rect: None,
+            outline_rect: None,
+            clicks: (Instant::now(), PhysicalPosition::new(0., 0.), 0),
+            wheel: 0.,
+            session_due: None,
+            system_light: false,
+            scale_override: std::env::var("JAME_SCALE").ok().and_then(|v| v.parse().ok()),
+            hover_since: None,
+            recent: Vec::new(),
+            saved_window: None,
+        }
+    }
+    fn id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+    fn active_id(&self) -> Option<u64> {
+        self.split.pane(self.active_pane).and_then(Pane::tab)
+    }
+    fn redraw(&self) {
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+    /// Schedules a session save a few seconds from now, so a crash loses at most that much.
+    fn dirty_session(&mut self) {
+        if self.session_due.is_none() {
+            self.session_due = Some(Instant::now() + Duration::from_secs(3));
+        }
+    }
+    fn apply_window_theme(&self) {
+        if let Some(window) = &self.window {
+            window.set_theme(match self.settings.theme.as_str() {
+                "light" => Some(Theme::Light),
+                "dark" => Some(Theme::Dark),
+                _ => None,
+            });
+        }
+    }
+    /// Takes settings loaded from disk, keeping the live Windows light/dark state.
+    fn adopt(&mut self, mut settings: Settings) {
+        settings.system_light = self.system_light;
+        self.settings = settings;
+    }
+    fn title(&self) {
+        if let Some(window) = &self.window {
+            let title = self
+                .active_id()
+                .and_then(|id| self.tabs.get(&id))
+                .map(|t| {
+                    format!(
+                        "{}{} — {APP_NAME}",
+                        if t.document.dirty() { "● " } else { "" },
+                        t.name()
+                    )
+                })
+                .unwrap_or_else(|| APP_NAME.into());
+            window.set_title(&title);
+        }
+    }
+    fn scan(&self, id: u64, all: bool) {
+        if let Some(tab) = self.tabs.get(&id) {
+            let dirty = if all {
+                0..tab.document.text.len_lines()
+            } else {
+                tab.document.changed.clone()
+            };
+            let _ = self.scanner.send(Scan {
+                tab: id,
+                epoch: tab.disk_epoch,
+                revision: tab.document.revision,
+                rope: Some(tab.document.text.clone()),
+                dirty,
+            });
+        }
+    }
+    fn edited(&mut self, id: u64) {
+        self.dirty_session();
+        if let Some(tab) = self.tabs.get_mut(&id) {
+            tab.edited = Some(Instant::now());
+            tab.view.ensure_cursor(&tab.document);
+        }
+        self.scan(id, false);
+        self.status.clear();
+        self.title();
+        self.redraw();
+    }
+    fn new_tab(&mut self, pane: u64) -> u64 {
+        let id = self.id();
+        self.tabs.insert(id, Tab::new(id));
+        if let Some(pane) = self.split.pane_mut(pane) {
+            pane.tabs.push(id);
+            pane.active = pane.tabs.len() - 1;
+        }
+        self.title();
+        self.redraw();
+        id
+    }
+    fn choose(&self, choice: Choose) {
+        let proxy = self.proxy.clone();
+        let parent = self.window.clone();
+        std::thread::spawn(move || {
+            let path = match choice {
+                Choose::Folder => platform::choose_folder(parent, "Choose a folder"),
+                Choose::File => platform::choose_file(parent, "Open a file", &[]),
+                Choose::Save(_) => platform::choose_save(parent, "Save as", "Untitled.md", &[]),
+            };
+            let path = path.and_then(|path| {
+                if matches!(choice, Choose::Save(_)) {
+                    platform::save_destination(&path)
+                } else {
+                    Some(path)
+                }
+            });
+            let _ = proxy.send_event(UserEvent::Chosen(path, choice));
+        });
+    }
+    /// Opens `root` as the workspace, asking first when there are unsaved edits.
+    fn switch_workspace(&mut self, root: PathBuf) {
+        if self.tabs.values().any(|t| t.document.dirty()) {
+            self.show(Kind::ChangeWorkspace(root));
+        } else {
+            self.clear_tabs();
+            self.set_workspace(root);
+        }
+    }
+    fn set_workspace(&mut self, root: PathBuf) {
+        self.recent.retain(|r| r != &root);
+        self.recent.insert(0, root.clone());
+        self.recent.truncate(10);
+        self.dirty_session();
+        self.generation += 1;
+        self.root = Some(root.clone());
+        let storage: Arc<dyn Storage> = Arc::new(LocalStorage::new(root));
+        self.storage = Some(storage.clone());
+        self.watcher = None;
+        self.tree.clear();
+        self.files = Arc::new(Vec::new());
+        self.tree_top = 0;
+        self.expanded = BTreeSet::from([PathBuf::from(".")]);
+        self.list(PathBuf::from("."));
+        self.index_files();
+        let proxy = self.proxy.clone();
+        let generation = self.generation;
+        std::thread::spawn(move || {
+            let change_proxy = proxy.clone();
+            match storage.watch(Arc::new(move |path| {
+                let _ = change_proxy.send_event(UserEvent::Changed(generation, path));
+            })) {
+                Ok(watcher) => {
+                    let _ = proxy.send_event(UserEvent::Watched(generation, watcher));
+                }
+                Err(error) => {
+                    let _ = proxy.send_event(UserEvent::Error(format!(
+                        "File watching unavailable: {error}"
+                    )));
+                }
+            }
+        });
+        self.redraw();
+    }
+    fn list(&self, folder: PathBuf) {
+        if let Some(storage) = &self.storage {
+            let storage = storage.clone();
+            let proxy = self.proxy.clone();
+            let generation = self.generation;
+            std::thread::spawn(move || match storage.list(&folder) {
+                Ok(mut entries) => {
+                    entries.retain(|e| {
+                        let hidden = e.path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.'));
+                        !hidden && (e.directory || workspace::markdown_file(&e.path))
+                    });
+                    entries.sort_by_key(|e| (!e.directory, e.path.clone()));
+                    let _ = proxy.send_event(UserEvent::Listed(generation, folder, entries));
+                }
+                Err(error) => {
+                    let _ = proxy.send_event(UserEvent::Error(error.to_string()));
+                }
+            });
+        }
+    }
+    fn index_files(&self) {
+        if let Some(storage) = &self.storage {
+            let storage = storage.clone();
+            let proxy = self.proxy.clone();
+            let generation = self.generation;
+            std::thread::spawn(move || {
+                let files = workspace::index(&*storage);
+                let _ = proxy.send_event(UserEvent::Files(generation, Arc::new(files)));
+            });
+        }
+    }
+    fn watch_tab(&self, id: u64) {
+        let Some(tab) = self.tabs.get(&id).filter(|t| t.root != self.root) else {
+            return;
+        };
+        let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else {
+            return;
+        };
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let change_proxy = proxy.clone();
+            match storage.watch(Arc::new(move |changed| {
+                if changed == path {
+                    let _ = change_proxy.send_event(UserEvent::TabChanged(id));
+                }
+            })) {
+                Ok(watcher) => {
+                    let _ = proxy.send_event(UserEvent::TabWatched(id, watcher));
+                }
+                Err(error) => {
+                    let _ = proxy.send_event(UserEvent::Error(format!(
+                        "File watching unavailable: {error}"
+                    )));
+                }
+            }
+        });
+    }
+    fn check_external(&self, id: u64) {
+        let Some(tab) = self.tabs.get(&id).filter(|t| !t.loading && !t.saving) else {
+            return;
+        };
+        let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else {
+            return;
+        };
+        let saved = tab.document.saved_snapshot();
+        let revision = tab.document.revision;
+        let epoch = tab.disk_epoch;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || match read_complete(&*storage, &path) {
+            Ok(text) if text != saved => {
+                let _ = proxy.send_event(UserEvent::External(id, epoch, revision, text));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let _ =
+                    proxy.send_event(UserEvent::Error(format!("External file change: {error}")));
+            }
+        });
+    }
+    fn open_relative(&mut self, path: PathBuf, position: usize) -> Option<u64> {
+        if !workspace::valid_relative(&path) {
+            self.status = "Invalid workspace-relative path".into();
+            return None;
+        }
+        let path: PathBuf = path
+            .components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(name) => Some(name),
+                _ => None,
+            })
+            .collect();
+        if let Some((&id, _)) = self.tabs.iter().find(|(_, tab)| {
+            tab.path.as_ref() == Some(&path)
+                && tab
+                    .storage
+                    .as_ref()
+                    .zip(self.storage.as_ref())
+                    .is_some_and(|(a, b)| Arc::ptr_eq(a, b))
+        }) {
+            let mut leaves = Vec::new();
+            self.split.leaves(
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                &mut leaves,
+            );
+            for (pane, _) in leaves {
+                if let Some(p) = self.split.pane_mut(pane) {
+                    if let Some(index) = p.tabs.iter().position(|t| *t == id) {
+                        p.active = index;
+                        self.active_pane = pane;
+                    }
+                }
+            }
+            if let Some(tab) = self.tabs.get_mut(&id) {
+                tab.document.select(position, false);
+                tab.view.ensure_cursor(&tab.document);
+            }
+            self.title();
+            self.redraw();
+            return Some(id);
+        }
+        let storage = self.storage.clone()?;
+        let reuse = self.active_id().filter(|id| {
+            self.tabs
+                .get(id)
+                .is_some_and(|t| t.path.is_none() && t.document.text.len_chars() == 0)
+        });
+        let id = reuse.unwrap_or_else(|| self.new_tab(self.active_pane));
+        let mut tab = Tab::new(id);
+        tab.path = Some(path.clone());
+        tab.root = self.root.clone();
+        tab.storage = Some(storage.clone());
+        tab.loading = true;
+        tab.restore_cursor = Some(position);
+        tab.guard_save = true;
+        self.tabs.insert(id, tab);
+        let proxy = self.proxy.clone();
+        storage.read(
+            &path,
+            Arc::new(move |event| {
+                let _ = proxy.send_event(UserEvent::Read(id, event));
+            }),
+        );
+        self.title();
+        self.redraw();
+        Some(id)
+    }
+    fn open_absolute(&mut self, path: PathBuf) {
+        if let Some(root) = &self.root {
+            if let Ok(relative) = path.strip_prefix(root) {
+                self.open_relative(relative.to_path_buf(), 0);
+                return;
+            }
+        }
+        if self.tabs.values().any(|t| t.document.dirty()) {
+            self.status = "Save your edits before changing workspace.".into();
+            return;
+        }
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::OpenResolved(platform::workspace_file(&path)));
+        });
+    }
+    fn clear_tabs(&mut self) {
+        for id in self.tabs.keys() {
+            let _ = self.scanner.send(Scan {
+                tab: *id,
+                epoch: 0,
+                revision: 0,
+                rope: None,
+                dirty: 0..0,
+            });
+        }
+        let old = std::mem::take(&mut self.tabs);
+        std::thread::spawn(move || drop(old));
+        let pane = self.id();
+        self.split = Split::Pane(Pane {
+            id: pane,
+            tabs: Vec::new(),
+            active: 0,
+        });
+        self.active_pane = pane;
+        self.new_tab(pane);
+    }
+    fn save(&mut self, id: u64, save_as: bool) {
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return;
+        };
+        if tab.saving {
+            return;
+        }
+        if tab.loading || tab.failed {
+            self.status = "Saving is disabled until the complete UTF-8 file has loaded.".into();
+            return;
+        }
+        if save_as || tab.path.is_none() {
+            tab.edited = None;
+            self.choose(Choose::Save(id));
+            return;
+        }
+        let (Some(storage), Some(path)) = (&tab.storage, &tab.path) else {
+            return;
+        };
+        let storage = storage.clone();
+        let path = path.clone();
+        let snapshot = tab.document.text.clone();
+        let revision = tab.document.revision;
+        let epoch = tab.disk_epoch;
+        let proxy = self.proxy.clone();
+        let expected = if tab.guard_save && tab.external.is_none() {
+            Some(tab.document.saved_snapshot())
+        } else {
+            None
+        };
+        tab.saving = true;
+        tab.edited = None;
+        std::thread::spawn(move || {
+            let result = if let Some(expected) = expected {
+                match storage.write_checked(&path, &snapshot, &expected) {
+                    Ok(Some(disk)) => {
+                        let _ = proxy.send_event(UserEvent::External(id, epoch, revision, disk));
+                        Err(
+                            "Changed on disk: Ctrl+S keeps edits · Ctrl+R loads the disk version"
+                                .into(),
+                        )
+                    }
+                    Ok(None) => Ok(()),
+                    Err(error) => Err(error.to_string()),
+                }
+            } else {
+                storage.write(&path, &snapshot).map_err(|e| e.to_string())
+            };
+            let _ = proxy.send_event(UserEvent::Saved(id, revision, snapshot, result));
+        });
+    }
+    fn close_tab(&mut self, id: u64, discard: bool) {
+        if !discard && self.tabs.get(&id).is_some_and(|t| t.document.dirty()) {
+            self.overlay = Some(Overlay::new(Kind::Close(id)));
+            self.redraw();
+            return;
+        }
+        if let Some(tab) = self.tabs.remove(&id) {
+            let _ = self.scanner.send(Scan {
+                tab: id,
+                epoch: 0,
+                revision: 0,
+                rope: None,
+                dirty: 0..0,
+            });
+            if let Some(path) = &tab.path {
+                self.closed.push(SessionTab {
+                    root: tab
+                        .root
+                        .clone()
+                        .filter(|root| Some(root) != self.root.as_ref()),
+                    path: path.clone(),
+                    cursor: tab.document.cursor,
+                    top: tab.view.top,
+                });
+            }
+            std::thread::spawn(move || drop(tab));
+        }
+        let mut leaves = Vec::new();
+        self.split.leaves(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            },
+            &mut leaves,
+        );
+        for (pane, _) in leaves {
+            if let Some(p) = self.split.pane_mut(pane) {
+                p.tabs.retain(|t| *t != id);
+                p.active = p.active.min(p.tabs.len().saturating_sub(1));
+            }
+        }
+        self.split.remove_empty();
+        if self.split.pane(self.active_pane).is_none() {
+            self.active_pane = self.split.first_pane();
+        }
+        if self.tabs.is_empty() {
+            self.new_tab(self.active_pane);
+        }
+        self.title();
+        self.redraw();
+    }
+    fn split_pane(&mut self, down: bool, move_tab: Option<(u64, u64)>) {
+        self.split_pane_at(down, false, move_tab);
+    }
+    /// Where dropping a dragged tab over `rect` would split: (stacked vertically, new pane first).
+    fn drop_zone(&self, rect: Rect, x: f64, y: f64) -> Option<(bool, bool)> {
+        let edge = self.s(65.) as f64;
+        let (left, top) = (rect.x as f64, rect.y as f64);
+        let below_tabs = top + self.s(36.) as f64;
+        let below_toolbar = top + self.s(74.) as f64;
+        if y < below_tabs {
+            None
+        } else if x > left + rect.width as f64 - edge {
+            Some((false, false))
+        } else if x < left + edge {
+            Some((false, true))
+        } else if y > top + rect.height as f64 - edge {
+            Some((true, false))
+        } else if y > below_toolbar && y < below_toolbar + edge {
+            Some((true, true))
+        } else {
+            None
+        }
+    }
+    /// Slot a dragged tab would take: the gap between tabs nearest to `x`.
+    fn tab_drop_index(&self, pane: &Pane, rect: Rect, x: f64) -> usize {
+        let (first, _, width) = self.tab_geometry(pane, rect);
+        let slot = ((x - rect.x as f64).max(0.) / width.max(1) as f64 + 0.5) as usize;
+        (first + slot).min(pane.tabs.len())
+    }
+    fn split_pane_at(&mut self, down: bool, before: bool, move_tab: Option<(u64, u64)>) {
+        let new_pane = self.id();
+        let tab = if let Some((tab, source)) = move_tab {
+            if let Some(p) = self.split.pane_mut(source) {
+                p.tabs.retain(|t| *t != tab);
+                p.active = p.active.min(p.tabs.len().saturating_sub(1));
+            }
+            tab
+        } else {
+            let tab = self.id();
+            self.tabs.insert(tab, Tab::new(tab));
+            tab
+        };
+        self.split.split_at(
+            self.active_pane,
+            Pane {
+                id: new_pane,
+                tabs: vec![tab],
+                active: 0,
+            },
+            down,
+            before,
+        );
+        self.active_pane = new_pane;
+        self.split.remove_empty();
+        self.title();
+        self.redraw();
+    }
+    fn move_tab(&mut self, tab: u64, source: u64, target: u64, index: usize) {
+        let index = if source == target
+            && self
+                .split
+                .pane(source)
+                .and_then(|p| p.tabs.iter().position(|id| *id == tab))
+                .is_some_and(|old| old < index)
+        {
+            index.saturating_sub(1)
+        } else {
+            index
+        };
+        if let Some(p) = self.split.pane_mut(source) {
+            p.tabs.retain(|id| *id != tab);
+            p.active = p.active.min(p.tabs.len().saturating_sub(1));
+        }
+        if let Some(p) = self.split.pane_mut(target) {
+            let index = index.min(p.tabs.len());
+            p.tabs.insert(index, tab);
+            p.active = index;
+        }
+        self.active_pane = target;
+        self.split.remove_empty();
+        self.title();
+        self.redraw();
+    }
+    /// A menu or dialog that blocks the rest of the window (the docked find bar does not).
+    fn modal(&self) -> bool {
+        self.popup.is_some() || self.overlay.as_ref().is_some_and(|o| !o.docked())
+    }
+    fn show(&mut self, kind: Kind) {
+        let searching = matches!(kind, Kind::Find | Kind::Replace);
+        let previous = self.overlay.take().filter(|o| o.docked() && searching);
+        let mut overlay = Overlay::new(kind);
+        if let Some(old) = previous {
+            overlay.query = old.query;
+            overlay.replacement = old.replacement;
+            overlay.case = old.case;
+        } else if searching {
+            // Start from the selected text, like most editors.
+            if let Some(tab) = self.active_id().and_then(|id| self.tabs.get(&id)) {
+                let range = tab.document.selection();
+                if !range.is_empty() && range.len() < 120 {
+                    let text = tab.document.text.slice(range).to_string();
+                    if !text.contains(['\n', '\r']) {
+                        overlay.query = text;
+                    }
+                }
+            }
+        }
+        overlay.select_all = !overlay.query.is_empty();
+        self.overlay = Some(overlay);
+        self.refresh_overlay();
+        self.redraw();
+    }
+    fn refresh_overlay(&mut self) {
+        let Some(overlay) = &mut self.overlay else {
+            return;
+        };
+        let query = overlay.query.clone();
+        let kind = overlay.kind.clone();
+        let case = overlay.case;
+        overlay.selected = 0;
+        overlay.scroll = 0;
+        overlay.rows.clear();
+        match &kind {
+            Kind::Palette | Kind::HeadingLevels | Kind::Keymap => {
+                let mut rows: Vec<_> = COMMANDS
+                    .iter()
+                    .filter(|c| kind != Kind::HeadingLevels || matches!(c.id, Command::Heading(_)))
+                    .filter_map(|command| {
+                        let score = workspace::fuzzy(&query, command.name)?;
+                        let shortcut = self
+                            .settings
+                            .keymap
+                            .get(command.key)
+                            .map(String::as_str)
+                            .unwrap_or(command.shortcut);
+                        Some((
+                            score,
+                            Row {
+                                label: command.name.into(),
+                                hint: shortcut.replace(
+                                    "Ctrl",
+                                    if cfg!(target_os = "macos") {
+                                        "Cmd"
+                                    } else {
+                                        "Ctrl"
+                                    },
+                                ),
+                                action: if kind == Kind::Keymap {
+                                    Action::Shortcut(command.key.into())
+                                } else {
+                                    Action::Command(command.id)
+                                },
+                            },
+                        ))
+                    })
+                    .collect();
+                if !query.is_empty() {
+                    rows.sort_by_key(|(score, _)| -score);
+                }
+                overlay.rows = rows.into_iter().map(|(_, row)| row).collect();
+            }
+            Kind::Recent => {
+                overlay.rows = self
+                    .recent
+                    .iter()
+                    .filter(|path| Some(*path) != self.root.as_ref() && path.is_dir())
+                    .filter(|path| workspace::fuzzy(&query, &path.to_string_lossy()).is_some())
+                    .map(|path| Row {
+                        label: path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+                        hint: path.to_string_lossy().into_owned(),
+                        action: Action::Folder(path.clone()),
+                    })
+                    .collect();
+            }
+            Kind::Setting(key) if key.ends_with("font") => {
+                overlay.rows = self
+                    .font_names
+                    .iter()
+                    .filter(|name| workspace::fuzzy(&query, name).is_some())
+                    .take(100)
+                    .map(|name| Row {
+                        label: name.clone(),
+                        hint: String::new(),
+                        action: Action::Setting(format!("font:{key}:{name}")),
+                    })
+                    .collect();
+            }
+            Kind::Headings => {
+                if let Some(id) = self.active_id() {
+                    let blocks = self.tabs[&id].blocks.clone();
+                    let proxy = self.proxy.clone();
+                    let version = self.search_version.fetch_add(1, Ordering::Relaxed) + 1;
+                    let cancellation = self.search_version.clone();
+                    if let Some(overlay) = &mut self.overlay {
+                        overlay.version = version;
+                        overlay.pending = true;
+                    }
+                    std::thread::spawn(move || {
+                        let rows = blocks
+                            .headings
+                            .iter()
+                            .filter_map(|(&line, (level, name))| {
+                                if cancellation.load(Ordering::Relaxed) != version {
+                                    return None;
+                                }
+                                workspace::fuzzy(&query, name).map(|score| {
+                                    (
+                                        score,
+                                        Row {
+                                            label: name.clone(),
+                                            hint: format!("H{level} · line {}", line + 1),
+                                            action: Action::Heading(line),
+                                        },
+                                    )
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        let mut rows = rows;
+                        rows.sort_by_key(|(score, _)| -score);
+                        let _ = proxy.send_event(UserEvent::Rows(
+                            version,
+                            rows.into_iter().take(200).map(|(_, row)| row).collect(),
+                        ));
+                    });
+                }
+            }
+            Kind::QuickOpen | Kind::Find | Kind::Replace | Kind::FolderSearch => {
+                let version = self.search_version.fetch_add(1, Ordering::Relaxed) + 1;
+                let cancellation = self.search_version.clone();
+                let proxy = self.proxy.clone();
+                let files = self.files.clone();
+                let storage = self.storage.clone();
+                let snapshot = self
+                    .active_id()
+                    .and_then(|id| self.tabs.get(&id))
+                    .map(|tab| {
+                        (
+                            tab.document.text.clone(),
+                            tab.path.clone().unwrap_or_default(),
+                        )
+                    });
+                if let Some(overlay) = &mut self.overlay {
+                    overlay.version = version;
+                    overlay.pending = true;
+                }
+                std::thread::spawn(move || {
+                    let mut rows = Vec::new();
+                    match kind {
+                        Kind::QuickOpen => {
+                            let mut scored = Vec::new();
+                            for path in files.iter() {
+                                if cancellation.load(Ordering::Relaxed) != version {
+                                    return;
+                                }
+                                if let Some(score) =
+                                    workspace::fuzzy(&query, &path.to_string_lossy())
+                                {
+                                    scored.push((score, path.clone()));
+                                }
+                            }
+                            scored.sort_by_key(|(score, _)| -score);
+                            rows = scored
+                                .into_iter()
+                                .take(200)
+                                .map(|(_, path)| Row {
+                                    label: path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                    hint: path.to_string_lossy().into_owned(),
+                                    action: Action::File(path, 0),
+                                })
+                                .collect();
+                        }
+                        Kind::Find | Kind::Replace => {
+                            if let Some((text, path)) = snapshot {
+                                rows = workspace::find(&text, &query, case, 500)
+                                    .into_iter()
+                                    .map(|(start, end, line, preview)| Row {
+                                        label: preview.clone(),
+                                        hint: format!("Line {}", line + 1),
+                                        action: Action::Match(workspace::Match {
+                                            path: path.clone(),
+                                            start,
+                                            end,
+                                            line,
+                                            preview,
+                                        }),
+                                    })
+                                    .collect();
+                            }
+                        }
+                        Kind::FolderSearch => {
+                            if let Some(storage) = storage {
+                                if !query.is_empty() {
+                                    for path in files.iter() {
+                                        if cancellation.load(Ordering::Relaxed) != version {
+                                            return;
+                                        }
+                                        if let Ok(text) = read_complete(&*storage, path) {
+                                            for (start, end, line, preview) in
+                                                workspace::find(&text, &query, case, 500 - rows.len())
+                                            {
+                                                rows.push(Row {
+                                                    label: preview.clone(),
+                                                    hint: format!(
+                                                        "{}:{}",
+                                                        path.display(),
+                                                        line + 1
+                                                    ),
+                                                    action: Action::Match(workspace::Match {
+                                                        path: path.clone(),
+                                                        start,
+                                                        end,
+                                                        line,
+                                                        preview,
+                                                    }),
+                                                });
+                                            }
+                                        }
+                                        if rows.len() >= 500 {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    if cancellation.load(Ordering::Relaxed) == version {
+                        let _ = proxy.send_event(UserEvent::Rows(version, rows));
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    fn save_settings(&mut self) {
+        let storage = self.config_storage.clone();
+        let text = Rope::from_str(&self.settings.serialize());
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            if let Err(error) = storage.write(Path::new("settings.toml"), &text) {
+                let _ =
+                    proxy.send_event(UserEvent::Error(format!("Cannot save settings: {error}")));
+            }
+        });
+        self.labels.clear();
+        for tab in self.tabs.values_mut() {
+            tab.view.clear_cache();
+        }
+        self.apply_window_theme();
+        self.redraw();
+    }
+    fn operation(&mut self, operation: FileOp) {
+        let Some(storage) = self.storage.clone() else {
+            self.status = "Open a workspace folder first.".into();
+            return;
+        };
+        let generation = self.generation;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let result = match &operation {
+                FileOp::Create(path) => storage.create(path, false),
+                FileOp::CreateFolder(path) => storage.create(path, true),
+                FileOp::Rename(from, to) => storage.rename(from, to),
+                FileOp::Delete(path) => storage.remove(path),
+            }
+            .map_err(|e| e.to_string());
+            let _ = proxy.send_event(UserEvent::Operation(generation, operation, result));
+        });
+    }
+    fn activate_row(&mut self, row: Row) {
+        match row.action {
+            Action::Command(command) => {
+                self.overlay = None;
+                self.command(command);
+            }
+            Action::File(path, position) => {
+                self.overlay = None;
+                self.open_relative(path, position);
+            }
+            Action::Heading(line) => {
+                if let Some(id) = self.active_id() {
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        let position = tab
+                            .document
+                            .text
+                            .line_to_char(line.min(tab.document.text.len_lines() - 1));
+                        tab.document.select(position, false);
+                        tab.view.top = position;
+                    }
+                }
+                self.overlay = None;
+            }
+            Action::Match(found) => {
+                let kind = self.overlay.as_ref().map(|o| o.kind.clone());
+                if kind == Some(Kind::FolderSearch) {
+                    self.open_relative(found.path, found.start);
+                    self.overlay = None;
+                } else if let Some(id) = self.active_id() {
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        tab.document.anchor = found.start.min(tab.document.text.len_chars());
+                        tab.document.cursor = found.end.min(tab.document.text.len_chars());
+                        tab.view.ensure_cursor(&tab.document);
+                    }
+                    if kind != Some(Kind::Replace) {
+                        self.overlay = None;
+                    }
+                }
+            }
+            Action::Setting(key) => self.pick_font(&key),
+            Action::Folder(path) => {
+                self.overlay = None;
+                self.switch_workspace(path);
+            }
+            Action::Shortcut(key) => {
+                let query = self
+                    .settings
+                    .keymap
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| {
+                        COMMANDS
+                            .iter()
+                            .find(|c| c.key == key)
+                            .map(|c| c.shortcut.into())
+                    })
+                    .unwrap_or_default();
+                let mut overlay = Overlay::new(Kind::Shortcut(key));
+                overlay.query = query;
+                self.overlay = Some(overlay);
+            }
+            Action::None => {}
+        }
+        self.title();
+        self.redraw();
+    }
+    fn note(&mut self, text: &str) {
+        if let Some(overlay) = &mut self.overlay {
+            overlay.note = text.into();
+        } else {
+            self.status = text.into();
+        }
+    }
+    fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.after_save = None;
+        self.status.clear();
+        self.redraw();
+    }
+    fn target_path(&self) -> Option<PathBuf> {
+        self.tree_selected.clone().or_else(|| {
+            self.active_id()
+                .and_then(|id| self.tabs.get(&id))
+                .filter(|t| t.root == self.root)
+                .and_then(|t| t.path.clone())
+        })
+    }
+    /// Folder (workspace-relative, with trailing slash) that new notes should start in.
+    fn selected_folder(&self) -> String {
+        let Some(path) = &self.tree_selected else {
+            return String::new();
+        };
+        let directory = self
+            .tree
+            .values()
+            .flatten()
+            .find(|e| &e.path == path)
+            .is_none_or(|e| e.directory);
+        let folder = if directory {
+            Some(path.as_path())
+        } else {
+            path.parent()
+        };
+        folder
+            .filter(|f| !f.as_os_str().is_empty() && *f != Path::new("."))
+            .map(|f| format!("{}/", f.to_string_lossy().replace('\\', "/")))
+            .unwrap_or_default()
+    }
+    fn step_match(&mut self, delta: i32) {
+        let Some(overlay) = &mut self.overlay else {
+            return;
+        };
+        let count = overlay.rows.len() as i32;
+        if count > 0 {
+            overlay.selected = (overlay.selected as i32 + delta).rem_euclid(count) as usize;
+            overlay.reveal();
+        }
+        self.preview_match();
+    }
+    fn preview_match(&mut self) {
+        let Some(overlay) = &self.overlay else {
+            return;
+        };
+        if !matches!(overlay.kind, Kind::Find | Kind::Replace) {
+            return;
+        }
+        let Some(Action::Match(found)) = overlay.rows.get(overlay.selected).map(|r| r.action.clone())
+        else {
+            return;
+        };
+        if let Some(tab) = self.active_id().and_then(|id| self.tabs.get_mut(&id)) {
+            let len = tab.document.text.len_chars();
+            tab.document.anchor = found.start.min(len);
+            tab.document.cursor = found.end.min(len);
+            tab.view.ensure_cursor(&tab.document);
+        }
+    }
+    fn change(&mut self, edit: impl FnOnce(&mut Settings)) {
+        let mut settings = self.settings.clone();
+        edit(&mut settings);
+        match Settings::parse(&settings.serialize()) {
+            Ok(settings) => {
+                self.adopt(settings);
+                self.save_settings();
+            }
+            Err(error) => self.note(&error),
+        }
+    }
+    fn open_font(&mut self, key: &str) {
+        self.overlay = Some(Overlay::new(Kind::Setting(key.into())));
+        self.refresh_overlay();
+        self.redraw();
+    }
+    fn pick_font(&mut self, key: &str) {
+        let parts: Vec<_> = key.splitn(3, ':').collect();
+        if let [_, field, name] = parts[..] {
+            let (field, name) = (field.to_owned(), name.to_owned());
+            self.change(|s| match field.as_str() {
+                "editor_font" => s.editor_font = name,
+                "interface_font" => s.interface_font = name,
+                "code_font" => s.code_font = name,
+                _ => {}
+            });
+        }
+        self.show(Kind::Settings);
+    }
+    fn bind_shortcut(&mut self, command: &str, value: String) {
+        let parsed = commands::parse_shortcut(&value).ok().flatten();
+        let moved: Vec<_> = COMMANDS
+            .iter()
+            .filter(|c| c.key != command && parsed.is_some())
+            .filter(|c| {
+                let current = self.settings.keymap.get(c.key).map_or(c.shortcut, String::as_str);
+                commands::parse_shortcut(current).ok().flatten() == parsed
+            })
+            .collect();
+        for other in &moved {
+            self.settings.keymap.insert(other.key.into(), String::new());
+        }
+        self.settings.keymap.insert(command.into(), value);
+        self.save_settings();
+        self.show(Kind::Keymap);
+        if !moved.is_empty() {
+            let names: Vec<_> = moved.iter().map(|c| c.name).collect();
+            self.status = format!("Shortcut taken from: {}", names.join(", "));
+        }
+    }
+    fn capture_shortcut(&mut self, command: String, key: &Key) -> bool {
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.show(Kind::Keymap);
+            return true;
+        }
+        let modifier_only = matches!(
+            key,
+            Key::Named(
+                NamedKey::Control
+                    | NamedKey::Shift
+                    | NamedKey::Alt
+                    | NamedKey::AltGraph
+                    | NamedKey::Super
+                    | NamedKey::Meta
+            )
+        );
+        let token = self.shortcut_key.trim_matches(' ').to_owned();
+        if modifier_only || token.is_empty() {
+            return true;
+        }
+        let (primary, shift, alt) = (
+            platform::primary(self.modifiers),
+            self.modifiers.shift_key(),
+            self.modifiers.alt_key(),
+        );
+        let function_key = token.strip_prefix('f').is_some_and(|n| n.parse::<u8>().is_ok());
+        if !(primary || alt || function_key) {
+            self.note("Include Ctrl or Alt (or use a function key) so typing isn't affected.");
+            self.redraw();
+            return true;
+        }
+        self.bind_shortcut(&command, commands::format_shortcut(primary, shift, alt, &token));
+        self.redraw();
+        true
+    }
+    fn unsaved(&mut self, kind: Kind, discard: bool) {
+        if discard {
+            self.overlay = None;
+            match kind {
+                Kind::Close(id) => self.close_tab(id, true),
+                Kind::Quit => self.persist_session(true),
+                Kind::ChangeWorkspace(root) => {
+                    self.clear_tabs();
+                    self.set_workspace(root);
+                }
+                _ => {}
+            }
+        } else {
+            self.after_save = Some(kind.clone());
+            let ids: Vec<_> = match kind {
+                Kind::Close(id) => vec![id],
+                _ => self
+                    .tabs
+                    .iter()
+                    .filter(|(_, t)| t.document.dirty())
+                    .map(|(id, _)| *id)
+                    .collect(),
+            };
+            for id in ids {
+                self.save(id, false);
+            }
+        }
+        self.redraw();
+    }
+    fn goto_line(&mut self, query: &str) {
+        let Ok(line) = query.trim().parse::<usize>() else {
+            self.note("Enter a line number.");
+            return;
+        };
+        if let Some(tab) = self.active_id().and_then(|id| self.tabs.get_mut(&id)) {
+            let text = &tab.document.text;
+            let position = text.line_to_char(line.saturating_sub(1).min(text.len_lines() - 1));
+            tab.document.select(position, false);
+            tab.view.top = position;
+        }
+        self.overlay = None;
+    }
+    fn submit_name(&mut self, kind: Kind, query: String) {
+        let text = query.trim().replace('\\', "/");
+        if text.is_empty() || text.ends_with('/') {
+            self.note("Enter a name.");
+            return;
+        }
+        let markdown = kind == Kind::Create
+            || matches!(&kind, Kind::Rename(old) if workspace::markdown_file(old));
+        let path = PathBuf::from(&text);
+        let path = if markdown && !workspace::markdown_file(&path) {
+            if kind == Kind::Create {
+                PathBuf::from(format!("{text}.md"))
+            } else {
+                self.note("Markdown files must keep a .md extension.");
+                return;
+            }
+        } else {
+            path
+        };
+        if !workspace::valid_relative(&path) {
+            self.note("Use a name inside the workspace: no drive letters or \"..\".");
+            return;
+        }
+        self.overlay = None;
+        self.operation(match kind {
+            Kind::Rename(old) => FileOp::Rename(old, path),
+            Kind::CreateFolder => FileOp::CreateFolder(path),
+            _ => FileOp::Create(path),
+        });
+    }
+    fn replace(&mut self, all: bool) {
+        let Some(overlay) = &self.overlay else {
+            return;
+        };
+        let (query, replacement, case, selected) = (
+            overlay.query.clone(),
+            overlay.replacement.clone(),
+            overlay.case,
+            overlay.selected,
+        );
+        let found = overlay.rows.get(selected).and_then(|r| match &r.action {
+            Action::Match(m) => Some(m.clone()),
+            _ => None,
+        });
+        if query.is_empty() {
+            self.note("Enter text to find before replacing.");
+            return;
+        }
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return;
+        };
+        if all {
+            let snapshot = tab.document.text.clone();
+            let (revision, epoch) = (tab.document.revision, tab.disk_epoch);
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                let text = workspace::replace_all(&snapshot.to_string(), &query, &replacement, case);
+                let _ = proxy.send_event(UserEvent::Replaced(id, epoch, revision, Rope::from_str(&text)));
+            });
+            self.status = "Replacing all matches…".into();
+            self.redraw();
+            return;
+        }
+        let Some(found) = found else {
+            self.note("Pick a match from the list first.");
+            return;
+        };
+        let current = (found.end <= tab.document.text.len_chars() && found.start <= found.end)
+            .then(|| tab.document.text.slice(found.start..found.end).to_string());
+        let same = current.is_some_and(|text| {
+            if case { text == query } else { text.eq_ignore_ascii_case(&query) }
+        });
+        if same {
+            tab.document.replace(found.start..found.end, &replacement);
+            self.edited(id);
+            self.refresh_overlay();
+            if let Some(overlay) = &mut self.overlay {
+                overlay.selected = selected;
+            }
+        } else {
+            self.note("The match changed. Search refreshed; try again.");
+            self.refresh_overlay();
+        }
+    }
+    fn press(&mut self, name: &str) {
+        let kind = self.overlay.as_ref().map(|o| o.kind.clone());
+        match (name, kind) {
+            ("escape", _) => self.close_overlay(),
+            ("enter", _) => {
+                self.overlay_key(&Key::Named(NamedKey::Enter), None);
+            }
+            ("save" | "discard", Some(kind)) => self.unsaved(kind, name == "discard"),
+            _ => {}
+        }
+    }
+    fn act(&mut self, act: Act, rect: Rect) {
+        match act {
+            Act::Menu(index) => self.open_menu(index, rect),
+            Act::Heading => self.open_popup(HEADING_MENU, rect.x, rect.y + rect.height as i32),
+            Act::Run(command) => {
+                self.popup = None;
+                self.command(command);
+            }
+            Act::Dismiss => {
+                if self.popup.take().is_none() {
+                    self.close_overlay();
+                }
+            }
+            Act::Block => {}
+            Act::Press(name) => self.press(name),
+            Act::Field(secondary) => {
+                if let Some(o) = &mut self.overlay {
+                    o.secondary = secondary;
+                    o.caret = None;
+                    o.focused = true;
+                }
+            }
+            Act::MatchStep(delta) => self.step_match(delta),
+            Act::ToggleReplace => {
+                if let Some(o) = &mut self.overlay {
+                    o.kind = if o.kind == Kind::Find { Kind::Replace } else { Kind::Find };
+                    o.secondary = false;
+                    o.focused = true;
+                }
+            }
+            Act::Case => {
+                if let Some(o) = &mut self.overlay {
+                    o.case = !o.case;
+                }
+                self.refresh_overlay();
+            }
+            Act::Replace(all) => self.replace(all),
+            Act::Theme(name) => self.change(|s| s.theme = name.into()),
+            Act::Toggle(key) => self.change(|s| match key {
+                "show_markers" => s.show_markers = !s.show_markers,
+                "typewriter" => s.typewriter = !s.typewriter,
+                _ => s.autosave = !s.autosave,
+            }),
+            Act::Accent(colour) => self.change(|s| s.accent = format!("#{colour:06x}")),
+            Act::Step(key, direction) => self.change(|s| {
+                if key == "font_size" {
+                    s.font_size = (s.font_size + direction as f32).clamp(10., 48.);
+                } else {
+                    // Above 3000 px the width limit turns off; stepping down from "unlimited" restarts at 3000.
+                    s.max_width = match s.max_width {
+                        None if direction < 0 => Some(3000.),
+                        None => None,
+                        Some(w) => {
+                            let next = w + 40. * direction as f32;
+                            (next <= 3000.).then_some(next.max(240.))
+                        }
+                    };
+                }
+            }),
+            Act::Font(key) => self.open_font(key),
+            Act::ClearShortcut | Act::ResetShortcut => {
+                if let Some(Kind::Shortcut(key)) = self.overlay.as_ref().map(|o| o.kind.clone()) {
+                    let value = if matches!(act, Act::ResetShortcut) {
+                        COMMANDS.iter().find(|c| c.key == key).map_or("", |c| c.shortcut)
+                    } else {
+                        ""
+                    };
+                    self.bind_shortcut(&key, value.into());
+                }
+            }
+        }
+        self.redraw();
+    }
+    fn overlay_key(&mut self, key: &Key, text: Option<&str>) -> bool {
+        let Some(overlay) = &self.overlay else {
+            return false;
+        };
+        let kind = overlay.kind.clone();
+        if overlay.docked() && !overlay.focused {
+            if matches!(key, Key::Named(NamedKey::Escape)) {
+                self.close_overlay();
+                return true;
+            }
+            return false;
+        }
+        if let Kind::Shortcut(command) = &kind {
+            return self.capture_shortcut(command.clone(), key);
+        }
+        let editable = overlay.has_input();
+        let primary = platform::primary(self.modifiers);
+        if primary && editable {
+            if let Key::Character(character) = key {
+                match character.to_lowercase().as_str() {
+                    "a" => {
+                        if let Some(overlay) = &mut self.overlay {
+                            overlay.select_all = true;
+                        }
+                        self.redraw();
+                        return true;
+                    }
+                    "v" => {
+                        match self.clipboard.read() {
+                            Ok(text) => {
+                                if let Some(overlay) = &mut self.overlay {
+                                    overlay.type_text(&text);
+                                }
+                                self.refresh_overlay();
+                            }
+                            Err(error) => self.status = error,
+                        }
+                        self.redraw();
+                        return true;
+                    }
+                    "c" | "x" => {
+                        let text = self
+                            .overlay
+                            .as_mut()
+                            .map(|o| o.input().clone())
+                            .unwrap_or_default();
+                        if let Err(error) = self.clipboard.write(text) {
+                            self.status = error;
+                        } else if character.eq_ignore_ascii_case("x") {
+                            if let Some(o) = &mut self.overlay {
+                                o.input().clear();
+                                o.select_all = false;
+                            }
+                            self.refresh_overlay();
+                        }
+                        self.redraw();
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.close_overlay();
+            return true;
+        }
+        if matches!(kind, Kind::Close(_) | Kind::Quit | Kind::ChangeWorkspace(_)) {
+            match key {
+                Key::Character(k) if k.eq_ignore_ascii_case("d") => self.unsaved(kind, true),
+                Key::Character(k) if k.eq_ignore_ascii_case("s") => self.unsaved(kind, false),
+                Key::Named(NamedKey::Enter) => self.unsaved(kind, false),
+                _ => {}
+            }
+            self.redraw();
+            return true;
+        }
+        if matches!(key, Key::Named(NamedKey::Enter)) {
+            let query = overlay.query.clone();
+            match kind {
+                Kind::Delete(path) => {
+                    self.overlay = None;
+                    self.operation(FileOp::Delete(path));
+                }
+                Kind::GotoLine => self.goto_line(&query),
+                Kind::Create | Kind::CreateFolder | Kind::Rename(_) => self.submit_name(kind, query),
+                Kind::Replace if primary || overlay.secondary => self.replace(primary),
+                Kind::Find | Kind::Replace => {
+                    let backwards = self.modifiers.shift_key();
+                    self.step_match(if backwards { -1 } else { 1 });
+                }
+                _ => {
+                    if let Some(row) = overlay.rows.get(overlay.selected).cloned() {
+                        self.activate_row(row);
+                    }
+                }
+            }
+            self.redraw();
+            return true;
+        }
+        let mut refresh = false;
+        match key {
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
+                let down = matches!(key, Key::Named(NamedKey::ArrowDown));
+                if let Some(o) = &mut self.overlay {
+                    o.selected = if down {
+                        (o.selected + 1).min(o.rows.len().saturating_sub(1))
+                    } else {
+                        o.selected.saturating_sub(1)
+                    };
+                    o.reveal();
+                }
+                self.preview_match();
+            }
+            Key::Named(NamedKey::Tab) if kind == Kind::Replace => {
+                if let Some(o) = &mut self.overlay {
+                    o.secondary = !o.secondary;
+                    o.caret = None;
+                }
+            }
+            Key::Named(NamedKey::Backspace | NamedKey::Delete) if editable => {
+                let back = matches!(key, Key::Named(NamedKey::Backspace));
+                if let Some(o) = &mut self.overlay {
+                    o.edit(back, true);
+                }
+                refresh = true;
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) if editable => {
+                let back = matches!(key, Key::Named(NamedKey::ArrowLeft));
+                if let Some(o) = &mut self.overlay {
+                    o.edit(back, false);
+                }
+            }
+            Key::Named(NamedKey::Home) if editable => {
+                if let Some(o) = &mut self.overlay {
+                    o.select_all = false;
+                    o.caret = Some(0);
+                }
+            }
+            Key::Named(NamedKey::End) if editable => {
+                if let Some(o) = &mut self.overlay {
+                    o.select_all = false;
+                    o.caret = None;
+                }
+            }
+            Key::Character(_)
+                if editable && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
+            {
+                if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
+                    if let Some(o) = &mut self.overlay {
+                        o.type_text(text);
+                    }
+                    refresh = true;
+                }
+            }
+            _ => {}
+        }
+        if refresh {
+            self.refresh_overlay();
+        }
+        self.redraw();
+        true
+    }
+    fn command(&mut self, command: Command) {
+        self.dirty_session();
+        let active = self.active_id();
+        match command {
+            Command::Open => self.choose(Choose::Folder),
+            Command::OpenFile => self.choose(Choose::File),
+            Command::New => {
+                self.new_tab(self.active_pane);
+            }
+            Command::Save | Command::SaveAs => {
+                if let Some(id) = active {
+                    self.save(id, command == Command::SaveAs);
+                }
+            }
+            Command::Reload => {
+                if let Some(id) = self.active_id() {
+                    let tab = self.tabs.get_mut(&id).unwrap();
+                    if let Some(text) = tab.external.take() {
+                        tab.disk_epoch += 1;
+                        let cursor = tab.document.cursor;
+                        let old = std::mem::replace(
+                            &mut tab.document,
+                            crate::core::buffer::Document::new(text),
+                        );
+                        std::thread::spawn(move || drop(old));
+                        tab.document.select(cursor, false);
+                        tab.view.clear_cache();
+                        tab.edited = None;
+                        self.scan(id, true);
+                    }
+                }
+            }
+            Command::CloseTab => {
+                if let Some(id) = active {
+                    self.close_tab(id, false);
+                }
+            }
+            Command::Reopen => {
+                if let Some(saved) = self.closed.pop() {
+                    if let Split::Pane(restored) = self.restore_split(SessionSplit::Pane {
+                        tabs: vec![saved],
+                        active: 0,
+                    }) {
+                        if let Some(pane) = self.split.pane_mut(self.active_pane) {
+                            pane.tabs.extend(restored.tabs);
+                            pane.active = pane.tabs.len() - 1;
+                        }
+                    }
+                }
+            }
+            Command::NextTab | Command::PreviousTab => {
+                if let Some(pane) = self.split.pane_mut(self.active_pane) {
+                    if !pane.tabs.is_empty() {
+                        pane.active = if command == Command::NextTab {
+                            (pane.active + 1) % pane.tabs.len()
+                        } else {
+                            (pane.active + pane.tabs.len() - 1) % pane.tabs.len()
+                        };
+                    }
+                }
+            }
+            Command::Undo | Command::Redo => {
+                if let Some(id) = active {
+                    if let Some(tab) = self.tabs.get_mut(&id) {
+                        if command == Command::Undo {
+                            tab.document.undo();
+                        } else {
+                            tab.document.redo();
+                        }
+                    }
+                    self.edited(id);
+                }
+            }
+            Command::SelectAll => {
+                if let Some(id) = active {
+                    let tab = self.tabs.get_mut(&id).unwrap();
+                    tab.document.anchor = 0;
+                    tab.document.cursor = tab.document.text.len_chars();
+                }
+            }
+            Command::Copy | Command::Cut => {
+                if let Some(id) = active {
+                    let tab = &self.tabs[&id];
+                    let range = tab.document.selection();
+                    if !range.is_empty() {
+                        let text = tab.document.text.slice(range).to_string();
+                        match self.clipboard.write(text) {
+                            Ok(()) if command == Command::Cut => {
+                                self.tabs.get_mut(&id).unwrap().document.insert("");
+                                self.edited(id);
+                            }
+                            Ok(()) => {}
+                            Err(error) => self.status = error,
+                        }
+                    }
+                }
+            }
+            Command::Paste => {
+                if let Some(id) = active {
+                    match self.clipboard.read() {
+                        Ok(text) => {
+                            let tab = self.tabs.get_mut(&id).unwrap();
+                            let text = text
+                                .replace("\r\n", "\n")
+                                .replace('\r', "\n")
+                                .replace('\n', tab.document.line_ending);
+                            tab.document.insert(&text);
+                            self.edited(id);
+                        }
+                        Err(error) => self.status = error,
+                    }
+                }
+            }
+            Command::Bold
+            | Command::Italic
+            | Command::Strike
+            | Command::Heading(_)
+            | Command::Bullet
+            | Command::Numbered
+            | Command::InlineCode
+            | Command::CodeBlock
+            | Command::Link
+            | Command::Indent
+            | Command::Outdent => {
+                if let Some(id) = active {
+                    let doc = &mut self.tabs.get_mut(&id).unwrap().document;
+                    match command {
+                        Command::Bold => doc.surround("**", "**"),
+                        Command::Italic => doc.surround("*", "*"),
+                        Command::Strike => doc.surround("~~", "~~"),
+                        Command::Heading(level) => {
+                            doc.prefix(&format!("{} ", "#".repeat(level as usize)), true)
+                        }
+                        Command::Bullet => doc.prefix("- ", false),
+                        Command::Numbered => doc.prefix("1. ", false),
+                        Command::InlineCode => doc.surround("`", "`"),
+                        Command::CodeBlock => {
+                            let eol = doc.line_ending;
+                            doc.surround(&format!("```{eol}"), &format!("{eol}```"));
+                        }
+                        Command::Link => {
+                            let had_text = !doc.selection().is_empty();
+                            doc.surround("[", "](https://)");
+                            if had_text {
+                                // Select the placeholder address so it can be typed over.
+                                doc.anchor = doc.cursor + 2;
+                                doc.cursor = doc.anchor + "https://".len();
+                            }
+                        }
+                        Command::Indent => doc.indent(false),
+                        Command::Outdent => doc.indent(true),
+                        _ => {}
+                    }
+                    self.edited(id);
+                }
+            }
+            Command::Palette => self.show(Kind::Palette),
+            Command::QuickOpen => self.show(Kind::QuickOpen),
+            Command::JumpHeading => self.show(Kind::Headings),
+            Command::GotoLine => self.show(Kind::GotoLine),
+            Command::WordCount => {
+                if let Some(tab) = active.and_then(|id| self.tabs.get(&id)) {
+                    let doc = &tab.document;
+                    let range = doc.selection();
+                    let (text, what) = if range.is_empty() {
+                        (doc.text.slice(..), "")
+                    } else {
+                        (doc.text.slice(range), " selected")
+                    };
+                    self.status = format!(
+                        "{} words · {} characters{what}",
+                        crate::core::buffer::word_count(text),
+                        text.len_chars()
+                    );
+                }
+            }
+            Command::Find => self.show(Kind::Find),
+            Command::Replace => self.show(Kind::Replace),
+            Command::FolderSearch => self.show(Kind::FolderSearch),
+            Command::SplitRight | Command::SplitDown => {
+                self.split_pane(command == Command::SplitDown, None)
+            }
+            Command::CloseSplit => {
+                let mut leaves = Vec::new();
+                self.split.leaves(Rect { x: 0, y: 0, width: 1, height: 1 }, &mut leaves);
+                let from = self.active_pane;
+                if let Some(target) = leaves.iter().map(|(id, _)| *id).find(|id| *id != from) {
+                    let moved = self.split.pane(from).map(|p| p.tabs.clone()).unwrap_or_default();
+                    if let Some(pane) = self.split.pane_mut(from) {
+                        pane.tabs.clear();
+                    }
+                    if let Some(pane) = self.split.pane_mut(target) {
+                        pane.tabs.extend(moved);
+                    }
+                    self.split.remove_empty();
+                    self.active_pane = target;
+                } else {
+                    self.status = "There is only one pane.".into();
+                }
+            }
+            Command::Recent => self.show(Kind::Recent),
+            Command::ToggleTree => self.show_tree = !self.show_tree,
+            Command::ToggleOutline => self.show_outline = !self.show_outline,
+            Command::ToggleMarkers => {
+                self.settings.show_markers = !self.settings.show_markers;
+                self.save_settings();
+            }
+            Command::Settings => self.show(Kind::Settings),
+            Command::Keymap => self.show(Kind::Keymap),
+            Command::Focus => {
+                if let Some(window) = &self.window {
+                    let focus = window.fullscreen().is_none();
+                    window.set_decorations(!focus);
+                    window.set_fullscreen(if focus {
+                        Some(Fullscreen::Borderless(None))
+                    } else {
+                        None
+                    });
+                }
+            }
+            Command::CreateFile => {
+                if self.root.is_none() {
+                    self.status = "Choose a folder to keep your notes in first.".into();
+                    self.choose(Choose::Folder);
+                } else {
+                    let mut overlay = Overlay::new(Kind::Create);
+                    overlay.query = self.selected_folder();
+                    self.overlay = Some(overlay);
+                }
+            }
+            Command::CreateFolder => {
+                if self.root.is_none() {
+                    self.status = "Choose a folder to keep your notes in first.".into();
+                    self.choose(Choose::Folder);
+                } else {
+                    let mut overlay = Overlay::new(Kind::CreateFolder);
+                    overlay.query = self.selected_folder();
+                    self.overlay = Some(overlay);
+                }
+            }
+            Command::RenameFile => {
+                if let Some(path) = self.target_path() {
+                    let mut overlay = Overlay::new(Kind::Rename(path.clone()));
+                    overlay.query = path.to_string_lossy().replace('\\', "/");
+                    self.overlay = Some(overlay);
+                } else {
+                    self.status = "Click a file or folder in the tree first.".into();
+                }
+            }
+            Command::DeleteFile => {
+                if let Some(path) = self.target_path() {
+                    if self.tabs.values().any(|t| {
+                        t.root == self.root
+                            && t.path.as_ref().is_some_and(|p| p.starts_with(&path))
+                            && t.document.dirty()
+                    }) {
+                        self.status =
+                            "Save or close your edits before deleting this file or folder.".into();
+                    } else {
+                        self.overlay = Some(Overlay::new(Kind::Delete(path)));
+                    }
+                } else {
+                    self.status = "Click a file or folder in the tree first.".into();
+                }
+            }
+            Command::Quit => {
+                if self.tabs.values().any(|t| t.document.dirty()) {
+                    self.show(Kind::Quit);
+                } else {
+                    self.persist_session(true);
+                }
+            }
+        }
+        self.title();
+        self.redraw();
+    }
+    /// Keyboard control of an open menu; returns false when the key should fall through.
+    fn popup_key(&mut self, key: &Key) -> bool {
+        let Some(popup) = &self.popup else {
+            return false;
+        };
+        let (items, menu, selected) = (popup.items, popup.menu, popup.selected);
+        let usable: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.is_some_and(|c| self.enabled(c)))
+            .map(|(i, _)| i)
+            .collect();
+        let step = |forward: bool| {
+            let at = selected.and_then(|s| usable.iter().position(|u| *u == s));
+            let next = match (at, forward) {
+                (None, true) => 0,
+                (None, false) => usable.len().saturating_sub(1),
+                (Some(i), true) => (i + 1) % usable.len().max(1),
+                (Some(i), false) => (i + usable.len().max(1) - 1) % usable.len().max(1),
+            };
+            usable.get(next).copied()
+        };
+        match key {
+            Key::Named(NamedKey::Escape) => self.popup = None,
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
+                let forward = matches!(key, Key::Named(NamedKey::ArrowDown));
+                let next = step(forward);
+                if let Some(popup) = &mut self.popup {
+                    popup.selected = next;
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) if menu.is_some() => {
+                let count = crate::ui::menu::MENUS.len();
+                let forward = matches!(key, Key::Named(NamedKey::ArrowRight));
+                let target = (menu.unwrap() + if forward { 1 } else { count - 1 }) % count;
+                let anchor = self
+                    .hits
+                    .iter()
+                    .find(|(_, hit)| matches!(hit, Hit::Do(Act::Menu(m)) if *m == target))
+                    .map(|(rect, _)| *rect);
+                if let Some(rect) = anchor {
+                    self.open_menu(target, rect);
+                    if let Some(first) = self.popup.as_ref().and_then(|_| {
+                        crate::ui::menu::MENUS[target]
+                            .2
+                            .iter()
+                            .position(|item| item.is_some_and(|c| self.enabled(c)))
+                    }) {
+                        if let Some(popup) = &mut self.popup {
+                            popup.selected = Some(first);
+                        }
+                    }
+                }
+            }
+            Key::Named(NamedKey::Enter) => {
+                let command = selected.and_then(|s| items.get(s).copied().flatten());
+                self.popup = None;
+                if let Some(command) = command {
+                    self.command(command);
+                }
+            }
+            Key::Named(NamedKey::Shift | NamedKey::Control | NamedKey::Alt | NamedKey::Super) => {}
+            _ => {
+                self.popup = None;
+                self.redraw();
+                return false;
+            }
+        }
+        self.redraw();
+        true
+    }
+    fn key(&mut self, key: Key, shortcut_key: String, text: Option<&str>) {
+        if self.popup.is_some() && self.popup_key(&key) {
+            return;
+        }
+        self.shortcut_key = shortcut_key.clone();
+        if self.overlay_key(&key, text) {
+            return;
+        }
+        let primary = platform::primary(self.modifiers);
+        let shift = self.modifiers.shift_key();
+        if let Some(command) = commands::resolve(
+            &shortcut_key,
+            primary,
+            shift,
+            self.modifiers.alt_key(),
+            &self.settings.keymap,
+        ) {
+            self.command(command);
+            return;
+        }
+        if self.modifiers.alt_key() && !primary && !shift {
+            let index = crate::ui::menu::MENUS
+                .iter()
+                .position(|(_, mnemonic, _)| shortcut_key == mnemonic.to_string());
+            let anchor = index.and_then(|i| {
+                self.hits
+                    .iter()
+                    .find(|(_, hit)| matches!(hit, Hit::Do(Act::Menu(m)) if *m == i))
+                    .map(|(rect, _)| (i, *rect))
+            });
+            if let Some((i, rect)) = anchor {
+                self.open_menu(i, rect);
+                self.popup_key(&Key::Named(NamedKey::ArrowDown));
+                self.redraw();
+                return;
+            }
+        }
+        if matches!(key, Key::Named(NamedKey::Escape)) {
+            self.preedit.clear();
+            if self
+                .window
+                .as_ref()
+                .is_some_and(|w| w.fullscreen().is_some())
+            {
+                self.command(Command::Focus);
+            }
+            return;
+        }
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let tab = self.tabs.get_mut(&id).unwrap();
+        let mut edited = false;
+        match key {
+            Key::Named(NamedKey::ArrowLeft) => {
+                tab.document.horizontal(false, shift, primary);
+                tab.view.ensure_cursor(&tab.document);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                tab.document.horizontal(true, shift, primary);
+                tab.view.ensure_cursor(&tab.document);
+            }
+            Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown) => {
+                let motion = if matches!(key, Key::Named(NamedKey::ArrowDown)) {
+                    Motion::Down
+                } else {
+                    Motion::Up
+                };
+                let mut settings = self.settings.clone();
+                settings.font_size *= self.scale;
+                tab.view.motion(
+                    &mut tab.document,
+                    &tab.blocks,
+                    &settings,
+                    &mut self.fonts,
+                    motion,
+                    shift,
+                );
+                tab.view.ensure_cursor(&tab.document);
+            }
+            Key::Named(NamedKey::Home) => {
+                let start = if primary {
+                    0
+                } else {
+                    tab.document
+                        .text
+                        .line_to_char(tab.document.text.char_to_line(tab.document.cursor))
+                };
+                tab.document.select(start, shift);
+                tab.view.ensure_cursor(&tab.document);
+            }
+            Key::Named(NamedKey::End) => {
+                let line = tab.document.text.char_to_line(tab.document.cursor);
+                let mut end = if primary || line + 1 == tab.document.text.len_lines() {
+                    tab.document.text.len_chars()
+                } else {
+                    tab.document.text.line_to_char(line + 1)
+                };
+                if !primary {
+                    while end > 0 && matches!(tab.document.text.char(end - 1), '\n' | '\r') {
+                        end -= 1;
+                    }
+                }
+                tab.document.select(end, shift);
+                tab.view.ensure_cursor(&tab.document);
+            }
+            Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
+                tab.view.scroll(
+                    &tab.document,
+                    if matches!(key, Key::Named(NamedKey::PageDown)) {
+                        18
+                    } else {
+                        -18
+                    },
+                );
+                tab.document.select(tab.view.top, shift);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                tab.document.delete(true);
+                edited = true;
+            }
+            Key::Named(NamedKey::Delete) => {
+                tab.document.delete(false);
+                edited = true;
+            }
+            Key::Named(NamedKey::Enter) => {
+                tab.document.enter();
+                edited = true;
+            }
+            Key::Character(_)
+                if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
+            {
+                if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
+                    tab.document.type_text(text);
+                    edited = true;
+                }
+            }
+            _ => {}
+        }
+        if edited {
+            self.edited(id);
+        }
+        self.redraw();
+    }
+    fn session_split(&self, split: &Split) -> SessionSplit {
+        match split {
+            Split::Pane(pane) => SessionSplit::Pane {
+                active: pane.active,
+                tabs: pane
+                    .tabs
+                    .iter()
+                    .filter_map(|id| {
+                        let tab = self.tabs.get(id)?;
+                        Some(SessionTab {
+                            root: tab
+                                .root
+                                .clone()
+                                .filter(|root| Some(root) != self.root.as_ref()),
+                            path: tab.path.clone()?,
+                            cursor: tab.document.cursor,
+                            top: tab.view.top,
+                        })
+                    })
+                    .collect(),
+            },
+            Split::Branch {
+                down,
+                ratio,
+                first,
+                second,
+            } => SessionSplit::Split {
+                down: *down,
+                ratio: *ratio,
+                first: Box::new(self.session_split(first)),
+                second: Box::new(self.session_split(second)),
+            },
+        }
+    }
+    fn window_state(&self) -> Option<WindowState> {
+        let window = self.window.as_ref()?;
+        if window.fullscreen().is_some() || window.is_minimized().unwrap_or(false) {
+            return self.saved_window;
+        }
+        let (position, size) = (window.outer_position().ok()?, window.inner_size());
+        Some(WindowState {
+            x: position.x,
+            y: position.y,
+            width: size.width,
+            height: size.height,
+            maximized: window.is_maximized(),
+        })
+    }
+    fn persist_session(&mut self, close: bool) {
+        if self.session_closing {
+            return;
+        }
+        let session = Session {
+            workspace: self.root.clone(),
+            split: Some(self.session_split(&self.split)),
+            tree_width: self.tree_width,
+            outline_width: self.outline_width,
+            show_tree: self.show_tree,
+            show_outline: self.show_outline,
+            recent: self.recent.clone(),
+            window: self.window_state(),
+        };
+        let text = match toml::to_string_pretty(&session) {
+            Ok(text) => text,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+        let storage = self.config_storage.clone();
+        let proxy = self.proxy.clone();
+        self.session_closing = close;
+        std::thread::spawn(move || {
+            let result = storage
+                .write(Path::new("session.toml"), &Rope::from_str(&text))
+                .map_err(|e| e.to_string());
+            let _ = proxy.send_event(UserEvent::SessionSaved(result));
+        });
+    }
+    fn restore_split(&mut self, split: SessionSplit) -> Split {
+        match split {
+            SessionSplit::Pane { tabs, active } => {
+                let pane = self.id();
+                let mut ids = Vec::new();
+                for saved in tabs {
+                    if !workspace::valid_relative(&saved.path) {
+                        continue;
+                    }
+                    let id = self.id();
+                    let mut tab = Tab::new(id);
+                    tab.path = Some(saved.path.clone());
+                    tab.root = saved.root.or_else(|| self.root.clone());
+                    tab.storage = if tab.root == self.root {
+                        self.storage.clone()
+                    } else {
+                        tab.root
+                            .clone()
+                            .map(|root| Arc::new(LocalStorage::new(root)) as Arc<dyn Storage>)
+                    };
+                    tab.loading = true;
+                    tab.restore_cursor = Some(saved.cursor);
+                    tab.view.top = saved.top;
+                    tab.guard_save = true;
+                    if let Some(storage) = &tab.storage {
+                        let proxy = self.proxy.clone();
+                        storage.read(
+                            &saved.path,
+                            Arc::new(move |event| {
+                                let _ = proxy.send_event(UserEvent::Read(id, event));
+                            }),
+                        );
+                    }
+                    self.tabs.insert(id, tab);
+                    self.watch_tab(id);
+                    ids.push(id);
+                }
+                if ids.is_empty() {
+                    let id = self.id();
+                    self.tabs.insert(id, Tab::new(id));
+                    ids.push(id);
+                }
+                Split::Pane(Pane {
+                    id: pane,
+                    active: active.min(ids.len() - 1),
+                    tabs: ids,
+                })
+            }
+            SessionSplit::Split {
+                down,
+                ratio,
+                first,
+                second,
+            } => Split::Branch {
+                down,
+                ratio: if ratio.is_finite() {
+                    ratio.clamp(0.15, 0.85)
+                } else {
+                    0.5
+                },
+                first: Box::new(self.restore_split(*first)),
+                second: Box::new(self.restore_split(*second)),
+            },
+        }
+    }
+    fn autosave(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        let mut next = None;
+        let mut save = Vec::new();
+        if self.settings.autosave {
+            for (&id, tab) in &self.tabs {
+                if !tab.loading
+                    && !tab.failed
+                    && !tab.saving
+                    && tab.path.is_some()
+                    && tab.external.is_none()
+                    && tab.document.dirty()
+                {
+                    if let Some(edited) = tab.edited {
+                        let deadline = edited + Duration::from_millis(700);
+                        if deadline <= now {
+                            save.push(id);
+                        } else {
+                            next =
+                                Some(next.map_or(deadline, |other: Instant| other.min(deadline)));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(since) = self.hover_since {
+            let due = since + Duration::from_millis(450);
+            if due > now {
+                next = Some(next.map_or(due, |other: Instant| other.min(due)));
+            }
+        }
+        if let Some(due) = self.session_due {
+            if due <= now {
+                self.session_due = None;
+                self.persist_session(false);
+            } else {
+                next = Some(next.map_or(due, |other: Instant| other.min(due)));
+            }
+        }
+        for id in save {
+            self.save(id, false);
+        }
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
+    }
+    fn tree_rows(
+        &self,
+        folder: &Path,
+        depth: usize,
+        seen: &mut usize,
+        output: &mut Vec<(Entry, usize)>,
+        limit: usize,
+    ) {
+        if output.len() >= limit {
+            return;
+        }
+        if let Some(entries) = self.tree.get(folder) {
+            for entry in entries {
+                if *seen >= self.tree_top {
+                    output.push((entry.clone(), depth));
+                }
+                *seen += 1;
+                if output.len() >= limit {
+                    return;
+                }
+                if entry.directory && self.expanded.contains(&entry.path) {
+                    self.tree_rows(&entry.path, depth + 1, seen, output, limit);
+                }
+                if output.len() >= limit {
+                    return;
+                }
+            }
+        }
+    }
+    fn frame(&mut self, event_loop: &ActiveEventLoop) {
+        let frame_started = Instant::now();
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        self.scale = self.scale_override.unwrap_or(window.scale_factor() as f32);
+        self.renderer.resize(size.width, size.height);
+        self.hits.clear();
+        self.pane_rects.clear();
+        let palette = Palette::new(self.settings.light(), self.settings.accent_color());
+        let full = Rect {
+            x: 0,
+            y: 0,
+            width: size.width,
+            height: size.height,
+        };
+        self.renderer.fill(full, palette.background);
+        let focus = window.fullscreen().is_some();
+        let menubar = if focus { 0 } else { self.su(30.) };
+        let footer = if focus { 0 } else { self.su(28.) };
+        let body = size.height.saturating_sub(footer + menubar);
+        let logical_width = size.width as f32 / self.scale;
+        let tree = if !focus && self.show_tree && logical_width > 640. {
+            (self.tree_width * self.scale) as u32
+        } else {
+            0
+        };
+        let outline = if !focus && self.show_outline && logical_width > 820. {
+            (self.outline_width * self.scale) as u32
+        } else {
+            0
+        };
+        self.tree_rect = None;
+        self.outline_rect = None;
+        if !focus {
+            self.paint_menubar(Rect { height: menubar, ..full }, palette);
+        }
+        if tree > 0 {
+            let rect = Rect { x: 0, y: menubar as i32, width: tree, height: body };
+            self.tree_rect = Some(rect);
+            self.paint_tree(rect, palette);
+        }
+        if outline > 0 {
+            let rect = Rect {
+                x: size.width as i32 - outline as i32,
+                y: menubar as i32,
+                width: outline,
+                height: body,
+            };
+            self.outline_rect = Some(rect);
+            self.paint_outline(rect, palette);
+        }
+        let center = Rect {
+            x: tree as i32,
+            y: menubar as i32,
+            width: size.width.saturating_sub(tree + outline).max(1),
+            height: body,
+        };
+        if focus {
+            self.pane_rects.push((self.active_pane, center));
+            self.dividers.clear();
+        } else {
+            self.split.leaves(center, &mut self.pane_rects);
+            self.dividers_for(center);
+        }
+        for (pane, rect) in self.pane_rects.clone() {
+            self.paint_pane(pane, rect, focus, palette);
+        }
+        if focus {
+            let hint = Rect {
+                x: size.width as i32 - self.s(230.),
+                y: size.height as i32 - self.s(26.),
+                width: self.su(220.),
+                height: self.su(22.),
+            };
+            self.put("Esc exits focus mode", hint, 11., palette.muted, gui::Face::Normal, gui::Align::Right);
+        }
+        if !focus {
+            self.paint_dividers(palette);
+            self.paint_footer(
+                Rect { y: (size.height - footer) as i32, height: footer, ..full },
+                palette,
+            );
+        }
+        if !self.preedit.is_empty() {
+            let preedit = self.preedit.clone();
+            let position = self
+                .active_id()
+                .and_then(|id| self.tabs.get(&id))
+                .and_then(|tab| {
+                    tab.view
+                        .tiles
+                        .iter()
+                        .find(|tile| {
+                            tab.document.cursor >= tile.start
+                                && tab.document.cursor <= tile.start + tile.preview.end
+                        })
+                        .and_then(|tile| tile.caret(tab.document.cursor))
+                        .map(|(x, y)| (tab.view.rect.unwrap(), x, y))
+                });
+            if let Some((rect, x, y)) = position {
+                self.label(
+                    &preedit,
+                    Rect {
+                        x: rect.x + x as i32,
+                        y: rect.y + y as i32,
+                        width: 300,
+                        height: 32,
+                    },
+                    self.settings.font_size * self.scale,
+                    palette.accent,
+                );
+            }
+        }
+        self.paint_overlay(full, menubar as i32, palette);
+        self.paint_popup(full, palette);
+        self.paint_tooltip(full, palette);
+        if let Some(Drag::Tab(tab, _, origin)) = self.drag.clone() {
+            if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() > 8. {
+                self.paint_tab_ghost(tab, palette);
+                if let Some((_, rect)) = self
+                    .pane_rects
+                    .iter()
+                    .find(|(_, rect)| contains(*rect, self.mouse.x, self.mouse.y))
+                {
+                    if let Some((down, before)) = self.drop_zone(*rect, self.mouse.x, self.mouse.y) {
+                        let thick = self.su(6.);
+                        let top = rect.y + self.s(74.);
+                        let strip = match (down, before) {
+                            (false, false) => Rect { x: rect.x + rect.width as i32 - thick as i32, width: thick, ..*rect },
+                            (false, true) => Rect { x: rect.x, width: thick, ..*rect },
+                            (true, false) => Rect { y: rect.y + rect.height as i32 - thick as i32, height: thick, ..*rect },
+                            (true, true) => Rect { y: top, height: thick, ..*rect },
+                        };
+                        self.renderer.fill(strip, palette.accent);
+                    }
+                }
+            }
+        }
+        // ponytail: event-driven frames repaint the viewport; narrow invalidation if measured frame budgets require it.
+        let damage: Vec<_> = self
+            .renderer
+            .damage()
+            .into_iter()
+            .filter_map(|rect| {
+                Some(softbuffer::Rect {
+                    x: rect.x as u32,
+                    y: rect.y as u32,
+                    width: NonZeroU32::new(rect.width)?,
+                    height: NonZeroU32::new(rect.height)?,
+                })
+            })
+            .collect();
+        if let Some(surface) = &mut self.surface {
+            let result = (|| {
+                surface.resize(
+                    NonZeroU32::new(size.width).unwrap(),
+                    NonZeroU32::new(size.height).unwrap(),
+                )?;
+                let mut buffer = surface.buffer_mut()?;
+                buffer.copy_from_slice(self.renderer.pixels());
+                buffer.present_with_damage(&damage)
+            })();
+            if let Err(error) = result {
+                self.status = format!("Render failed: {error}");
+            }
+        }
+        if let Some(id) = self.active_id() {
+            let tab = &self.tabs[&id];
+            if let Some((x, y)) = tab
+                .view
+                .tiles
+                .iter()
+                .find(|tile| {
+                    tab.document.cursor >= tile.start
+                        && tab.document.cursor <= tile.start + tile.preview.end
+                })
+                .and_then(|tile| tile.caret(tab.document.cursor))
+            {
+                if let Some(rect) = tab.view.rect {
+                    window.set_ime_cursor_area(
+                        PhysicalPosition::new(rect.x as f64 + x as f64, rect.y as f64 + y as f64),
+                        LogicalSize::new(2., self.settings.font_size * 1.65),
+                    );
+                }
+            }
+        }
+        if self.labels.len() > 2048 {
+            self.labels.clear();
+        }
+        if !self.first_frame {
+            self.first_frame = true;
+            if self.measuring {
+                println!(
+                    "first_frame_ms={:.3},processing_ms={:.3}",
+                    self.started.elapsed().as_secs_f64() * 1000.,
+                    frame_started.elapsed().as_secs_f64() * 1000.
+                );
+                event_loop.exit();
+            } else {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Fonts(platform::fallback_fonts()));
+                });
+                let storage = self.config_storage.clone();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let settings = match read_complete(&*storage, Path::new("settings.toml")) {
+                        Ok(text) => Settings::parse(&text.to_string()),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                            let mut settings = Settings::default();
+                            settings.keymap = COMMANDS
+                                .iter()
+                                .map(|c| (c.key.into(), c.shortcut.into()))
+                                .collect();
+                            storage
+                                .write(
+                                    Path::new("settings.toml"),
+                                    &Rope::from_str(&settings.serialize()),
+                                )
+                                .map(|_| settings)
+                                .map_err(|error| error.to_string())
+                        }
+                        Err(error) => Err(error.to_string()),
+                    };
+                    let session = read_complete(&*storage, Path::new("session.toml"))
+                        .ok()
+                        .and_then(|text| toml::from_str::<Session>(&text.to_string()).ok());
+                    let _ = proxy.send_event(UserEvent::Config(
+                        settings.map(|settings| (settings, session)),
+                    ));
+                    let watch_proxy = proxy.clone();
+                    if let Ok(watcher) = storage.watch(Arc::new(move |path| {
+                        if path == Path::new("settings.toml") {
+                            let _ = watch_proxy.send_event(UserEvent::ConfigChanged);
+                        }
+                    })) {
+                        let _ = proxy.send_event(UserEvent::ConfigWatch(watcher));
+                    }
+                });
+            }
+        }
+    }
+    fn hit_at(&self, x: f64, y: f64) -> Option<(Rect, Hit)> {
+        self.hits
+            .iter()
+            .rev()
+            .find(|(rect, _)| contains(*rect, x, y))
+            .map(|(rect, hit)| (*rect, hit.clone()))
+    }
+    fn over_editor(&self, x: f64, y: f64) -> bool {
+        self.pane_rects.iter().any(|(pane, rect)| {
+            contains(*rect, x, y)
+                && self
+                    .split
+                    .pane(*pane)
+                    .and_then(Pane::tab)
+                    .and_then(|id| self.tabs.get(&id))
+                    .and_then(|tab| tab.view.rect)
+                    .is_some_and(|view| y >= view.y as f64 - self.s(27.) as f64)
+        })
+    }
+    /// Text of the line holding char `pos` (clipped for huge lines) and the column within it.
+    fn line_around(doc: &Rope, pos: usize) -> (String, usize) {
+        let line = doc.char_to_line(pos.min(doc.len_chars()));
+        let start = doc.line_to_char(line);
+        let end = if line + 1 < doc.len_lines() { doc.line_to_char(line + 1) } else { doc.len_chars() };
+        let from = start.max(pos.saturating_sub(1000));
+        let to = end.min(pos + 1000);
+        (doc.slice(from..to).to_string(), pos - from)
+    }
+    fn open_link(&mut self, id: u64, pos: usize) -> bool {
+        let Some(tab) = self.tabs.get(&id) else {
+            return false;
+        };
+        let (line, col) = Self::line_around(&tab.document.text, pos);
+        let Some(url) = markdown::link_at(&line, col) else {
+            return false;
+        };
+        if platform::open_url(&url) {
+            self.status = format!("Opened {url}");
+            return true;
+        }
+        // A relative link to another note opens in the editor.
+        let relative = Path::new(&url);
+        if !url.contains(':') && workspace::markdown_file(relative) {
+            let base = tab.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf).unwrap_or_default();
+            let target: PathBuf = base.join(relative).components().filter(|c| matches!(c, std::path::Component::Normal(_))).collect();
+            if tab.root == self.root && self.open_relative(target, 0).is_some() {
+                return true;
+            }
+        }
+        self.status = format!("Can't open this link: {url}");
+        true
+    }
+    fn editor_click(&mut self, x: f64, y: f64) {
+        if !self.over_editor(x, y) {
+            return;
+        }
+        if let Some(overlay) = self.overlay.as_mut().filter(|o| o.docked()) {
+            overlay.focused = false;
+        }
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let now = Instant::now();
+        let (last, at, count) = self.clicks;
+        let near = (at.x - x).abs() + (at.y - y).abs() < 8.;
+        let count = if near && now.duration_since(last) < Duration::from_millis(450) {
+            count % 3 + 1
+        } else {
+            1
+        };
+        self.clicks = (now, self.mouse, count);
+        let shift = self.modifiers.shift_key();
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return;
+        };
+        if count == 1 && platform::primary(self.modifiers) {
+            if let Some(cursor) = tab.view.hit(x as f32, y as f32) {
+                if self.open_link(id, cursor) {
+                    return;
+                }
+            }
+        }
+        let Some(tab) = self.tabs.get_mut(&id) else {
+            return;
+        };
+        if count == 1 {
+            if let Some((index, checked)) = tab.view.checkbox_at(x as f32, y as f32) {
+                tab.document
+                    .replace(index..index + 1, if checked { " " } else { "x" });
+                self.edited(id);
+                return;
+            }
+        }
+        let Some(cursor) = tab.view.hit(x as f32, y as f32) else {
+            return;
+        };
+        match count {
+            1 => tab.document.select(cursor, shift),
+            2 => {
+                let (start, end) = word_bounds(&tab.document.text, cursor);
+                tab.document.anchor = start;
+                tab.document.cursor = end;
+            }
+            _ => {
+                let text = &tab.document.text;
+                let line = text.char_to_line(cursor.min(text.len_chars()));
+                tab.document.anchor = text.line_to_char(line);
+                tab.document.cursor = if line + 1 < text.len_lines() {
+                    text.line_to_char(line + 1)
+                } else {
+                    text.len_chars()
+                };
+            }
+        }
+        self.drag = Some(Drag::Selection(id));
+    }
+    fn mouse_down(&mut self, button: MouseButton) {
+        self.dirty_session();
+        self.hover_since = None;
+        let (x, y) = (self.mouse.x, self.mouse.y);
+        let blocked = self.modal();
+        if !blocked {
+            if let Some((pane, _)) = self.pane_rects.iter().find(|(_, rect)| contains(*rect, x, y)) {
+                self.active_pane = *pane;
+            }
+        }
+        let found = self.hit_at(x, y);
+        let hit = found.as_ref().map(|(_, hit)| hit.clone());
+        if button == MouseButton::Right {
+            if blocked {
+                self.popup = None;
+            } else {
+                match &hit {
+                    Some(Hit::Tab(pane, index)) => {
+                        if let Some(p) = self.split.pane_mut(*pane) {
+                            p.active = *index;
+                        }
+                    }
+                    Some(Hit::Tree(path, _)) => self.tree_selected = Some(path.clone()),
+                    None if self.over_editor(x, y) => {
+                        let empty = self
+                            .active_id()
+                            .and_then(|id| self.tabs.get(&id))
+                            .is_none_or(|t| t.document.selection().is_empty());
+                        if empty {
+                            self.editor_click(x, y);
+                            self.drag = None;
+                        }
+                    }
+                    _ => {}
+                }
+                self.popup_for(hit.as_ref());
+            }
+            self.title();
+            self.redraw();
+            return;
+        }
+        let rect = found.map_or(
+            Rect { x: 0, y: 0, width: 0, height: 0 },
+            |(rect, _)| rect,
+        );
+        match hit {
+            Some(Hit::Do(act)) => self.act(act, rect),
+            Some(Hit::Command(command)) => self.command(command),
+            Some(Hit::Tab(pane, index)) => {
+                if let Some(p) = self.split.pane_mut(pane) {
+                    p.active = index;
+                    self.active_pane = pane;
+                    if let Some(tab) = p.tab() {
+                        if button == MouseButton::Middle {
+                            self.close_tab(tab, false);
+                        } else {
+                            self.drag = Some(Drag::Tab(tab, pane, self.mouse));
+                        }
+                    }
+                }
+            }
+            Some(Hit::Close(id)) => self.close_tab(id, false),
+            Some(Hit::Tree(path, directory)) => {
+                self.tree_selected = Some(path.clone());
+                if directory {
+                    if self.expanded.contains(&path) {
+                        self.expanded.remove(&path);
+                    } else {
+                        self.expanded.insert(path.clone());
+                        if !self.tree.contains_key(&path) {
+                            self.list(path);
+                        }
+                    }
+                } else {
+                    self.open_relative(path, 0);
+                }
+            }
+            Some(Hit::Heading(line, fold)) => {
+                if fold {
+                    if !self.folded.remove(&line) {
+                        self.folded.insert(line);
+                    }
+                } else {
+                    self.activate_row(Row {
+                        label: String::new(),
+                        hint: String::new(),
+                        action: Action::Heading(line),
+                    });
+                }
+            }
+            Some(Hit::Row(index)) => {
+                if let Some(o) = &mut self.overlay {
+                    o.selected = index;
+                }
+                if let Some(row) = self
+                    .overlay
+                    .as_ref()
+                    .and_then(|o| o.rows.get(index))
+                    .cloned()
+                {
+                    self.activate_row(row);
+                }
+            }
+            Some(Hit::TreeResize) => self.drag = Some(Drag::TreeResize),
+            Some(Hit::OutlineResize) => self.drag = Some(Drag::OutlineResize),
+            Some(Hit::Divider(index)) => self.drag = Some(Drag::Divider(index)),
+            Some(Hit::Scrollbar(id)) => {
+                self.drag = Some(Drag::Scrollbar(id));
+                self.mouse_move(self.mouse);
+            }
+            None => self.editor_click(x, y),
+        }
+        self.title();
+        self.redraw();
+    }
+    fn update_cursor(&mut self) {
+        let icon = match self.hover.and_then(|i| self.hits.get(i)).map(|(_, hit)| hit) {
+            Some(Hit::TreeResize | Hit::OutlineResize) => CursorIcon::ColResize,
+            Some(Hit::Divider(i)) if self.dividers.get(*i).is_some_and(|d| d.down) => {
+                CursorIcon::RowResize
+            }
+            Some(Hit::Divider(_)) => CursorIcon::ColResize,
+            Some(Hit::Do(Act::Field(_))) => CursorIcon::Text,
+            Some(Hit::Do(Act::Block | Act::Dismiss)) => CursorIcon::Default,
+            Some(_) => CursorIcon::Pointer,
+            None if !self.modal() && self.over_editor(self.mouse.x, self.mouse.y) => {
+                CursorIcon::Text
+            }
+            None => CursorIcon::Default,
+        };
+        if icon != self.cursor_icon {
+            self.cursor_icon = icon;
+            if let Some(window) = &self.window {
+                window.set_cursor(icon);
+            }
+        }
+    }
+    fn mouse_move(&mut self, position: PhysicalPosition<f64>) {
+        self.mouse = position;
+        match self.drag.clone() {
+            Some(Drag::Selection(id)) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    if let Some(rect) = tab.view.rect {
+                        if position.y < rect.y as f64 {
+                            tab.view.scroll(&tab.document, -2);
+                        }
+                        if position.y > (rect.y + rect.height as i32) as f64 {
+                            tab.view.scroll(&tab.document, 2);
+                        }
+                    }
+                    if let Some(cursor) = tab.view.hit(position.x as f32, position.y as f32) {
+                        tab.document.select(cursor, true);
+                    }
+                }
+            }
+            Some(Drag::TreeResize) => {
+                let left = self.tree_rect.map_or(0, |r| r.x) as f32;
+                self.tree_width = ((position.x as f32 - left) / self.scale).clamp(130., 420.)
+            }
+            Some(Drag::OutlineResize) => {
+                if let Some(window) = &self.window {
+                    self.outline_width = ((window.inner_size().width as f32 - position.x as f32)
+                        / self.scale)
+                        .clamp(130., 420.);
+                }
+            }
+            Some(Drag::Divider(index)) => {
+                if let Some(divider) = self.dividers.get(index).cloned() {
+                    let ratio = if divider.down {
+                        (position.y - divider.parent.y as f64) / divider.parent.height.max(1) as f64
+                    } else {
+                        (position.x - divider.parent.x as f64) / divider.parent.width.max(1) as f64
+                    };
+                    if let Some(target) = self.split.ratio_mut(&divider.path) {
+                        *target = ratio.clamp(0.15, 0.85) as f32;
+                    }
+                }
+            }
+            Some(Drag::Scrollbar(id)) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    if let Some(rect) = tab.view.rect {
+                        let fraction =
+                            ((position.y - rect.y as f64) / rect.height as f64).clamp(0., 1.);
+                        let position = (fraction * tab.document.text.len_chars() as f64) as usize;
+                        let line = tab
+                            .document
+                            .text
+                            .char_to_line(position.min(tab.document.text.len_chars()));
+                        let start = tab.document.text.line_to_char(line);
+                        tab.view.top = if position - start > 512 {
+                            position
+                        } else {
+                            start
+                        };
+                    }
+                }
+            }
+            _ => {}
+        }
+        if self.drag.is_some() {
+            self.redraw();
+            return;
+        }
+        // Slide between menu-bar menus while one is open.
+        let over_menu = self
+            .hits
+            .iter()
+            .find(|(rect, hit)| matches!(hit, Hit::Do(Act::Menu(_))) && contains(*rect, position.x, position.y))
+            .map(|(rect, hit)| (*rect, hit.clone()));
+        if let (Some((rect, Hit::Do(Act::Menu(index)))), Some(Popup { menu: Some(open), .. })) =
+            (over_menu, &self.popup)
+        {
+            if index != *open {
+                self.open_menu(index, rect);
+                self.redraw();
+            }
+        }
+        let top = self
+            .hits
+            .iter()
+            .rposition(|(rect, _)| contains(*rect, position.x, position.y));
+        if top != self.hover {
+            self.hover = top;
+            self.hover_since = Some(Instant::now());
+            self.update_cursor();
+            self.redraw();
+        } else if top.is_none() {
+            self.update_cursor();
+        }
+    }
+    fn mouse_up(&mut self) {
+        if let Some(Drag::Tab(tab, source, origin)) = self.drag.take() {
+            if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() < 8. {
+                return;
+            }
+            if let Some((target, rect)) = self
+                .pane_rects
+                .iter()
+                .find(|(_, rect)| contains(*rect, self.mouse.x, self.mouse.y))
+                .copied()
+            {
+                if let Some((down, before)) = self.drop_zone(rect, self.mouse.x, self.mouse.y) {
+                    if source == target
+                        && self.split.pane(source).is_some_and(|p| p.tabs.len() == 1)
+                    {
+                        return;
+                    }
+                    self.active_pane = target;
+                    self.split_pane_at(down, before, Some((tab, source)));
+                } else if self.mouse.y < rect.y as f64 + self.s(38.) as f64 {
+                    if let Some(pane) = self.split.pane(target) {
+                        let index = self.tab_drop_index(pane, rect, self.mouse.x);
+                        self.move_tab(tab, source, target, index);
+                    }
+                }
+            }
+        }
+        self.drag = None;
+        self.redraw();
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+        let saved = read_complete(&*self.config_storage, Path::new("session.toml"))
+            .ok()
+            .and_then(|text| toml::from_str::<Session>(&text.to_string()).ok())
+            .and_then(|session| session.window)
+            .filter(|w| w.width >= 300 && w.height >= 200);
+        self.saved_window = saved;
+        let mut attributes = Window::default_attributes()
+            .with_visible(!cfg!(test))
+            .with_title(APP_NAME)
+            .with_theme(None)
+            .with_inner_size(LogicalSize::new(1280., 800.))
+            .with_min_inner_size(LogicalSize::new(440., 300.));
+        if let Some(state) = saved {
+            // Only reuse the position if it is still on a connected monitor.
+            let on_screen = event_loop.available_monitors().any(|monitor| {
+                let (p, s) = (monitor.position(), monitor.size());
+                state.x + 80 > p.x
+                    && state.y >= p.y
+                    && state.x + 80 < p.x + s.width as i32
+                    && state.y + 40 < p.y + s.height as i32
+            });
+            attributes = attributes.with_inner_size(winit::dpi::PhysicalSize::new(state.width, state.height));
+            if on_screen {
+                attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(state.x, state.y));
+            }
+            attributes = attributes.with_maximized(state.maximized);
+        }
+        let window = Arc::new(
+            event_loop
+                .create_window(attributes)
+                .expect("Cannot create editor window"),
+        );
+        window.set_ime_allowed(true);
+        self.system_light = window.theme() == Some(Theme::Light);
+        self.settings.system_light = self.system_light;
+        let context =
+            softbuffer::Context::new(window.clone()).expect("Cannot initialize CPU renderer");
+        self.surface = Some(
+            softbuffer::Surface::new(&context, window.clone())
+                .expect("Cannot create render surface"),
+        );
+        self.window = Some(window);
+        self.redraw();
+    }
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            self.autosave(event_loop);
+            self.redraw();
+        }
+    }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.autosave(event_loop);
+    }
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::OpenResolved(Some((root, relative))) => {
+                if self.tabs.values().any(|t| t.document.dirty()) {
+                    self.status = "Save your edits before changing workspace.".into();
+                } else {
+                    self.clear_tabs();
+                    self.set_workspace(root);
+                    self.open_relative(relative, 0);
+                }
+            }
+            UserEvent::OpenResolved(None) => self.status = "Cannot open this file".into(),
+            UserEvent::Chosen(Some(root), Choose::Folder) => self.switch_workspace(root),
+            UserEvent::Chosen(Some(path), Choose::File) => self.open_absolute(path),
+            UserEvent::Chosen(Some(path), Choose::Save(id)) => {
+                if self.tabs.get(&id).is_some_and(|t| t.saving) {
+                    self.status =
+                        "A save is in progress. Please retry Save as when it finishes.".into();
+                    self.after_save = None;
+                    self.redraw();
+                    return;
+                }
+                let (root, relative) = if let Some(root) = &self.root {
+                    match path.strip_prefix(root) {
+                        Ok(relative) => (root.clone(), relative.to_path_buf()),
+                        Err(_) => (
+                            path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                            path.file_name().map(PathBuf::from).unwrap_or_default(),
+                        ),
+                    }
+                } else {
+                    (
+                        path.parent().unwrap_or(Path::new(".")).to_path_buf(),
+                        path.file_name().map(PathBuf::from).unwrap_or_default(),
+                    )
+                };
+                if self.root.is_none() {
+                    self.set_workspace(root.clone());
+                }
+                let storage: Arc<dyn Storage> = if self.root.as_ref() == Some(&root) {
+                    self.storage.clone().unwrap()
+                } else {
+                    Arc::new(LocalStorage::new(root.clone()))
+                };
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    tab.path = Some(relative);
+                    tab.root = Some(root);
+                    tab.watcher = None;
+                    tab.storage = Some(storage);
+                    tab.guard_save = false;
+                    tab.disk_epoch += 1;
+                    self.save(id, false);
+                    self.watch_tab(id);
+                }
+            }
+            UserEvent::Chosen(None, Choose::Save(id)) => {
+                if let Some(tab) = self.tabs.get_mut(&id).filter(|t| t.document.dirty()) {
+                    tab.edited = Some(Instant::now());
+                }
+                self.after_save = None;
+            }
+            UserEvent::Chosen(None, _) => {
+                self.after_save = None;
+            }
+            UserEvent::Read(id, event) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    match event {
+                        ReadEvent::Chunk(chunk) => {
+                            if tab.document.text.len_chars() == 0 {
+                                tab.document.line_ending =
+                                    if chunk.chars().take(8192).any(|c| c == '\r') {
+                                        "\r\n"
+                                    } else {
+                                        "\n"
+                                    };
+                            }
+                            tab.document.append_loaded(chunk);
+                            if let Some(cursor) = tab.restore_cursor {
+                                if cursor <= tab.document.text.len_chars() {
+                                    tab.document.select(cursor, false);
+                                    tab.restore_cursor = None;
+                                }
+                            }
+                        }
+                        ReadEvent::Complete => {
+                            tab.loading = false;
+                            if let Some(cursor) = tab.restore_cursor.take() {
+                                tab.document.select(cursor, false);
+                            }
+                            self.scan(id, true);
+                        }
+                        ReadEvent::Error(error) => {
+                            tab.loading = false;
+                            tab.failed = true;
+                            self.status = format!("Cannot load {}: {error}", tab.name());
+                        }
+                    }
+                }
+            }
+            UserEvent::Saved(id, revision, snapshot, result) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    tab.saving = false;
+                    match result {
+                        Ok(()) => {
+                            tab.document.mark_saved(revision, snapshot);
+                            tab.guard_save = true;
+                            tab.disk_epoch += 1;
+                            tab.external = None;
+                            if tab.document.dirty() {
+                                tab.edited = Some(Instant::now());
+                            }
+                            self.status = "Saved".into();
+                        }
+                        Err(error) => {
+                            self.status = format!("Save failed: {error}");
+                            self.after_save = None;
+                            tab.edited = None;
+                        }
+                    }
+                    self.scan(id, false);
+                    if let Some(after) = self.after_save.clone() {
+                        let done = match after {
+                            Kind::Close(id) => {
+                                self.tabs.get(&id).is_none_or(|t| !t.document.dirty())
+                            }
+                            _ => self.tabs.values().all(|t| !t.document.dirty()),
+                        };
+                        if done {
+                            self.after_save = None;
+                            self.overlay = None;
+                            match after {
+                                Kind::Close(id) => self.close_tab(id, true),
+                                Kind::Quit => self.persist_session(true),
+                                Kind::ChangeWorkspace(root) => {
+                                    self.clear_tabs();
+                                    self.set_workspace(root);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            UserEvent::Indexed(id, epoch, revision, blocks) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    if tab.document.revision == revision && tab.disk_epoch == epoch {
+                        let old = std::mem::replace(&mut tab.blocks, blocks);
+                        std::thread::spawn(move || drop(old));
+                    }
+                }
+            }
+            UserEvent::Fonts(db) => {
+                self.font_names = db
+                    .faces()
+                    .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+                    .collect();
+                self.font_names.sort();
+                self.font_names.dedup();
+                self.fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+                // Font IDs belong to a database; cached glyph IDs must not cross this swap.
+                self.renderer = CpuRenderer::default();
+                self.labels.clear();
+                self.widths.clear();
+                for tab in self.tabs.values_mut() {
+                    tab.view.clear_cache();
+                }
+            }
+            UserEvent::Watched(generation, watcher) if generation == self.generation => {
+                self.watcher = Some(watcher)
+            }
+            UserEvent::Changed(generation, path) if generation == self.generation => {
+                self.list(
+                    path.parent()
+                        .filter(|p| !p.as_os_str().is_empty())
+                        .unwrap_or(Path::new("."))
+                        .to_path_buf(),
+                );
+                self.index_files();
+                let ids: Vec<_> = self
+                    .tabs
+                    .iter()
+                    .filter(|(_, t)| {
+                        t.path.as_ref() == Some(&path)
+                            && t.root == self.root
+                            && !t.loading
+                            && !t.saving
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    let tab = &self.tabs[&id];
+                    let Some(storage) = tab.storage.clone() else {
+                        continue;
+                    };
+                    let saved = tab.document.saved_snapshot();
+                    let path = path.clone();
+                    let proxy = self.proxy.clone();
+                    let revision = tab.document.revision;
+                    let epoch = tab.disk_epoch;
+                    std::thread::spawn(move || match read_complete(&*storage, &path) {
+                        Ok(text) if text != saved => {
+                            let _ =
+                                proxy.send_event(UserEvent::External(id, epoch, revision, text));
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            let _ = proxy.send_event(UserEvent::Error(format!(
+                                "External file change: {error}"
+                            )));
+                        }
+                    });
+                }
+            }
+            UserEvent::External(id, epoch, revision, text) => {
+                if let Some(tab) = self.tabs.get_mut(&id).filter(|tab| tab.disk_epoch == epoch) {
+                    if tab.document.dirty() || tab.document.revision != revision {
+                        tab.external = Some(text);
+                        tab.edited = None;
+                    } else {
+                        tab.disk_epoch += 1;
+                        let cursor = tab.document.cursor;
+                        let old = std::mem::replace(
+                            &mut tab.document,
+                            crate::core::buffer::Document::new(text),
+                        );
+                        std::thread::spawn(move || drop(old));
+                        tab.document.select(cursor, false);
+                        tab.view.clear_cache();
+                        self.scan(id, true);
+                    }
+                }
+            }
+            UserEvent::Listed(generation, folder, entries) if generation == self.generation => {
+                self.tree.insert(folder, entries);
+            }
+            UserEvent::TabWatched(id, watcher) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    tab.watcher = Some(watcher);
+                }
+            }
+            UserEvent::TabChanged(id) => self.check_external(id),
+            UserEvent::Files(generation, files) if generation == self.generation => {
+                self.files = files;
+                if self
+                    .overlay
+                    .as_ref()
+                    .is_some_and(|o| matches!(o.kind, Kind::QuickOpen))
+                {
+                    self.refresh_overlay();
+                }
+            }
+            UserEvent::Rows(version, rows) => {
+                if let Some(overlay) = &mut self.overlay {
+                    if overlay.version == version {
+                        overlay.rows = rows;
+                        overlay.pending = false;
+                        overlay.selected =
+                            overlay.selected.min(overlay.rows.len().saturating_sub(1));
+                    }
+                }
+                self.preview_match();
+            }
+            UserEvent::Config(result) => match result {
+                Ok((settings, session)) => {
+                    self.adopt(settings);
+                    self.labels.clear();
+                    self.apply_window_theme();
+                    let argument = std::env::args_os()
+                        .skip(1)
+                        .find(|s| !s.to_string_lossy().starts_with("--"));
+                    if self.tabs.values().all(|t| !t.document.dirty()) {
+                        if let Some(path) = argument {
+                            self.open_absolute(PathBuf::from(path));
+                        } else if let Some(session) = session {
+                            if let Some(root) = session.workspace {
+                                self.set_workspace(root);
+                            }
+                            self.tree_width = if (130.0..=420.0).contains(&session.tree_width) {
+                                session.tree_width
+                            } else {
+                                218.
+                            };
+                            self.outline_width = if (130.0..=420.0).contains(&session.outline_width)
+                            {
+                                session.outline_width
+                            } else {
+                                200.
+                            };
+                            self.recent = session.recent.clone();
+                            self.show_tree = session.show_tree;
+                            self.show_outline = session.show_outline;
+                            if let Some(split) = session.split {
+                                self.tabs.clear();
+                                self.split = self.restore_split(split);
+                                self.active_pane = self.split.first_pane();
+                            }
+                        }
+                    }
+                }
+                Err(error) => self.status = format!("Settings error: {error}"),
+            },
+            UserEvent::Operation(generation, operation, result)
+                if generation == self.generation =>
+            {
+                match result {
+                    Ok(()) => {
+                        match operation {
+                            FileOp::Create(path) => {
+                                self.open_relative(path, 0);
+                            }
+                            FileOp::CreateFolder(path) => {
+                                self.tree_selected = Some(path);
+                            }
+                            FileOp::Rename(from, to) => {
+                                for tab in
+                                    self.tabs.values_mut().filter(|tab| tab.root == self.root)
+                                {
+                                    if let Some(rest) =
+                                        tab.path.as_ref().and_then(|p| p.strip_prefix(&from).ok())
+                                    {
+                                        tab.path = Some(to.join(rest));
+                                    }
+                                }
+                                self.tree_selected = Some(to);
+                            }
+                            FileOp::Delete(path) => {
+                                let ids: Vec<_> = self
+                                    .tabs
+                                    .iter()
+                                    .filter(|(_, t)| {
+                                        t.root == self.root
+                                            && t.path.as_ref().is_some_and(|p| p.starts_with(&path))
+                                    })
+                                    .map(|(id, _)| *id)
+                                    .collect();
+                                for id in ids {
+                                    self.close_tab(id, true);
+                                }
+                                self.tree_selected = None;
+                            }
+                        }
+                        let folders: Vec<_> = self.expanded.iter().cloned().collect();
+                        for folder in folders {
+                            self.list(folder);
+                        }
+                        self.index_files();
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            UserEvent::SessionSaved(result) => match result {
+                Ok(()) if self.session_closing => event_loop.exit(),
+                Ok(()) => {}
+                Err(error) => {
+                    self.session_closing = false;
+                    self.status = format!("Cannot save session: {error}");
+                }
+            },
+            UserEvent::Error(error) => self.status = error,
+            UserEvent::Replaced(id, epoch, revision, text) => {
+                if let Some(tab) = self.tabs.get_mut(&id) {
+                    if tab.document.revision == revision && tab.disk_epoch == epoch {
+                        let end = tab.document.text.len_chars();
+                        tab.document.replace_rope(0..end, text);
+                        self.edited(id);
+                        self.refresh_overlay();
+                    } else {
+                        self.status =
+                            "The document changed during replace-all. Please run it again.".into();
+                    }
+                }
+            }
+            UserEvent::ConfigWatch(watcher) => self.config_watcher = Some(watcher),
+            UserEvent::ConfigChanged => {
+                let storage = self.config_storage.clone();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let result = read_complete(&*storage, Path::new("settings.toml"))
+                        .map_err(|e| e.to_string())
+                        .and_then(|text| Settings::parse(&text.to_string()));
+                    let _ = proxy.send_event(UserEvent::SettingsUpdated(result));
+                });
+            }
+            UserEvent::SettingsUpdated(result) => match result {
+                Ok(settings) => {
+                    self.adopt(settings);
+                    self.labels.clear();
+                    for tab in self.tabs.values_mut() {
+                        tab.view.clear_cache();
+                    }
+                    self.apply_window_theme();
+                }
+                Err(error) => self.status = format!("Settings error: {error}"),
+            },
+            _ => {}
+        }
+        self.title();
+        self.redraw();
+    }
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::CloseRequested => self.command(Command::Quit),
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                self.dirty_session();
+                self.redraw()
+            }
+            WindowEvent::Moved(_) => self.dirty_session(),
+            WindowEvent::ThemeChanged(theme) => {
+                self.system_light = theme == Theme::Light;
+                self.settings.system_light = self.system_light;
+                self.labels.clear();
+                for tab in self.tabs.values_mut() {
+                    tab.view.clear_cache();
+                }
+                self.redraw();
+            }
+            WindowEvent::RedrawRequested => self.frame(event_loop),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let alt = self.modifiers.alt_key();
+                self.modifiers = modifiers.state();
+                if alt != self.modifiers.alt_key() {
+                    self.redraw();
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let shortcut = match &event.logical_key {
+                    Key::Character(c) => c.to_lowercase(),
+                    Key::Named(key) => format!("{key:?}").to_lowercase(),
+                    _ => String::new(),
+                };
+                let shortcut = match event.physical_key {
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit8) => {
+                        "8".into()
+                    }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit7) => {
+                        "7".into()
+                    }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit5) => {
+                        "5".into()
+                    }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Backslash) => {
+                        "\\".into()
+                    }
+                    _ => shortcut,
+                };
+                self.key(event.logical_key, shortcut, event.text.as_deref());
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.preedit = text;
+                self.redraw();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                self.preedit.clear();
+                if let Some(overlay) = self.overlay.as_mut().filter(|o| o.focused) {
+                    overlay.type_text(&text);
+                    self.refresh_overlay();
+                } else if let Some(id) = self.active_id() {
+                    self.tabs.get_mut(&id).unwrap().document.insert(&text);
+                    self.edited(id);
+                }
+                self.redraw();
+            }
+            WindowEvent::Ime(Ime::Disabled) => {
+                self.preedit.clear();
+                self.redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => self.mouse_move(position),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } if matches!(
+                button,
+                MouseButton::Left | MouseButton::Middle | MouseButton::Right
+            ) =>
+            {
+                self.mouse_down(button)
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                ..
+            } => self.mouse_up(),
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.wheel += match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y * 3.,
+                    MouseScrollDelta::PixelDelta(position) => {
+                        -position.y as f32 / (self.settings.font_size * self.scale)
+                    }
+                };
+                let rows = self.wheel.trunc() as i32;
+                self.wheel -= rows as f32;
+                if rows == 0 {
+                    return;
+                }
+                let (x, y) = (self.mouse.x, self.mouse.y);
+                let tab_strip = self.hit_at(x, y).and_then(|(_, hit)| match hit {
+                    Hit::Tab(pane, _) => Some(pane),
+                    Hit::Close(id) => self
+                        .split
+                        .pane(self.active_pane)
+                        .filter(|p| p.tabs.contains(&id))
+                        .map(|p| p.id),
+                    _ => None,
+                });
+                if let Some(o) = self.overlay.as_mut().filter(|o| !o.docked()) {
+                    if o.kind != Kind::Settings {
+                        let last = o.rows.len().saturating_sub(o.visible);
+                        o.scroll = (o.scroll as i32 + rows).clamp(0, last as i32) as usize;
+                    }
+                } else if let Some(pane) = tab_strip {
+                    self.active_pane = pane;
+                    self.command(if rows > 0 { Command::NextTab } else { Command::PreviousTab });
+                } else if self.tree_rect.is_some_and(|r| contains(r, x, y)) {
+                    self.tree_top = (self.tree_top as i32 + rows).max(0) as usize;
+                } else if self.outline_rect.is_some_and(|r| contains(r, x, y)) {
+                    self.scroll_outline(rows);
+                } else if let Some((pane, _)) = self
+                    .pane_rects
+                    .iter()
+                    .find(|(_, rect)| contains(*rect, x, y))
+                {
+                    if let Some(id) = self.split.pane(*pane).and_then(Pane::tab) {
+                        if let Some(tab) = self.tabs.get_mut(&id) {
+                            tab.view.scroll(&tab.document, rows);
+                        }
+                    }
+                }
+                self.redraw();
+            }
+            WindowEvent::DroppedFile(path) => self.open_absolute(path),
+            WindowEvent::Focused(false) => {
+                self.drag = None;
+                self.modifiers = ModifiersState::empty();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    struct Smoke {
+        app: App,
+        folder: tempfile::TempDir,
+        outside: tempfile::TempDir,
+        phase: u8,
+        first: u64,
+        second: u64,
+        session_saved: bool,
+        started: Instant,
+    }
+    impl ApplicationHandler<UserEvent> for Smoke {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            self.app.resumed(event_loop);
+            self.app.first_frame = true; // Use isolated fixtures, never the user's settings or session.
+            self.app
+                .set_workspace(self.folder.path().canonicalize().unwrap());
+            self.first = self.app.open_relative("first.md".into(), 0).unwrap();
+        }
+        fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+            if matches!(&event, UserEvent::SessionSaved(Ok(()))) {
+                self.session_saved = true;
+            }
+            self.app.user_event(event_loop, event);
+        }
+        fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+            self.app.window_event(event_loop, id, event);
+            self.about_to_wait(event_loop);
+        }
+        fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            assert!(
+                self.started.elapsed() < Duration::from_secs(15),
+                "Native smoke test timed out at phase {}: {}",
+                self.phase,
+                self.app.status
+            );
+            self.app.autosave(event_loop);
+            match self.phase {
+                0 if !self.app.tabs[&self.first].loading => {
+                    self.app
+                        .user_event(event_loop, UserEvent::Fonts(platform::fallback_fonts()));
+                    if let Some(path) = std::env::var_os("JAME_PREVIEW_PATH") {
+                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
+                        let document = std::mem::replace(
+                            &mut tab.document,
+                            crate::core::buffer::Document::new(Rope::from_str(include_str!(
+                                "../../examples/welcome.md"
+                            ))),
+                        );
+                        let blocks = std::mem::take(&mut tab.blocks);
+                        tab.blocks.update(&tab.document.text, 0);
+                        tab.view.clear_cache();
+                        self.app.frame(event_loop);
+                        let width = self.app.renderer.width;
+                        let height = self.app.renderer.height;
+                        let mut bytes = Vec::new();
+                        bytes.extend_from_slice(b"BM");
+                        bytes.extend_from_slice(&(54 + width * height * 4).to_le_bytes());
+                        bytes.extend_from_slice(&[0; 4]);
+                        bytes.extend_from_slice(&54u32.to_le_bytes());
+                        bytes.extend_from_slice(&40u32.to_le_bytes());
+                        bytes.extend_from_slice(&width.to_le_bytes());
+                        bytes.extend_from_slice(&height.to_le_bytes());
+                        bytes.extend_from_slice(&1u16.to_le_bytes());
+                        bytes.extend_from_slice(&32u16.to_le_bytes());
+                        bytes.extend_from_slice(&[0; 24]);
+                        for row in self.app.renderer.pixels().chunks(width as usize).rev() {
+                            for pixel in row {
+                                bytes.extend_from_slice(&pixel.to_le_bytes());
+                            }
+                        }
+                        std::fs::write(path, bytes).unwrap();
+                        let tab = self.app.tabs.get_mut(&self.first).unwrap();
+                        tab.document = document;
+                        tab.blocks = blocks;
+                        tab.view.clear_cache();
+                    }
+                    self.app.frame(event_loop);
+                    assert!(!self.app.tabs[&self.first].view.tiles.is_empty());
+                    let before = self.app.tabs[&self.first].document.text.clone();
+                    let end = before.len_chars();
+                    self.app
+                        .tabs
+                        .get_mut(&self.first)
+                        .unwrap()
+                        .document
+                        .select(end, false);
+                    let window = self.app.window.as_ref().unwrap().id();
+                    self.app.window_event(
+                        event_loop,
+                        window,
+                        WindowEvent::Ime(Ime::Preedit("日本語".into(), Some((0, 9)))),
+                    );
+                    assert_eq!(self.app.tabs[&self.first].document.text, before);
+                    self.app.window_event(
+                        event_loop,
+                        window,
+                        WindowEvent::Ime(Ime::Commit("日本語".into())),
+                    );
+                    assert!(
+                        self.app.tabs[&self.first]
+                            .document
+                            .text
+                            .to_string()
+                            .ends_with("日本語")
+                    );
+                    self.app.command(Command::Undo);
+                    assert_eq!(self.app.tabs[&self.first].document.text, before);
+                    self.app.command(Command::Redo);
+                    self.app.split_pane(false, None);
+                    self.second = self.app.open_relative("second.md".into(), 0).unwrap();
+                    self.phase = 1;
+                }
+                1 if !self.app.tabs[&self.second].loading => {
+                    let source = self.app.active_pane;
+                    let target = self.app.split.first_pane();
+                    self.app.move_tab(self.second, source, target, 1);
+                    self.app.move_tab(self.first, target, target, 2);
+                    assert_eq!(
+                        self.app.split.pane(target).unwrap().tabs,
+                        vec![self.second, self.first]
+                    );
+                    self.app.split_pane(true, None);
+                    let empty = self.app.active_id().unwrap();
+                    self.app.close_tab(empty, true);
+                    assert!(matches!(self.app.split, Split::Pane(_)));
+                    self.app.open_relative("first.md".into(), 0);
+                    self.app.show(Kind::Replace);
+                    self.app.modifiers = ModifiersState::CONTROL;
+                    let before = self.app.tabs[&self.first].document.text.clone();
+                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
+                    assert_eq!(self.app.tabs[&self.first].document.text, before);
+                    self.app.modifiers = ModifiersState::empty();
+                    let overlay = self.app.overlay.as_mut().unwrap();
+                    overlay.query = "body".into();
+                    overlay.replacement = "changed".into();
+                    overlay.secondary = true;
+                    overlay.rows = vec![Row {
+                        label: String::new(),
+                        hint: String::new(),
+                        action: Action::Match(workspace::Match {
+                            path: "first.md".into(),
+                            start: 1000,
+                            end: 1004,
+                            line: 0,
+                            preview: String::new(),
+                        }),
+                    }];
+                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
+                    assert_eq!(self.app.tabs[&self.first].document.text, before);
+                    self.phase = 2;
+                }
+                2 if self
+                    .app
+                    .overlay
+                    .as_ref()
+                    .is_some_and(|o| !o.pending && !o.rows.is_empty()) =>
+                {
+                    self.app.overlay_key(&Key::Named(NamedKey::Enter), None);
+                    assert!(
+                        self.app.tabs[&self.first]
+                            .document
+                            .text
+                            .to_string()
+                            .contains("changed")
+                    );
+                    self.app.overlay = None;
+                    self.phase = 3;
+                }
+                3 if !self.app.tabs[&self.first].document.dirty() && self.app.watcher.is_some() => {
+                    let saved = read_complete(
+                        &*self.app.storage.as_ref().unwrap().clone(),
+                        Path::new("first.md"),
+                    )
+                    .unwrap();
+                    assert_eq!(saved, self.app.tabs[&self.first].document.text);
+                    self.app
+                        .storage
+                        .as_ref()
+                        .unwrap()
+                        .write(
+                            Path::new("first.md"),
+                            &Rope::from_str("# Disk\r\nclean reload\r\n"),
+                        )
+                        .unwrap();
+                    self.phase = 4;
+                }
+                4 if self.app.tabs[&self.first]
+                    .document
+                    .text
+                    .to_string()
+                    .contains("clean reload") =>
+                {
+                    self.app
+                        .tabs
+                        .get_mut(&self.first)
+                        .unwrap()
+                        .document
+                        .select(0, false);
+                    self.app
+                        .tabs
+                        .get_mut(&self.first)
+                        .unwrap()
+                        .document
+                        .insert("mine ");
+                    self.app.edited(self.first);
+                    self.app
+                        .storage
+                        .as_ref()
+                        .unwrap()
+                        .write(
+                            Path::new("first.md"),
+                            &Rope::from_str("the external version"),
+                        )
+                        .unwrap();
+                    self.phase = 5;
+                }
+                5 if self.app.tabs[&self.first].external.is_some() => {
+                    assert!(
+                        self.app.tabs[&self.first]
+                            .document
+                            .text
+                            .to_string()
+                            .starts_with("mine ")
+                    );
+                    assert!(self.app.tabs[&self.first].edited.is_none());
+                    self.app.save(self.first, false);
+                    self.phase = 6;
+                }
+                6 if !self.app.tabs[&self.first].document.dirty()
+                    && !self.app.tabs[&self.first].saving =>
+                {
+                    assert!(self.app.tabs[&self.first].external.is_none());
+                    let destination =
+                        platform::save_destination(&self.outside.path().join("first.md")).unwrap();
+                    self.app.user_event(
+                        event_loop,
+                        UserEvent::Chosen(Some(destination), Choose::Save(self.first)),
+                    );
+                    self.phase = 10;
+                }
+                10 if !self.app.tabs[&self.first].saving
+                    && self.app.tabs[&self.first].watcher.is_some() =>
+                {
+                    self.app.tabs[&self.first]
+                        .storage
+                        .as_ref()
+                        .unwrap()
+                        .write(
+                            Path::new("first.md"),
+                            &Rope::from_str("mine outside document\r\n"),
+                        )
+                        .unwrap();
+                    self.phase = 11;
+                }
+                11 if self.app.tabs[&self.first]
+                    .document
+                    .text
+                    .to_string()
+                    .contains("outside document") =>
+                {
+                    self.app
+                        .operation(FileOp::Rename("first.md".into(), "renamed.md".into()));
+                    self.phase = 12;
+                }
+                12 if self.app.files.iter().any(|p| p == Path::new("renamed.md")) => {
+                    assert_eq!(
+                        self.app.tabs[&self.first].path.as_deref(),
+                        Some(Path::new("first.md"))
+                    );
+                    // Go to line clamps, word count reports, export writes next to the file.
+                    self.app.goto_line("2");
+                    let doc = &self.app.tabs[&self.first].document;
+                    assert_eq!(doc.cursor, doc.text.line_to_char(1));
+                    self.app.goto_line("99999");
+                    let doc = &self.app.tabs[&self.first].document;
+                    assert_eq!(doc.cursor, doc.text.line_to_char(doc.text.len_lines() - 1));
+                    self.app.goto_line("abc");
+                    self.app.command(Command::WordCount);
+                    assert!(self.app.status.starts_with("3 words"), "{}", self.app.status);
+                    self.phase = 13;
+                }
+                13 if self.app.status.starts_with("Exported") => {
+                    let html =
+                        std::fs::read_to_string(self.outside.path().join("first.html")).unwrap();
+                    assert!(html.contains("<p>mine outside document</p>"), "{html}");
+                    // Later phases expect the cursor where the earlier phases left it.
+                    self.app.tabs.get_mut(&self.first).unwrap().document.select(5, false);
+                    self.app.persist_session(false);
+                    self.phase = 7;
+                }
+                7 if self.session_saved => {
+                    let text = read_complete(&*self.app.config_storage, Path::new("session.toml"))
+                        .unwrap();
+                    let session: Session = toml::from_str(&text.to_string()).unwrap();
+                    self.app.clear_tabs();
+                    let split = session.split.unwrap();
+                    self.app.split = self.app.restore_split(split);
+                    self.app.active_pane = self.app.split.first_pane();
+                    self.phase = 8;
+                }
+                8 if self
+                    .app
+                    .tabs
+                    .values()
+                    .filter(|t| t.path.is_some())
+                    .all(|t| !t.loading) =>
+                {
+                    let restored = self
+                        .app
+                        .tabs
+                        .values()
+                        .find(|t| t.path.as_deref() == Some(Path::new("first.md")))
+                        .unwrap();
+                    assert_eq!(restored.document.cursor, 5);
+                    assert!(restored.document.text.to_string().starts_with("mine "));
+                    assert!(
+                        restored
+                            .document
+                            .text
+                            .to_string()
+                            .contains("outside document")
+                    );
+                    assert_eq!(
+                        restored.root,
+                        Some(self.outside.path().canonicalize().unwrap())
+                    );
+                    assert_eq!(
+                        self.app
+                            .split
+                            .pane(self.app.active_pane)
+                            .unwrap()
+                            .tabs
+                            .len(),
+                        2
+                    );
+                    event_loop.exit();
+                    self.phase = 9;
+                }
+                _ => {}
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(10),
+            ));
+        }
+    }
+    #[test]
+    fn native_window_edit_save_conflict_tabs_and_session() {
+        let folder = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let store = LocalStorage::new(folder.path().to_path_buf());
+        store
+            .write(
+                Path::new("first.md"),
+                &Rope::from_str("# First\r\nbody\r\n"),
+            )
+            .unwrap();
+        store
+            .write(Path::new("second.md"), &Rope::from_str("# Second\n"))
+            .unwrap();
+        let event_loop = platform::test_event_loop();
+        let mut app = App::new(event_loop.create_proxy(), Instant::now());
+        app.config_storage = Arc::new(LocalStorage::new(config.path().to_path_buf()));
+        let mut smoke = Smoke {
+            app,
+            folder,
+            outside: tempfile::tempdir().unwrap(),
+            phase: 0,
+            first: 0,
+            second: 0,
+            session_saved: false,
+            started: Instant::now(),
+        };
+        event_loop.run_app(&mut smoke).unwrap();
+        assert_eq!(smoke.phase, 9);
+    }
+}
