@@ -12,19 +12,18 @@ pub struct Tab {
     pub storage: Option<Arc<dyn Storage>>,
     pub path: Option<PathBuf>,
     pub root: Option<PathBuf>,
-    pub watcher: Option<notify::RecommendedWatcher>,
     pub loading: bool,
     pub failed: bool,
     pub saving: bool,
     pub edited: Option<Instant>,
-    pub external: Option<Rope>,
     pub restore_cursor: Option<usize>,
-    pub guard_save: bool,
     pub disk_epoch: u64,
     /// The chapter or page title shown on the tab.
     pub title: Option<String>,
     /// Review comments anchored in this text.
     pub marks: Vec<TabMark>,
+    /// What the spelling underlines in this tab were computed for.
+    pub spell_signature: u64,
 }
 impl Tab {
     pub fn new(id: u64) -> Self {
@@ -36,17 +35,15 @@ impl Tab {
             storage: None,
             path: None,
             root: None,
-            watcher: None,
             loading: false,
             failed: false,
             saving: false,
             edited: None,
-            external: None,
             restore_cursor: None,
-            guard_save: false,
             disk_epoch: 0,
             title: None,
             marks: Vec::new(),
+            spell_signature: 0,
         }
     }
     pub fn name(&self) -> String {

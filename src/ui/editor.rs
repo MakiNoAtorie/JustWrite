@@ -357,7 +357,11 @@ impl EditorView {
                             color,
                         );
                     }
-                    if glyph.metadata & 1 != 0 {
+                    if {
+                        let at = self.misspelled.partition_point(|(start, _)| *start <= source);
+                        // The word being typed is left alone until the caret moves on.
+                        at > 0 && source < self.misspelled[at - 1].1 && !(doc.cursor >= self.misspelled[at - 1].0 && doc.cursor <= self.misspelled[at - 1].1)
+                    } {
                         // A dotted red underline for a possible spelling mistake.
                         let base = y + (run.line_height * 0.9) as i32;
                         let mut dx = 0;
@@ -479,6 +483,11 @@ impl EditorView {
                 self.top = doc.text.line_to_char(line.saturating_sub(-rows as usize));
             }
         }
+    }
+    /// The text of every tile on screen with where it starts and whether it opens inside a block
+    /// note: what the spell checker needs.
+    pub fn spell_chunks(&self) -> Vec<(usize, String, bool)> {
+        self.tiles.iter().filter(|t| !t.preview.hidden).map(|t| (t.start, t.source.clone(), t.initial.in_block)).collect()
     }
     /// Where the caret is on screen, relative to the editor's rectangle.
     pub fn caret_at(&self, cursor: usize) -> Option<(f32, f32)> {

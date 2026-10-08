@@ -29,6 +29,8 @@ pub mod project;
 pub mod forms;
 #[path = "screens.rs"]
 pub mod screens;
+#[path = "spelling.rs"]
+pub mod spelling;
 use forms::{ExportRequest, Form};
 use project::{DropTarget, Panel, ProjectState};
 use screens::{Screen, ScreenAct};
@@ -77,6 +79,8 @@ pub enum UserEvent {
     Exported(Result<PathBuf, String>),
     Preview(u64, Result<Arc<crate::export::typeset::Typeset>, String>),
     Imported(Result<Box<crate::import::split::Imported>, String>),
+    Spelling(u64, u64, Vec<(usize, usize)>),
+    SpellerLoaded(Result<Arc<crate::core::spell::Speller>, String>),
     ImportRead(PathBuf, Result<Box<crate::import::Raw>, String>),
     PreviewPage(u64, usize, u32, Arc<crate::export::typeset::Bitmap>),
 }
@@ -227,6 +231,8 @@ pub struct App {
     hover_since: Option<Instant>,
     recent: Vec<PathBuf>,
     saved_window: Option<WindowState>,
+    file_type_registered: bool,
+    spell: spelling::SpellState,
     pending_session: Option<SessionSplit>,
     /// Dialogs with several fields, and the large screens (history, compare, preview).
     form: Option<Form>,
@@ -311,6 +317,7 @@ impl App {
         });
         let config_storage: Arc<dyn Storage> =
             Arc::new(LocalStorage::new(platform::data_directory()));
+        let proxy_for_spell = proxy.clone();
         let mut tabs = BTreeMap::new();
         tabs.insert(1, Tab::new(1));
         Self {
@@ -377,6 +384,8 @@ impl App {
             hover_since: None,
             recent: Vec::new(),
             saved_window: None,
+            file_type_registered: false,
+            spell: spelling::SpellState::new(proxy_for_spell),
             pending_session: None,
             form: None,
             parked_form: None,
@@ -424,17 +433,12 @@ impl App {
     }
     fn title(&self) {
         if let Some(window) = &self.window {
-            let title = self
-                .active_id()
-                .and_then(|id| self.tabs.get(&id))
-                .map(|t| {
-                    format!(
-                        "{}{} — {APP_NAME}",
-                        if t.document.dirty() { "● " } else { "" },
-                        t.name()
-                    )
-                })
-                .unwrap_or_else(|| APP_NAME.into());
+            let project = self.project.as_ref().map(|p| p.core.title().to_owned());
+            let title = match (self.active_id().and_then(|id| self.tabs.get(&id)).filter(|t| t.path.is_some()), project) {
+                (Some(t), Some(project)) => format!("{}{} — {project} — {APP_NAME}", if t.document.dirty() { "● " } else { "" }, t.name()),
+                (None, Some(project)) => format!("{project} — {APP_NAME}"),
+                _ => APP_NAME.into(),
+            };
             window.set_title(&title);
         }
     }
@@ -1733,6 +1737,7 @@ impl App {
                 }
             }
             Command::AddComment => self.add_comment_form(),
+            Command::AddWord => self.add_word(),
             Command::Palette => self.show(Kind::Palette),
             Command::QuickOpen => self.show(Kind::QuickOpen),
             Command::JumpScene => self.show(Kind::Scenes),
@@ -2101,6 +2106,7 @@ impl App {
             show_outline: self.show_outline,
             recent: self.recent.clone(),
             window: self.window_state(),
+            file_type: self.file_type_registered,
         };
         let text = match toml::to_string_pretty(&session) {
             Ok(text) => text,
@@ -2194,7 +2200,6 @@ impl App {
                     && !tab.failed
                     && !tab.saving
                     && tab.path.is_some()
-                    && tab.external.is_none()
                     && tab.document.dirty()
                 {
                     if let Some(edited) = tab.edited {
@@ -2517,6 +2522,7 @@ impl App {
         let Some(cursor) = tab.view.hit(x as f32, y as f32) else {
             return;
         };
+        let clicked_comment = if count == 1 { tab.marks.iter().find(|m| !m.orphaned && cursor >= m.start && cursor < m.end).map(|m| m.id.clone()) } else { None };
         match count {
             1 => tab.document.select(cursor, shift),
             2 => {
@@ -2536,6 +2542,11 @@ impl App {
             }
         }
         self.drag = Some(Drag::Selection(id));
+        if let (Some(comment), Some(state)) = (clicked_comment, &mut self.project) {
+            state.active_comment = Some(comment);
+            state.panel = Panel::Comments;
+            self.sync_view_marks(id);
+        }
     }
     fn mouse_down(&mut self, button: MouseButton) {
         self.dirty_session();
@@ -2988,11 +2999,19 @@ impl ApplicationHandler<UserEvent> for App {
                         .skip(1)
                         .find(|s| !s.to_string_lossy().starts_with("--"));
                     if let Some(session) = &session {
+                        self.file_type_registered = session.file_type;
                         self.tree_width = if (130.0..=420.0).contains(&session.tree_width) { session.tree_width } else { 232. };
                         self.outline_width = if (130.0..=420.0).contains(&session.outline_width) { session.outline_width } else { 260. };
                         self.recent = session.recent.clone();
                         self.show_tree = session.show_tree;
                         self.show_outline = session.show_outline;
+                    }
+                    if cfg!(windows) && !self.file_type_registered {
+                        // Once per user: associate .jw files with this program.
+                        self.file_type_registered = true;
+                        std::thread::spawn(|| {
+                            let _ = platform::register_file_type();
+                        });
                     }
                     if self.project.is_none() {
                         if let Some(path) = argument {
@@ -3018,6 +3037,8 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Exported(result) => self.exported(result),
             UserEvent::Preview(version, result) => self.preview_ready(version, result),
             UserEvent::Imported(result) => self.imported(result),
+            UserEvent::Spelling(tab, signature, ranges) => self.spelling_ready(tab, signature, ranges),
+            UserEvent::SpellerLoaded(result) => self.speller_loaded(result),
             UserEvent::ImportRead(path, result) => self.import_read(path, result),
             UserEvent::PreviewPage(version, page, q, bitmap) => self.preview_page(version, page, q, bitmap),
             UserEvent::SessionSaved(result) => match result {

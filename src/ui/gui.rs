@@ -279,6 +279,7 @@ impl App {
             Command::Reopen => !self.closed.is_empty() && project,
             Command::Cut | Command::Copy => selection && project,
             Command::AddComment => selection && project,
+            Command::AddWord => tab.is_some_and(|t| t.view.misspelled.iter().any(|(a, b)| t.document.cursor >= *a && t.document.cursor <= *b)),
             Command::Undo
             | Command::Redo
             | Command::SelectAll
@@ -778,6 +779,7 @@ impl App {
                 Hit::Scrollbar(id),
             ));
         }
+        self.request_spelling(id);
     }
     fn paint_findbar(&mut self, rect: Rect, p: Palette) {
         let Some(overlay) = &self.overlay else {

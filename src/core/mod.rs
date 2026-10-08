@@ -4,6 +4,7 @@ pub mod comments;
 pub mod config;
 pub mod notes;
 pub mod prose;
+pub mod spell;
 pub mod storage;
 pub mod typography;
 pub mod workspace;

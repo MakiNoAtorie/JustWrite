@@ -134,6 +134,8 @@ pub struct Session {
     /// Recently opened projects, newest first.
     pub recent: Vec<PathBuf>,
     pub window: Option<WindowState>,
+    /// `.jw` files have been associated with the program (Windows).
+    pub file_type: bool,
 }
 /// Outer window position and inner size in physical pixels.
 #[derive(Clone, Copy, Serialize, Deserialize)]

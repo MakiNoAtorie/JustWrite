@@ -1,45 +1,148 @@
-# Just a markdown editor
+# JustWrite
 
-A portable native Rust Markdown editor for Windows 10/11. It uses winit, cosmic-text and softbuffer to draw on the CPU, with no webview or GUI framework.
+A small, fast, native editor for writing a novel. No web view, no account, no cloud: one window,
+your manuscript, and a file you own.
 
-## Run
+JustWrite keeps a book as a project (`.jw`, a plain ZIP) with a **Manuscript** of parts and
+chapters and a **Notes & research** section of pages. It conceals the `*` and `**` markers while
+you write, keeps your private notes out of the export, lets you leave review comments on passages,
+keeps a history of snapshots you can compare and restore, and exports to a manuscript in Word, a
+print-ready PDF, an EPUB 3 or plain text, with a paged preview inside the app.
 
-Double-click `dist/Just a markdown editor.exe`, or pass a Markdown file:
+![screenshot](docs/screenshot.png)
 
-```powershell
-& './dist/Just a markdown editor.exe' './examples/welcome.md'
+## Writing
+
+* **Prose, not markup.** `*italic*` and `**bold**` show as italic and bold with the marks
+  concealed (Ctrl+M shows them). A line holding `#` or `***` shows as a centred symbol you choose.
+  Chapters have no headings; the tree holds their titles.
+* **Typography.** Smart quotes, `--` to an em dash, `...` to an ellipsis and the Spanish dialogue dash
+  as you type, all switchable per project. The project language (English or Spanish) sets the quote
+  style, the spelling dictionary and the hyphenation of exports.
+* **Notes.** Type `$$` and the rest of the line is a note; `a $$ note $$ b` is an inline note; lines of
+  `$$$` fence a block note. `\$$` is a literal. Ctrl+/ turns the line or selection into a note and
+  back, Ctrl+Alt+/ the whole paragraph. Notes are grey and italic (colour and style are settings),
+  Ctrl+Shift+Y hides them, they never count as words, and they are stripped on export unless you ask
+  for them. The marker is only how notes are typed: stored files are independent of it, so changing it
+  in the settings updates every note.
+* **Review comments.** Select text and press Ctrl+Alt+M. Comments appear as highlights and in a
+  side panel with filters by status, tag and chapter; click one to jump to its text. They are stored
+  outside the text and follow your edits. If the commented words are deleted the comment becomes
+  *orphaned* and is kept.
+* **Goals and counts.** Word counts per chapter and in total, an optional project goal and an
+  optional goal per writing session.
+
+## History
+
+Ctrl+Alt+S takes a snapshot with a message; the program also takes automatic ones on a timer and when
+the project closes. Ctrl+Shift+H opens the history: compare any two snapshots or one with the text
+now (notes and comment changes can be hidden), restore the whole project or one chapter, or work on
+a separate *line* (an alternate ending, say) and switch between lines. Restoring never destroys
+anything; it saves what was there first and records the restore as a new snapshot. Old automatic
+snapshots are thinned out; manual ones are always kept.
+
+## Export
+
+Ctrl+E opens the export dialog: the whole manuscript, the current chapter, chosen chapters or any
+snapshot; notes stripped or kept; comments left out, as Word comments or as an appendix; title page,
+contents, dedication, acknowledgments, about-the-author and copyright pages; and every layout value
+(page size, margins, fonts, spacing, running heads, chapter openings, drop caps…). Save a setting
+as your own preset. The built-in presets are:
+
+| Preset | Format | |
+| ------ | ------ | - |
+| Standard manuscript | DOCX or PDF | 12 pt Times New Roman, double spaced, 1 inch margins, title page with contact details and rounded word count, running head, chapters a third of the way down, `#` scene breaks |
+| Print book | PDF | trims from 5 × 8 to 6 × 9 or custom, mirrored margins with gutter, justified and hyphenated, running heads, drop caps, chapters on right-hand pages, bleed, fonts embedded |
+| E-book | EPUB 3 | cover, metadata, navigation, a style theme; validated with EPUBCheck |
+| Markdown, plain text | md, txt | |
+
+The preview (Ctrl+Alt+P) lays the book out with the same typesetter that writes the PDF and shows
+the pages in the app. Publishing details (author, ISBN, blurb, dedication…) are on the *Book
+details* page in the Project menu.
+
+## Import
+
+File ▸ Import reads `.docx`, `.md` or `.txt` into a new or the open project. Chapters are cut at
+headings, at lines matching a pattern, or at page breaks; lines that start with a marker you choose
+(such as `#` or `//`) become notes; Word comments become review comments.
+
+## Files and safety
+
+A project is one `.jw` file, a ZIP of text and JSON ([format](docs/FORMAT.md)). While you work
+JustWrite keeps an unpacked working copy with a journal and rewrites the `.jw` atomically when
+you save, when you close, and every few minutes, so a crash or a power cut loses nothing. A lock file
+warns you before you open a project that is already open on another computer. Everything stays on
+your machine.
+
+## Keys
+
+Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on a Mac.
+
+| | |
+| - | - |
+| New chapter · note page | Ctrl+N · Ctrl+Alt+N |
+| Open · new project | Ctrl+O · Ctrl+Shift+N |
+| Save | Ctrl+S |
+| Bold · italic | Ctrl+B · Ctrl+I |
+| Note: line or selection · paragraph | Ctrl+/ · Ctrl+Alt+/ |
+| Review comment · comments panel | Ctrl+Alt+M · Ctrl+Shift+M |
+| Find · replace · search the project | Ctrl+F · Ctrl+H · Ctrl+Shift+F |
+| Go to chapter · jump to scene | Ctrl+P · Ctrl+J |
+| Snapshot · history | Ctrl+Alt+S · Ctrl+Shift+H |
+| Export · preview | Ctrl+E · Ctrl+Alt+P |
+| Rename · move up · move down | F2 · Alt+↑ · Alt+↓ |
+| Split right · down | Ctrl+\ · Ctrl+Shift+\ |
+| Hide notes · show marks | Ctrl+Shift+Y · Ctrl+M |
+| Focus mode | F11 |
+| Command palette | Ctrl+Shift+P |
+
+## Building
+
+```
+cargo build --release
+./target/release/justwrite            # opens the last project
+./target/release/justwrite novel.jw   # opens (or creates) a project
 ```
 
-Everything is reachable with the mouse. The menu bar (File, Edit, Format, View, Help) lists every command with its shortcut and also opens from the keyboard: hold **Alt** to see the underlined letters, press **Alt+F** for File, then use the arrow keys, **Enter** and **Esc**. Right-click opens context menus in the editor, the folder tree and on tabs. The toolbar lights up the formatting at the cursor (bold, italic, lists, heading level), and resting on any button shows a tooltip with its shortcut.
+Rust 2024 (1.85 or newer). On Linux you also need the usual windowing libraries (X11 or
+Wayland, `libxkbcommon`) and, for the file dialogs, an XDG desktop portal. The program is a single
+executable; fonts and dictionaries are embedded.
 
-**Ctrl+F** opens a find bar above the text with a live match count, previous/next buttons (**Enter** / **Shift+Enter**), a match-case toggle and every match highlighted; the Replace button expands a replace row. **Ctrl+click** opens a link. **Ctrl+K** wraps the selection as a link and selects the address for typing. **Settings** (Edit menu, **Ctrl+,**) is a dialog with a Light/Dark/System theme, accent swatches, font pickers that preview each font, steppers and toggles. **Edit > Keyboard shortcuts** remaps a command by clicking it and pressing the new keys. Drag the dividers between split panes to resize them, or drag a tab to any pane edge to split there. **File > Open recent folder** reopens earlier workspaces.
-
-**Ctrl+G** goes to a line, **Word count** (View menu) counts the selection or the whole file, and **File > Export as HTML** writes `name.html` beside the Markdown file. Other shortcuts: **Ctrl+O** opens a workspace, **Ctrl+P** or **Ctrl+Shift+L** opens files, **Ctrl+Shift+P** lists commands, **F11** enters focus mode and **Esc** exits.
-
-The session (tabs, splits, panel sizes, recent folders, window position and size) is saved a few seconds after each change, so a crash loses almost nothing.
-
-The editor includes inline preview, clickable tasks, Unicode and composed-input handling, operation-based undo, tabs and nested splits, tab dragging, a folder tree, a collapsible outline, fuzzy navigation, file find/replace and workspace search. Pipe tables are drawn as a grid (monospace, aligned columns, bold header); the row holding the cursor shows its source so you can edit it. Autosave runs after a 700 ms pause; **Ctrl+S** saves immediately. Saving uses atomic replacement and checks for external changes. When a conflict appears, **Ctrl+S** keeps your edits and **Ctrl+R** loads the external version; both commands can be remapped.
-
-`settings.toml` and `session.toml` are created beside the executable. Keep the program in a writable folder. Settings are human-editable TOML and reload when changed. Session state restores the workspace, tabs, splits and cursors, including files saved outside the workspace. Unsaved drafts ask to be saved or discarded on close. Markdown files are the only document storage.
-
-## Build and check
-
-Install stable Rust and Visual Studio C++ Build Tools, then run:
-
-```powershell
-./build.ps1 -Test -Benchmark
+```
+cargo test                           # unit tests
+cargo run --release --bin performance-check   # the performance gate
+justwrite --measure-startup          # first-frame time, then exits
 ```
 
-This workspace has a project-local Rust toolchain under `.tools`; the build script detects it. Rust is not needed to run the executable.
+The performance gate measures a keystroke through parse, shape, raster and presentation (limit
+5 ms) and 60 Hz scrolling on 1 MB, 100 MB and a 10 MB single line, and, with notes, comments and
+history involved, large manuscripts (hundreds of chapters) and deep history (hundreds of
+snapshots). See [performance-results.json](performance-results.json).
 
-The 18 tests cover Unicode and line endings, undo and saved-state tracking, parsing and incremental indexes, shortcut remapping, storage boundaries, split layout, search (case-insensitive by default), menus and config. A hidden native-window test exercises composition events, tab moves, autosave, external-change conflicts, folder-tree updates and session restore against isolated temporary files. It never opens the user's settings or documents.
+### File association
 
-The release benchmark uses 1 MiB, 100 MiB and 10 MiB single-line fixtures at 1100x760 and 2560x1440. Each case includes a full block index and measures 220 warmed edit and scroll samples through viewport parsing, shaping, CPU rasterization and framebuffer copy. `performance-results.json` records results and fails the gate above 5 ms per edit or a 60 Hz scroll budget. OS presentation, background scanning, display latency and truly cold disk caches are outside that benchmark.
+* **Windows:** the program registers `.jw` for the current user the first time it runs
+  (`HKCU\Software\Classes`); no installer is required. `packaging/windows/jw.reg` does the same by hand.
+* **macOS:** `packaging/macos/Info.plist` declares the document type; `packaging/macos/bundle.sh`
+  builds `JustWrite.app`. Opening a file from Finder needs the Apple-event hook that the
+  windowing library used here does not yet provide on macOS; until then, dropping a `.jw` on the
+  window or the Dock icon, or File ▸ Open, works.
+* **Linux:** `packaging/linux/justwrite.desktop` and `justwrite-mime.xml`.
 
-`just-a-markdown-editor --measure-startup` presents a native first frame, prints process-internal startup timing and exits. Idle uses an event-driven wait loop, with no animation or continuous redraw timer.
+## Layout of the source
 
-## Implementation limits
+| Module | |
+| ------ | - |
+| `core` | the editor core: buffer, undo, notes and prose parsing, typography, comments, spelling, settings, shortcuts |
+| `jw` | the project file: manifest, ZIP packing, working copy and journal, lock, book details |
+| `history` | snapshots, lines, restore, comparison, pruning |
+| `export` | the document model, plain text and Markdown, DOCX, EPUB 3, typesetting with Typst for PDF and preview |
+| `import` | `.docx`, `.md` and `.txt` readers and the chapter splitter |
+| `ui` | window, painting, the project tree, side panels, dialogs, history, comparison and preview screens |
+| `render`, `fonts`, `platform` | the CPU renderer, bundled fonts, operating-system services |
 
-Tables ignore the `:--:` alignment markers, are drawn only when the whole grid fits the pane width (wider ones stay as source) and pad by character count, so wide CJK text may misalign. Preview is bounded to physical lines and 512-character chunks. Inline formatting crossing those boundaries and Setext headings do not have complete CommonMark styling; the original source stays intact. Fenced code state and ATX headings are indexed across the document. Large-file processing measurements are machine-specific and do not certify every possible document or frame.
+## Licence
 
-The platform module includes macOS paths and Cmd shortcuts, but this build has only been compiled and tested on Windows. Actual Japanese/Chinese/Korean OS input-method interaction still needs manual validation; automated tests cover preedit/commit handling. The app icon remains an open item from the spec. Images, math, PDF export, sync and the other excluded v1 features are omitted.
+MIT. The bundled fonts (Libertinus Serif, Tinos and Courier Prime) are under the SIL Open Font
+Licence and the spelling dictionaries under their own licences; see `assets/fonts/NOTICE.md` and
+`assets/dictionaries/`.

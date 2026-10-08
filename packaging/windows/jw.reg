@@ -1,0 +1,16 @@
+Windows Registry Editor Version 5.00
+
+; Associates .jw projects with JustWrite for the current user.
+; Edit the path to justwrite.exe first. JustWrite also does this itself the first time it runs.
+
+[HKEY_CURRENT_USER\Software\Classes\.jw]
+@="JustWrite.Project"
+
+[HKEY_CURRENT_USER\Software\Classes\JustWrite.Project]
+@="JustWrite project"
+
+[HKEY_CURRENT_USER\Software\Classes\JustWrite.Project\DefaultIcon]
+@="\"C:\\Program Files\\JustWrite\\justwrite.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\JustWrite.Project\shell\open\command]
+@="\"C:\\Program Files\\JustWrite\\justwrite.exe\" \"%1\""

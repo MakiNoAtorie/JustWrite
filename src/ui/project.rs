@@ -612,7 +612,6 @@ impl App {
         tab.disk_epoch += 1;
         tab.restore_cursor = Some(cursor);
         tab.edited = None;
-        tab.external = None;
         tab.marks.clear();
         let proxy = self.proxy.clone();
         storage.read(&path, Arc::new(move |event| {

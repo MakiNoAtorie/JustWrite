@@ -57,6 +57,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::ToggleNote),
             Some(Command::NoteParagraph),
             Some(Command::AddComment),
+            Some(Command::AddWord),
             None,
             Some(Command::HideNotes),
             Some(Command::ToggleMarkers),
@@ -120,6 +121,7 @@ pub const EDITOR_MENU: Items = &[
     Some(Command::Italic),
     Some(Command::ToggleNote),
     Some(Command::AddComment),
+    Some(Command::AddWord),
     None,
     Some(Command::Find),
 ];

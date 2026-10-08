@@ -33,6 +33,7 @@ typst-pdf = "0.15.1"
 typst-render = "0.15.1"
 typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+zspell = "0.5.5"
 
 [profile.release]
 lto = "thin"
@@ -47,3 +48,7 @@ path = "src/main.rs"
 [[bin]]
 name = "performance-check"
 path = "src/bin/performance-check.rs"
+
+# The Hunspell dictionaries expand large affix tables; keep that fast even in debug builds.
+[profile.dev.package.zspell]
+opt-level = 3
