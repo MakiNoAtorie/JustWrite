@@ -4,6 +4,8 @@
 //!     cargo run --release --bin large-file-check         # every bench_data/*.jw
 //!     cargo run --release --bin large-file-check -- path/to/a.jw   # chosen files
 //!     cargo run --release --bin large-file-check -- --quiet        # only failures and totals
+//!     ... -- --skip-session        # without the writing session
+//!     ... -- --session-only        # only the writing session rows
 //!
 //! Each project is copied to a temporary folder first, so the generated files are never
 //! modified or locked. Output is CSV (`result,name,ms,limit`, P = pass, F = fail), one row per measurement; the same rows go to
@@ -14,12 +16,17 @@
 //! smaller books show how much headroom there is. They are first estimates; tune them in one
 //! place, here, once real numbers exist.
 
+#[path = "large_file_check/session.rs"]
+mod session;
+
 use justwrite::{
     core::{
         buffer::Document,
         comments::{CommentSet, EditRec},
         config::Settings,
         notes::{self, to_display},
+        spell::Speller,
+        typography::Language,
         prose::BlockIndex,
         workspace,
     },
@@ -63,6 +70,7 @@ const SAVE_AFTER_EDIT: f64 = 1000.;
 const LOAD_CHAPTER_INTO_EDITOR: f64 = 100.;
 /// One keystroke: layout, paint and copy to the window buffer (the 5 ms of the specification).
 const KEYSTROKE: f64 = 5.;
+const SPELLER_LOAD: f64 = 5000.;
 /// One scroll step: a frame at 60 Hz.
 const SCROLL_STEP: f64 = 1000. / 60.;
 
@@ -81,9 +89,19 @@ struct Report {
     rows: Vec<Row>,
     problems: Vec<String>,
     quiet: bool,
+    /// Only the writing-session rows are kept (`--session-only`).
+    session_only: bool,
+    /// Skip the writing session (`--skip-session`).
+    skip_session: bool,
+    speller: Option<Speller>,
+    /// The single-chapter session runs once, on the first (smallest) project.
+    chapter_session_done: bool,
 }
 impl Report {
     fn record(&mut self, file: &str, name: &str, ms: f64, limit: f64) {
+        if self.session_only && !(name.starts_with("chapter ") || name.starts_with("mega ") || name.starts_with("spelling")) {
+            return;
+        }
         let row = Row { file: file.into(), name: name.into(), ms, limit };
         if !self.quiet || !row.pass() {
             // The file name is in the "----" header above, except when only failures are shown.
@@ -189,6 +207,55 @@ fn scrolling(document: &Document, at: usize, width: u32, height: u32, steps: usi
         }
     }
     max_of(&samples)
+}
+
+/// The scripted writing session, on the largest chapter (once) and on the whole manuscript held
+/// as a single chapter (every project), which is the worst case: one very long document.
+fn writing_sessions(file: &str, set: &CommentSet, largest: &str, neutral: &str, source: &Source, scratch: &Path, report: &mut Report) {
+    if report.speller.is_none() {
+        let (loaded, ms) = timed(|| Speller::load(Language::English, &[]));
+        match loaded {
+            Ok(speller) => {
+                report.speller = Some(speller);
+                report.record(file, "spelling dictionary load", ms, SPELLER_LOAD);
+            }
+            Err(error) => report.problem(file, format!("spelling dictionary: {error}")),
+        }
+    }
+    let marker = Settings::default().marker();
+    let mut scenarios: Vec<(&str, String, Vec<(usize, usize)>, session::Limits)> = Vec::new();
+    if !report.chapter_session_done {
+        report.chapter_session_done = true;
+        let marks = set.comments.iter().filter(|c| c.item == largest).map(|c| (c.anchor.start, c.anchor.end)).collect();
+        let limits = session::Limits { open_document: 100., autosave_background: 250., replace_all_background: 250. };
+        scenarios.push(("chapter", to_display(neutral, &marker).0, marks, limits));
+    }
+    // The whole manuscript as one document; comment ranges are shifted to where their chapter starts.
+    let (mut text, mut marks, mut offset) = (String::new(), Vec::new(), std::collections::HashMap::new());
+    let mut chars = 0usize;
+    for (node, _) in source.tree.leaves(Section::Manuscript) {
+        let (display, _) = to_display(&source.texts[node.id()], &marker);
+        offset.insert(node.id().to_owned(), chars);
+        chars += display.chars().count() + 2;
+        text.push_str(&display);
+        text.push_str("\n\n");
+    }
+    for c in &set.comments {
+        if let Some(base) = offset.get(&c.item) {
+            marks.push((base + c.anchor.start, base + c.anchor.end));
+        }
+    }
+    let limits = session::Limits { open_document: 1000., autosave_background: 1000., replace_all_background: 2500. };
+    scenarios.push(("mega", text, marks, limits));
+    for (label, display, marks, limits) in scenarios {
+        let (rows, problems) = session::run(label, &display, &marks, &limits, report.speller.as_ref(), scratch);
+        for row in rows {
+            report.record(file, &row.name, row.ms, row.limit);
+        }
+        for problem in problems {
+            report.problem(file, problem);
+        }
+    }
 }
 
 fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
@@ -300,6 +367,7 @@ fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
     }
 
     // The editor, on the largest chapter.
+    let session_scratch = scratch.path().to_owned();
     let settings = Settings::default();
     let marker = settings.marker();
     let (mut document, ms) = timed(|| {
@@ -322,16 +390,22 @@ fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
     let worst = scrolling(&document, length / 2, 1100, 760, 100);
     report.record(&file, "scroll step", worst, SCROLL_STEP);
 
+    if !report.skip_session {
+        writing_sessions(&file, &set, &largest, &neutral, &source, &session_scratch, report);
+    }
     project.abandon();
     Ok(())
 }
 
 fn main() {
     let mut quiet = false;
+    let (mut session_only, mut skip_session) = (false, false);
     let mut paths: Vec<PathBuf> = Vec::new();
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
             "--quiet" => quiet = true,
+            "--session-only" => session_only = true,
+            "--skip-session" => skip_session = true,
             other => paths.push(PathBuf::from(other)),
         }
     }
@@ -347,7 +421,7 @@ fn main() {
         std::process::exit(2);
     }
 
-    let mut report = Report { rows: Vec::new(), problems: Vec::new(), quiet };
+    let mut report = Report { rows: Vec::new(), problems: Vec::new(), quiet, session_only, skip_session, speller: None, chapter_session_done: false };
     println!("result,name,ms,limit");
     for path in &paths {
         if let Err(message) = bench(path, &mut report) {
