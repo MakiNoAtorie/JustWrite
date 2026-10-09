@@ -656,7 +656,7 @@ impl App {
             width: self.su(26.),
             height: header.saturating_sub(self.su(10.)),
         };
-        self.button("+", plus, Hit::Command(Command::NewChapter), Look::Plain, p);
+        self.button("+", plus, Hit::NewTab(pane_id), Look::Plain, p);
     }
     fn paint_toolbar(&mut self, rect: Rect, format: prose::Format, p: Palette) {
         let mut x = rect.x + self.s(14.);

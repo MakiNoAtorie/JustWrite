@@ -108,6 +108,8 @@ enum Hit {
     Command(Command),
     Tab(u64, usize),
     Close(u64),
+    /// The + after a pane's tabs: an empty tab.
+    NewTab(u64),
     /// A chapter, part or page in the project tree.
     Node(String),
     /// The arrow of a part.
@@ -2738,6 +2740,10 @@ impl App {
                 }
             }
             Some(Hit::Close(id)) => self.close_tab(id, false),
+            Some(Hit::NewTab(pane)) => {
+                self.active_pane = pane;
+                self.new_tab(pane);
+            }
             Some(Hit::Node(id)) => {
                 if let Some(state) = &mut self.project {
                     state.selected = Some(id.clone());
