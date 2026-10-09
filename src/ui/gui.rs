@@ -307,6 +307,8 @@ impl App {
             Command::PreviewView => self.settings.preview,
             Command::HideNotes => self.settings.hide_notes,
             Command::PreviewNotes => self.settings.preview_notes,
+            Command::AlignLeft => !self.settings.justify,
+            Command::AlignJustify => self.settings.justify,
             Command::Focus => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             _ => false,
         }
@@ -662,9 +664,12 @@ impl App {
         let mut x = rect.x + self.s(14.);
         let height = rect.height.saturating_sub(self.su(10.));
         let y = rect.y + self.s(5.);
-        let tools: [(&str, Face, Option<Hit>); 11] = [
+        let tools: [(&str, Face, Option<Hit>); 14] = [
             ("B", Face::Bold, Some(Hit::Command(Command::Bold))),
             ("I", Face::Italic, Some(Hit::Command(Command::Italic))),
+            ("", Face::Normal, None),
+            ("Left", Face::Normal, Some(Hit::Command(Command::AlignLeft))),
+            ("Justify", Face::Normal, Some(Hit::Command(Command::AlignJustify))),
             ("", Face::Normal, None),
             ("Raw", Face::Normal, Some(Hit::Command(Command::RawView))),
             ("Preview", Face::Normal, Some(Hit::Command(Command::PreviewView))),
@@ -692,6 +697,7 @@ impl App {
                 Hit::Command(Command::Bold) => format.bold,
                 Hit::Command(Command::Italic) => format.italic,
                 Hit::Command(Command::ToggleNote) => format.note,
+                Hit::Command(c @ (Command::AlignLeft | Command::AlignJustify)) => self.checked(*c),
                 Hit::Command(Command::RawView) => !self.settings.preview,
                 Hit::Command(Command::PreviewView) => self.settings.preview,
                 _ => false,

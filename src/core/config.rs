@@ -18,6 +18,9 @@ pub struct Settings {
     #[serde(default)]
     pub max_width: Option<f32>,
     pub typewriter: bool,
+    /// Justify all prose in the editor (notes excepted); left-aligned when off.
+    #[serde(default)]
+    pub justify: bool,
     /// Save chapters shortly after typing stops.
     pub autosave: bool,
     /// How often the `.jw` file is rewritten from the working copy, in minutes.
@@ -76,6 +79,7 @@ impl Default for Settings {
             default_preset: String::new(),
             keymap: BTreeMap::new(),
             system_light: false,
+            justify: false,
             preview: false,
             preview_indent: 0,
             preview_flush: true,

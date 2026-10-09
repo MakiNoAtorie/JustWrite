@@ -84,6 +84,7 @@ Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on 
 | Open · new project | Ctrl+O · Ctrl+Shift+N |
 | Save | Ctrl+S |
 | Bold · italic | Ctrl+B · Ctrl+I |
+| Align text left · justify (whole editor) | Ctrl+Shift+L · Ctrl+Shift+J |
 | Note: line or selection · paragraph | Ctrl+/ · Ctrl+Alt+/ |
 | Review comment · comments panel | Ctrl+Alt+M · Ctrl+Shift+M |
 | Find · replace · search the project | Ctrl+F · Ctrl+H · Ctrl+Shift+F |

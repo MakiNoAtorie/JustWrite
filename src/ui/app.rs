@@ -1811,6 +1811,10 @@ impl App {
                     self.edited(id);
                 }
             }
+            Command::AlignLeft | Command::AlignJustify => {
+                self.settings.justify = command == Command::AlignJustify;
+                self.save_settings();
+            }
             Command::ToggleNote | Command::NoteParagraph => {
                 if let Some(id) = editable {
                     let marker = self.marker();

@@ -338,9 +338,9 @@ impl EditorView {
             if doc.cursor >= start && doc.cursor <= end { at } else { usize::MAX }
         });
         let (indent, justify) = if settings.preview {
-            (self.indent_for(doc, line, start == line_start, settings), settings.preview_justify)
+            (self.indent_for(doc, line, start == line_start, settings), settings.preview_justify || settings.justify)
         } else {
-            (0, false)
+            (0, settings.justify)
         };
         let initial = Initial {
             in_block: blocks.in_block(line),
