@@ -283,36 +283,6 @@ impl Document {
     }
     /// Wraps the selection in `mark` (`*` or `**`), or takes the marks off if it already has them.
     /// With nothing selected the word at the caret is used, or an empty pair is inserted.
-    /// Sets the alignment tag of every non-blank line the selection touches; a line already
-    /// aligned that way goes back to the layout's default. The selection keeps its text.
-    pub fn align_lines(&mut self, align: super::prose::Align) {
-        let selection = self.selection();
-        let first = self.text.char_to_line(selection.start);
-        let mut last = self.text.char_to_line(selection.end);
-        if last > first && self.text.line_to_char(last) == selection.end {
-            last -= 1;
-        }
-        let (mut cursor, mut anchor) = (self.cursor, self.anchor);
-        for line in (first..=last).rev() {
-            let start = self.text.line_to_char(line);
-            let head: String = self.text.line(line).chars().take(4).collect();
-            if head.trim().is_empty() {
-                continue;
-            }
-            let old = super::prose::align_tag(&head);
-            let new = if old.is_some_and(|t| t.0 == align) { "" } else { align.tag() };
-            // A tag is followed by one space, which a removed tag takes with it.
-            let new = if new.is_empty() { String::new() } else { format!("{new} ") };
-            let old_len = old.map_or(0, |t| head[..t.1].chars().count());
-            self.replace(start..start + old_len, &new);
-            let delta = new.chars().count() as isize - old_len as isize;
-            let shift = |p: usize| if p >= start + old_len { (p as isize + delta) as usize } else if p > start { start } else { p };
-            cursor = shift(cursor);
-            anchor = shift(anchor);
-        }
-        self.cursor = cursor.min(self.text.len_chars());
-        self.anchor = anchor.min(self.text.len_chars());
-    }
     pub fn toggle_emphasis(&mut self, mark: &str) {
         self.typing = false;
         let m = mark.chars().count();

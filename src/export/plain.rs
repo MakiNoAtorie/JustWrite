@@ -81,7 +81,7 @@ fn paragraphs(blocks: &[Block], markdown: bool, scene_break: &str, out: &mut Str
     for block in blocks {
         match block {
             Block::SceneBreak => out.push_str(&format!("{scene_break}\n\n")),
-            Block::Paragraph(inlines, _) => {
+            Block::Paragraph(inlines) => {
                 let text = if markdown { runs(&escape_runs(inlines), true) } else { runs(inlines, false) };
                 // Keep a paragraph that begins like a list or heading from becoming one.
                 let text = if markdown && text.starts_with(|c: char| c.is_ascii_digit()) && text.contains(". ") && text.find(". ") < Some(4) {

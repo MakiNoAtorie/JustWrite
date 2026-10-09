@@ -7,7 +7,7 @@ use crate::{
     core::{
         comments::{Comment, CommentSet, Status},
         notes::{BLOCK_CLOSE, BLOCK_OPEN, CLOSE, LINE, OPEN, word_count},
-        prose::{self, Emphasis, align_tag, char_emphasis, is_scene_break},
+        prose::{Emphasis, char_emphasis, is_scene_break},
         typography::Language,
     },
     history::State,
@@ -35,14 +35,13 @@ pub enum Inline {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
-    /// Runs, and the alignment its tag set (the layout's default when `None`).
-    Paragraph(Vec<Inline>, Option<prose::Align>),
+    Paragraph(Vec<Inline>),
     SceneBreak,
 }
 impl Block {
     pub fn text(&self) -> String {
         match self {
-            Block::Paragraph(inlines, _) => inlines
+            Block::Paragraph(inlines) => inlines
                 .iter()
                 .filter_map(|i| match i {
                     Inline::Run(r) => Some(r.text.as_str()),
@@ -207,16 +206,10 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
         let line_end = offset + body.chars().count();
         // Read the line into characters with their note status.
         let mut chars: Vec<Ch> = Vec::new();
-        // An alignment tag at the start of a prose line is not part of the text.
-        let tag = align_tag(body).filter(|_| !in_block);
-        let align = tag.map(|t| t.0);
         let mut inline = false;
         let mut line_note = false;
         for (i, c) in body.chars().enumerate() {
             let at = offset + i;
-            if tag.is_some_and(|t| i < t.1) {
-                continue;
-            }
             match c {
                 BLOCK_OPEN => in_block = true,
                 BLOCK_CLOSE => in_block = false,
@@ -277,14 +270,14 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
             blocks.push(Block::SceneBreak);
             if keep_notes && visible.iter().any(|v| v.note) {
                 let run = Run { text: visible.iter().filter(|v| v.note).map(|v| v.c).collect(), italic: false, bold: false, note: true };
-                blocks.push(Block::Paragraph(vec![Inline::Run(run)], None));
+                blocks.push(Block::Paragraph(vec![Inline::Run(run)]));
             }
             continue;
         }
         if prose_text.is_empty() && keep_notes {
             // A line of notes only: kept as its own paragraph.
             let run = Run { text: visible.iter().map(|v| v.c).collect(), italic: false, bold: false, note: true };
-            blocks.push(Block::Paragraph(vec![Inline::Run(run)], None));
+            blocks.push(Block::Paragraph(vec![Inline::Run(run)]));
             continue;
         }
         // Group into runs, placing comment markers.
@@ -324,12 +317,12 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
                 state[k] = State::Done;
             }
         }
-        blocks.push(Block::Paragraph(inlines, align));
+        blocks.push(Block::Paragraph(inlines));
     }
     // A range that ran to the very end of the text is closed with the last paragraph.
     for (k, (id, _)) in marks.iter().enumerate() {
         if state[k] == State::Open {
-            if let Some(Block::Paragraph(inlines, _)) = blocks.iter_mut().rev().find(|b| matches!(b, Block::Paragraph(..))) {
+            if let Some(Block::Paragraph(inlines)) = blocks.iter_mut().rev().find(|b| matches!(b, Block::Paragraph(_))) {
                 inlines.push(Inline::CommentEnd(*id));
             }
         }
@@ -340,7 +333,7 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
 /// Runs of spaces and tabs inside a paragraph become one space, also across style changes.
 pub fn collapse_spaces(blocks: &mut [Block]) {
     for block in blocks {
-        let Block::Paragraph(inlines, _) = block else { continue };
+        let Block::Paragraph(inlines) = block else { continue };
         let mut after_space = false;
         for inline in inlines {
             let Inline::Run(run) = inline else { continue };
@@ -363,7 +356,7 @@ pub fn parse_matter(text: &str) -> Vec<Vec<Inline>> {
     parse_text(text, false, &[])
         .into_iter()
         .filter_map(|b| match b {
-            Block::Paragraph(i, _) => Some(i),
+            Block::Paragraph(i) => Some(i),
             Block::SceneBreak => None,
         })
         .collect()
@@ -614,7 +607,7 @@ mod tests {
         assert_eq!(text_of(&doc.chapters[0]), ["It began with a whisper.", "Then silence fell.", "#", "A second scene."]);
         assert_eq!(text_of(&doc.chapters[1]), ["\"Run,\" she said.", "He ran. Far.", "The end."]);
         // Emphasis survives as runs.
-        let Block::Paragraph(inlines, _) = &doc.chapters[0].blocks[0] else { panic!() };
+        let Block::Paragraph(inlines) = &doc.chapters[0].blocks[0] else { panic!() };
         let runs: Vec<_> = inlines.iter().filter_map(|i| if let Inline::Run(r) = i { Some((r.text.as_str(), r.italic)) } else { None }).collect();
         assert_eq!(runs, [("It began with a ", false), ("whisper", true), (".", false)]);
         assert_eq!(doc.words, 11 + 8 + 5);
@@ -629,7 +622,7 @@ mod tests {
         let texts = text_of(&doc.chapters[1]);
         assert!(texts.iter().any(|t| t == "remember the lighthouse"), "{texts:?}");
         assert!(texts.iter().any(|t| t == "block of notes"));
-        let Block::Paragraph(inlines, _) = &doc.chapters[1].blocks[2] else { panic!() };
+        let Block::Paragraph(inlines) = &doc.chapters[1].blocks[2] else { panic!() };
         assert!(inlines.iter().any(|i| matches!(i, Inline::Run(r) if r.note && r.text.contains("aside"))));
     }
 
@@ -683,7 +676,7 @@ mod tests {
         assert_eq!(doc.comments[0].body, "Too soft?");
         assert_eq!(doc.comments[0].replies.len(), 1);
         assert_eq!(doc.appendix.len(), 1, "orphans go to the appendix, resolved ones are left out");
-        let Block::Paragraph(inlines, _) = &doc.chapters[0].blocks[0] else { panic!() };
+        let Block::Paragraph(inlines) = &doc.chapters[0].blocks[0] else { panic!() };
         let order: Vec<String> = inlines
             .iter()
             .map(|i| match i {
@@ -742,20 +735,6 @@ mod tests {
 }
 
 #[cfg(test)]
-mod align_tests {
-    use super::*;
-
-    #[test]
-    fn alignment_tags_set_the_block_and_leave_the_text() {
-        let blocks = parse_text("::| Dear *Sir*\nplain\n::> right\n", false, &[]);
-        let aligns: Vec<_> = blocks.iter().map(|b| match b { Block::Paragraph(_, a) => *a, _ => None }).collect();
-        assert_eq!(aligns, [Some(prose::Align::Center), None, Some(prose::Align::Right)]);
-        assert_eq!(blocks[0].text(), "Dear Sir");
-        assert_eq!(blocks[2].text(), "right");
-    }
-}
-
-#[cfg(test)]
 mod whitespace_tests {
     use super::*;
 
@@ -763,7 +742,7 @@ mod whitespace_tests {
     fn extra_spaces_collapse_across_runs() {
         let mut blocks = parse_text("A  *b*   c\t\td", false, &[]);
         collapse_spaces(&mut blocks);
-        let Block::Paragraph(inlines, _) = &blocks[0] else { panic!() };
+        let Block::Paragraph(inlines) = &blocks[0] else { panic!() };
         let text: String = inlines.iter().filter_map(|i| if let Inline::Run(r) = i { Some(r.text.as_str()) } else { None }).collect();
         assert_eq!(text, "A b c d");
     }

@@ -399,8 +399,7 @@ fn chapter_markup(chapter: &Chapter, doc: &Doc, p: &Preset, out: &mut String) {
                 first = false;
                 indent_next = false;
             }
-            Block::Paragraph(inlines, align) => {
-                let start = out.len();
+            Block::Paragraph(inlines) => {
                 if indent_next && p.flush_after_break {
                     out.push_str(&format!("#h({})", inches(p.indent)));
                 }
@@ -411,24 +410,12 @@ fn chapter_markup(chapter: &Chapter, doc: &Doc, p: &Preset, out: &mut String) {
                 } else {
                     out.push_str(&inlines_markup(inlines, p));
                 }
-                if let Some(a) = align {
-                    let markup = out.split_off(start);
-                    out.push_str(&aligned(&markup, *a));
-                }
                 out.push_str("\n\n");
                 first = false;
             }
         }
     }
     out.push('\n');
-}
-
-/// A paragraph set in its own alignment, whatever the layout's default is.
-fn aligned(markup: &str, align: crate::core::prose::Align) -> String {
-    match align {
-        crate::core::prose::Align::Justify => format!("#[#set par(justify: true)\n{markup}]"),
-        a => format!("#align({})[#set par(justify: false, first-line-indent: 0pt)\n{}]", a.name(), markup.trim_end()),
-    }
 }
 
 /// Words of a paragraph (after `skip` characters) as Typst content, with their styles.
@@ -706,21 +693,6 @@ pub(crate) mod tests {
                 }
             }
         }
-    }
-
-    #[test]
-    fn paragraph_alignment_tags_reach_the_markup_and_compile() {
-        let (doc, p) = book(preset::PRINT_BOOK, |_, src| {
-            for text in src.texts.values_mut() {
-                text.insert_str(0, "::| Centred *line*\n::= Justified line\n::< Left line\n::> Right line\n");
-            }
-        });
-        let m = markup(&doc, &p);
-        for name in ["#align(center)[", "#align(left)[", "#align(right)[", "#[#set par(justify: true)"] {
-            assert!(m.contains(name), "{name}\n{m}");
-        }
-        assert!(!m.contains("::"), "tags are stripped");
-        typeset(&doc, &p).unwrap_or_else(|e| panic!("{e}\n{m}"));
     }
 
     /// Writes PDFs and page images for looking at: `JW_SAMPLES=/dir cargo test --lib typeset -- --ignored`
