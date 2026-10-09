@@ -29,7 +29,11 @@ pub struct Tile {
     hide: bool,
     width: f32,
     size: f32,
+    indent: u8,
+    justify: bool,
     line_bytes: Vec<usize>,
+    /// Distance from `y` to the row the next tile starts on.
+    tail: f32,
 }
 impl Tile {
     fn display_cursor(&self, source: usize) -> Cursor {
@@ -50,6 +54,11 @@ impl Tile {
         self.buffer
             .cursor_position(&self.display_cursor(source))
             .map(|(x, y)| (x, self.y + y))
+    }
+    /// After a closing newline the caret sits on the next row. Another tile owns that row, except
+    /// at the end of the text, where this is the only place to find it.
+    fn tail_caret(&self, source: usize) -> Option<(f32, f32)> {
+        (self.source.ends_with('\n') && source == self.start + self.preview.end).then_some((0., self.y + self.tail))
     }
 }
 
@@ -108,7 +117,7 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
         .metadata(usize::from(style.misspelled))
         .metrics(Metrics::new(size, size * settings.line_height))
 }
-fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
+fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
     let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * settings.line_height));
     buffer.set_size(Some(width), None);
     buffer.set_wrap(wrap);
@@ -123,9 +132,9 @@ fn shape(preview: &Presentation, wrap: Wrap, width: f32, settings: &Settings, fo
         Shaping::Advanced,
         None,
     );
-    if preview.center {
+    if preview.center || justify {
         for line in &mut buffer.lines {
-            line.set_align(Some(Align::Center));
+            line.set_align(Some(if preview.center { Align::Center } else { Align::Justified }));
         }
     }
     buffer.shape_until_scroll(fonts, false);
@@ -243,7 +252,13 @@ impl EditorView {
                 end += 1;
             }
             let source = doc.text.slice(start..end).to_string();
-            let raw = settings.show_markers || line == cursor_line;
+            // The preview shows the finished text: no markers, even on the line being edited.
+            let raw = !settings.preview && (settings.show_markers || line == cursor_line);
+            let (indent, justify) = if settings.preview {
+                (self.indent_for(doc, line, start == line_start, settings), settings.preview_justify)
+            } else {
+                (0, false)
+            };
             let initial = Initial {
                 in_block: blocks.in_block(line),
                 in_line_note: start > line_start && self.line_note_before(doc, line_start, start),
@@ -257,18 +272,21 @@ impl EditorView {
                     && tile.hide == hide
                     && tile.width == width
                     && tile.size == settings.font_size
+                    && tile.indent == indent
+                    && tile.justify == justify
             });
             let mut tile = if let Some(index) = cached {
                 self.cache.remove(index).unwrap()
             } else {
                 let options = prose::Options {
                     marker: &self.marker,
-                    show_markers: settings.show_markers,
+                    show_markers: settings.show_markers && !settings.preview,
                     hide_notes: hide,
                     scene_symbol: &self.scene_symbol,
+                    indent,
                 };
                 let preview = prose::present(&source, 0, if raw { Some(0) } else { None }, initial, options);
-                let buffer = shape(&preview, Wrap::WordOrGlyph, width, settings, fonts);
+                let buffer = shape(&preview, Wrap::WordOrGlyph, width, justify, settings, fonts);
                 let height = buffer
                     .layout_runs()
                     .map(|run| run.line_top + run.line_height)
@@ -280,7 +298,7 @@ impl EditorView {
                         line_bytes.push(b + 1);
                     }
                 }
-                Tile { start, y, height, preview, buffer, source, raw, initial, hide, width, size: settings.font_size, line_bytes }
+                Tile { start, y, height, preview, buffer, source, raw, initial, hide, width, size: settings.font_size, indent, justify, line_bytes, tail: 0. }
             };
             tile.start = start;
             tile.y = y;
@@ -299,6 +317,7 @@ impl EditorView {
                     y += gap;
                 }
             }
+            tile.tail = y - tile.y;
             self.tiles.push(tile);
             if end == doc.text.len_chars() {
                 break;
@@ -316,6 +335,21 @@ impl EditorView {
                 }
             }
         }
+    }
+    /// The first-line indent for the chunk of `line` starting at `at_line_start`, as the export
+    /// would set it: none inside a paragraph's later chunks, and none at a chapter start or after a
+    /// scene break when the preset says so.
+    fn indent_for(&self, doc: &Document, line: usize, at_line_start: bool, settings: &Settings) -> u8 {
+        if !at_line_start || settings.preview_indent == 0 {
+            return 0;
+        }
+        // A scene break is a short line; only its first characters are read.
+        let after_break = || {
+            let before: String = doc.text.line(line - 1).chars().take(64).collect();
+            prose::is_scene_break(before.trim_end())
+        };
+        let flush = settings.preview_flush && (line == 0 || after_break());
+        if flush { 0 } else { settings.preview_indent }
     }
     /// Whether the line starting at `line_start` has already opened a note that runs to its end
     /// by `at`; only the first 512 characters of the line are inspected.
@@ -407,17 +441,12 @@ impl EditorView {
             }
             let _ = orphan_tint;
             renderer.text(fonts, &mut tile.buffer, rect.x, rect.y + tile.y as i32, rect);
-            if doc.cursor >= tile.start && doc.cursor <= tile.start + tile.preview.end {
-                let cursor = tile.display_cursor(doc.cursor);
-                if let Some((x, y)) = tile.buffer.cursor_position(&cursor) {
-                    let y = rect.y + tile.y as i32 + y as i32;
-                    if y < rect.y + rect.height as i32 {
-                        renderer.fill(
-                            Rect { x: rect.x + x as i32, y, width: 2, height: tile.size.ceil() as u32 + 5 }.intersect(rect),
-                            self.palette.accent,
-                        );
-                    }
-                }
+        }
+        if let Some((x, y)) = self.caret_at(doc.cursor) {
+            let y = rect.y + y as i32;
+            let size = self.tiles.first().map_or(18., |t| t.size);
+            if y < rect.y + rect.height as i32 {
+                renderer.fill(Rect { x: rect.x + x as i32, y, width: 2, height: size.ceil() as u32 + 5 }.intersect(rect), self.palette.accent);
             }
         }
     }
@@ -522,11 +551,8 @@ impl EditorView {
     /// Where the caret is on screen, relative to the editor's rectangle.
     pub fn caret_at(&self, cursor: usize) -> Option<(f32, f32)> {
         // A caret on a line boundary belongs to two tiles; either may be the one that shows it.
-        self.tiles
-            .iter()
-            .filter(|t| cursor >= t.start && cursor <= t.start + t.preview.end && !t.preview.hidden)
-            .filter_map(|t| t.caret(cursor))
-            .next()
+        let mut owners = self.tiles.iter().filter(|t| cursor >= t.start && cursor <= t.start + t.preview.end && !t.preview.hidden);
+        owners.clone().find_map(|t| t.caret(cursor)).or_else(|| owners.find_map(|t| t.tail_caret(cursor)))
     }
     /// Asks for the caret to be brought into view the next time the text is laid out.
     pub fn ensure_cursor(&mut self, _doc: &Document) {
@@ -572,6 +598,55 @@ mod tests {
         assert_eq!(v.tiles.iter().filter(|t| t.height == 0.0).count(), 1, "the note-only line takes no room");
         let (v, _) = view(text, 0, 800, |s| s.show_markers = true);
         assert!(shown(&v).contains("$$ whole note") && shown(&v).contains("#"));
+    }
+
+    #[test]
+    fn preview_shows_the_finished_text_and_indents_like_the_export() {
+        let text = "First *one*\nSecond\n***\nAfter break\nThird\n";
+        let preview = |s: &mut Settings| {
+            s.preview = true;
+            s.preview_indent = 4;
+        };
+        let (v, doc) = view(text, 0, 800, preview);
+        let shown: Vec<&str> = v.tiles.iter().map(|t| t.preview.text.as_str()).collect();
+        let indent = "\u{2002}".repeat(4);
+        // The cursor line shows no markers, and a chapter start is flush.
+        assert_eq!(shown[0], "First one\n");
+        assert_eq!(shown[1], format!("{indent}Second\n"));
+        assert!(shown[2].contains("* * *") && !shown[2].starts_with('\u{2002}'));
+        assert_eq!(shown[3], "After break\n");
+        assert_eq!(shown[4], format!("{indent}Third\n"));
+        // Without the "flush" rule every paragraph is indented.
+        let (v, _) = view(text, 0, 800, |s| {
+            preview(s);
+            s.preview_flush = false;
+        });
+        assert_eq!(v.tiles[0].preview.text, format!("{indent}First one\n"));
+        // The caret at the start of an indented paragraph sits after the indent, and it maps back.
+        let second = text.find("Second").unwrap();
+        let (v, _) = view(text, second, 800, preview);
+        let (x, _) = v.caret_at(second).unwrap();
+        let (flush, _) = v.caret_at(0).unwrap();
+        let (inside, _) = v.caret_at(second + 3).unwrap();
+        assert!(x > flush + 10., "caret after the indent: {x} vs {flush}; three letters in: {inside}; {:?}", v.tiles[1].buffer.layout_runs().next().map(|r| r.glyphs.iter().map(|g| (g.start, g.end, g.x, g.w)).collect::<Vec<_>>()));
+        assert_eq!(v.hit(x + 1., v.caret_at(second).unwrap().1 + 3.), Some(second));
+        // Raw view is untouched by the preview settings.
+        let (raw, _) = view(text, 0, 800, |s| s.preview_indent = 4);
+        assert_eq!(raw.tiles[1].preview.text, "Second\n");
+        assert_eq!(raw.tiles[0].preview.text, "First *one*\n");
+        let _ = doc;
+    }
+
+    #[test]
+    fn caret_shows_on_the_empty_line_after_enter() {
+        for text in ["Hello\n", "Hello\n\n", "Hello\nWorld\n", "Hello\r\n"] {
+            let end = text.chars().count();
+            let (v, doc) = view(text, end, 600, |_| {});
+            assert_eq!(doc.cursor, end);
+            let (_, y) = v.caret_at(end).unwrap_or_else(|| panic!("no caret at the end of {text:?}"));
+            let (_, above) = v.caret_at(0).unwrap();
+            assert!(y > above, "caret drops below the first line for {text:?}");
+        }
     }
 
     #[test]

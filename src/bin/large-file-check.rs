@@ -6,6 +6,7 @@
 //!     cargo run --release --bin large-file-check -- --quiet        # only failures and totals
 //!     ... -- --skip-session        # without the writing session
 //!     ... -- --session-only        # only the writing session rows
+//!     JW_BENCH_PREVIEW=1 ... -- --session-only   # the same session in the preview view
 //!
 //! Each project is copied to a temporary folder first, so the generated files are never
 //! modified or locked. Output is CSV (`result,name,ms,limit`, P = pass, F = fail), one row per measurement; the same rows go to

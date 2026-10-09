@@ -1,46 +1,123 @@
 # Next steps
 
-What is left after the UX passes on `claude/gifted-dirac-7edr5f`. Items are grouped by how much
-they need a decision from the maintainer.
+State after the feedback pass of 2026-10-09 (Windows development machine, release build). All 158 unit
+tests pass; `performance-check` passes; `large-file-check` passes 204 of 204 measurements.
 
-## Needs checking on a real desktop
+## Needs a person at the real window
 
-* **Performance gate.** `cargo run --release --bin performance-check` reports "not passed" in the
-  cloud container used for the UX passes, on the 2560 x 1440 stress cases (about 3.5 ms against
-  2.0 ms recorded, and 7.7 ms for the 10 MB single line). The original code, before any UX change,
-  gave the same numbers there, and the 1100 x 760 cases match the recorded baseline. Re-run the
-  gate on the development machine before merging. `performance-results.json` was deliberately left
-  unchanged.
-* **Import dialog.** File ▸ Import opens a native file chooser through the desktop portal, which
-  could not be driven headlessly. It has not been looked at or tested in the UX passes.
-* **Default interface font.** The Linux fallback is DejaVu Sans. Check what the default is on
-  Windows and macOS (`platform::default_sans`) and whether it is the intended look.
+None of this can be driven headlessly. Do these first; each is a short look.
 
-## Small and safe
+* **Cursor after Enter.** Type a paragraph, press Enter at the end of the text, keep typing. The caret
+  must stay visible on the new line, also in the preview view and with a blank line before it.
+* **Reply to comment box.** Open the comments panel and press Reply. Click inside earlier text to place the
+  caret; move it with the arrow keys (Home and End go to the start and end of the whole text). The wrapping of the lines must not change as the
+  caret moves. Type more than four lines: the box should keep the caret in view.
+* **Parts.** New part: it should appear with "Chapter N" inside, open that chapter, scroll the tree to
+  it, and show the part name in the footer ("Part 1 · This chapter ...") and in the window title.
+  Create a second part, move it with Alt+Up and Alt+Down, drag a chapter into it, fold it.
+* **New note.** "+ New" ▸ New note (Ctrl+Alt+N) asks for a name; empty uses the "Note 1" placeholder.
+* **Raw and Preview buttons** on the formatting bar (also View menu and the palette). Preview hides
+  markers on every line, indents paragraphs like the default export preset, keeps the first paragraph
+  of a chapter and the one after a scene break flush, and justifies when the preset does. Typing,
+  selecting and clicking must work as in raw. See "Raw and preview view" below.
+* **Comment keyboard access.** F8 / Shift+F8 walk the review comments in reading order. With the caret
+  in a commented passage, the palette has Resolve, Reply, Edit and Delete for it.
+* **Tab drop to split.** Reading `drop_zone` in `src/ui/app.rs`: a dragged tab splits when released
+  within about 65 px of the left, right or bottom edge of a pane, or in a strip just under the toolbar;
+  the accent strip shows the target while dragging. The middle of the editor does nothing by design.
+  Confirm it with the mouse.
+* **Import dialog.** File ▸ Import opens a native file chooser; not looked at in any pass.
+* **Autosave fix `5e0bc1c`** and the manual list under "Remaining tests" below.
 
-* **Tab drop to split.** Dragging a tab shows a ghost label. Confirm that dropping a tab on the
-  editor area creates a split; the test drop landed outside the editor.
-* **Export dialog and paged preview.** Seen, not audited in depth. Worth a pass for spacing, the
-  focus highlight on the first row, and the page indicator in the preview.
-* **Error messages fade.** Footer status messages now disappear after 10 seconds
-  (`STATUS_LIFETIME` in `src/ui/app.rs`). If a failure message should stay until dismissed, give
-  errors a longer lifetime or a separate path.
-* **Test-only warnings.** Two "variable does not need to be mutable" warnings remain in test code:
-  `src/core/notes.rs` (around line 791) and `src/history/store.rs` (around line 443).
+## Decisions taken in the feedback pass (change them if you disagree)
 
-## Needs a decision
+* **A new part starts with its first chapter.** An empty part had nothing to open or write in, which
+  is what made it look dead. Delete the chapter to get an empty part back.
+* **Only notes ask for a name on creation.** Chapters and parts stay numbered ("Chapter 4", "Part 2")
+  so starting a chapter is still one keystroke. Say so if they should ask too.
+* **Comment cards: keyboard through commands, not panel focus.** The panel itself still has no
+  arrow-key focus; instead every card action is a command on the comment at the caret. Panel focus
+  handling is only needed if you want to work in the panel without the editor.
+* **Tab-key focus through the window chrome: not added.** Every button has a shortcut, a menu entry and
+  a palette entry, and Tab types in the editor.
+* **Live word counts: unchanged.** Tree and footer counts update on autosave, to protect the 5 ms
+  keystroke budget.
+* **Chapter stepping (Ctrl+PageDown/PageUp) still walks the manuscript and then the notes, in tree
+  order.** Labels now say "chapter or note".
+* **Error messages still fade after 10 s** (`STATUS_LIFETIME` in `src/ui/app.rs`). Errors are plain
+  strings in `status`, so a longer lifetime for failures needs a flag on the message first.
+* **Default interface font:** Windows is Segoe UI (the system UI font), macOS Helvetica Neue, Linux
+  DejaVu Sans (`platform::default_sans`). Not seen on a Mac.
 
-* **Keyboard access to comment cards.** Resolve, Reply, Edit and Delete are mouse-only. A fix means
-  giving the comments panel its own focus handling (arrow keys to move between cards, letter keys
-  or Enter for the actions).
-* **Tab-key focus through the window chrome.** Not added: every toolbar and footer button already
-  has a shortcut, a menu entry and a palette entry, and Tab types in the editor. Revisit only if
-  full keyboard traversal of the main window is a requirement.
-* **Live word counts.** The tree and footer counts update on autosave, not per keystroke, to protect
-  the 5 ms keystroke budget. If live counts matter, count the active tab incrementally and keep the
-  gate in view.
-* **Chapter stepping scope.** Ctrl+PageDown and Ctrl+PageUp walk the manuscript and then the notes
-  pages, in tree order. Decide whether they should stay inside the manuscript.
+## Small things left
+
+* Find panel: check how it calls `workspace::find` (per keystroke or per chapter, which limit) and
+  measure that exact path; the benchmark's whole-book search is 156 ms of 250 at 1M words.
+* Export dialog and paged preview: seen, not audited for spacing, focus highlight on the first row,
+  page indicator.
+* The single-line text fields (`field` in `src/ui/gui.rs`) still cannot place the caret with a click;
+  only the multi-line boxes can now. Same technique would work (use `area_buffer`).
+* Up and Down arrows do not move the caret between lines inside a multi-line box.
+
+## Fixed in the feedback pass
+
+### Bugs
+
+* **Cursor disappears after Enter.** The caret was only drawn when the layout had a glyph position for
+  it; on the empty line after a final newline there is none. `Tile::tail_caret` supplies the position
+  (`src/ui/editor.rs`), and the caret is now drawn once, from `caret_at`. Test:
+  `caret_shows_on_the_empty_line_after_enter`.
+* **Reply to comment box.** The box faked the caret by inserting a `│` into the text, so every caret
+  move re-wrapped the lines, and a click only focused it. It now lays the text out with the real font,
+  draws the caret as a bar over it, scrolls to keep the caret in view, and a click places the caret
+  (`paint_area`, `area_buffer`, `area_cursor`, `area_char`). Affects every multi-line box (book
+  details, comments). Test: `area_cursor_and_char_offset_round_trip`.
+* **Parts.** Found by reading, not by seeing: the tree never scrolled to a new or moved item (a new
+  part is appended at the end of the manuscript, often below the visible rows), an empty part could not
+  be written in, a moved item inside a folded part stayed hidden, and nothing showed which part a
+  chapter belongs to. Now: the tree scrolls to the selected item on create, move and open
+  (`tree_reveal`), a new part comes with a chapter, opening a chapter unfolds its part, moving past the
+  first or last place says so, and the part shows in the footer and window title (`part_of`).
+* **"Page" is now "note".** Menu, palette, tree prompts and messages say note; the default name is
+  "Note N" (first free number); creation opens a "New note" dialog with that name as placeholder.
+  Stored data is unchanged (the manifest node type is still `Page`; command key `new_page`).
+* **Windows could not save over an open `.jw`.** `archive::pack` held the old archive open while
+  renaming the new one over it, which Windows refuses ("Access is denied"). Nine tests failed on
+  Windows because of it; the archive is now closed first (`drop(old)`), and all tests pass. This was a
+  real save bug on Windows, found while checking the test run.
+* Two unused-`mut` warnings in test code removed.
+
+### Raw and preview view
+
+Plan, as asked, then what was built.
+
+* **What preview renders.** The same tiles as raw, shaped with the finished look of the export preset
+  the Export command starts from (`default_preset`, else the built-in default): markers hidden on every
+  line including the one being edited, first-line indent (`preset.indent` inches at the preset's font
+  size, converted to en spaces, half an em each), no indent on the first paragraph of a chapter or the
+  paragraph after a scene break when the preset says so, and justified text when the preset does. Not
+  rendered: page size, running heads, fonts, paragraph spacing; the existing Paged preview shows those.
+* **Editable.** Yes, it is the same editor. The indent is plain characters at the start of the tile's
+  text with no entry in the source map, so the caret at the start of a line sits after the indent, a
+  click in the indent lands on the first character, and the stored text never contains the indent.
+* **Shared with export.** The numbers (indent, flush-after-break, justify) come from `Preset`, not a
+  copy. The layout itself is not shared; the editor shapes with cosmic-text and the export with typst.
+* **Keystroke budget.** The preview adds no work per key: the settings are part of the tile cache key
+  and only a changed paragraph is re-shaped, as before. Measured with `JW_BENCH_PREVIEW=1`
+  (see `large-file-check`): typing p50 1.0 to 1.6 ms, p95 1.4 to 1.8 ms at 50k to 1M words, 116
+  measurements, 0 over limit.
+* **Mode is not saved.** Every launch starts raw (the default). Buttons: "Raw" and "Preview" next to
+  B and I; commands `raw_view` and `preview_view` have no shortcut yet.
+* **Not done:** paragraph spacing from the preset, hyphenation, a per-project choice of preset for the
+  preview, a keyboard shortcut.
+
+### Gates, this machine (Windows, release build, `opt-level = "s"` with fat LTO)
+
+* `performance-check`: passes (`processing_gate_passed: true`); 2560 x 1440 stress edit p50 1.3 to
+  1.4 ms against the 2.0 ms baseline. `performance-results.json` was left as it was.
+* `large-file-check`, all four sizes, raw view: 204 measurements, 0 over limit, 0 correctness problems.
+  The three container failures (keystroke at middle 2560 x 1440, worst of 3000) did not appear.
+* So the smaller executable profile is proven on the hot paths; see "Executable size".
 
 ## Done in the UX passes (for reference)
 
@@ -187,8 +264,8 @@ Setup on the dev machine:
 3. `cargo run --release --bin performance-check` (the older gate; it also rewrites `performance-results.json`, so only commit that if the numbers are meant to be the new baseline).
 
 Re-run and re-judge on the dev machine:
-* [ ] Re-run `large-file-check` and note which of the 3 container failures survive. Expected to disappear: `keystroke at middle 2560x1440` and the worst-of-3000 spikes. If `keystroke at middle 2560x1440` still fails, give it its own limit (about 12 ms) or investigate.
-* [ ] Re-tune the limits at the top of `src/bin/large-file-check.rs` and `src/bin/large_file_check/session.rs` to real numbers (they are first estimates, one set for all sizes).
+* [x] Re-run `large-file-check` and note which of the 3 container failures survive. Done 2026-10-09 on Windows: none survive, 204 of 204 within limit (keystroke at middle 2560x1440 is within 5 ms there, so no separate limit was needed on this machine).
+* [ ] Re-tune the limits (first pass: this machine passes every row with room, so tightening is possible, but one set of numbers for a slower laptop is safer; left as is) at the top of `src/bin/large-file-check.rs` and `src/bin/large_file_check/session.rs` to real numbers (they are first estimates, one set for all sizes).
 * [ ] Search: 156 ms of 250 at 1M words in this container. Check how the Find panel really calls `workspace::find` (per keystroke? per chapter? limit?) and measure that exact path.
 
 Manual checks in the real window (open `bench_data/bench_1m.jw`):
@@ -206,7 +283,7 @@ Manual checks in the real window (open `bench_data/bench_1m.jw`):
 * [ ] History panel: first snapshot, restoring one, comparing two, with a 1M-word project.
 * [ ] Save to a slow location (network or cloud-synced folder) while typing; the repack and fsync happen on workers but a slow disk is the main unknown.
 * [ ] Memory: watch the process memory with the 1M-word project open and after an hour of use (a leak would show as steady growth).
-* [ ] Startup time of the app itself (`startup-results.txt` is in `.gitignore`; there is a separate startup check mentioned in `src/bin/performance-check.rs` output).
+* [x] Startup time of the app itself: `justwrite.exe --measure-startup` gave first_frame_ms=53 (processing 4.7 ms) on 2026-10-09. Cold start after a reboot not measured.
 * [ ] IME input (a CJK or accent-composition keyboard) while typing in the big project.
 
 Not built yet (add if wanted):
@@ -226,10 +303,10 @@ Measured 2026-10-09, Windows, `cargo build --release --bin justwrite`:
 
 About 5.1 MB of the exe is the embedded fonts and dictionaries (`assets/`). The rest is mostly typst.
 
-**The smaller build is not yet proven fast enough.** `opt-level = "s"` can slow the hot paths (typing, layout, paint, spell check, export). Before keeping it:
-* [ ] Build to a separate folder (`cargo build --release --target-dir target\small`) so a running app does not lock the exe.
-* [ ] Run `cargo run --release --bin large-file-check -- --session-only` and compare with the step 4 tables: typing p95 about 2 ms, worst of 3000 under 16.7 ms, paste 5000 words under 50 ms, no growth from 50k to 1M words. Any `F` row that was `P` before is a regression from the profile.
-* [ ] Run the plain `large-file-check` and `performance-check` too. The old gate has the tightest limits (5 ms keystroke).
+**The smaller build is now proven fast enough on this machine (2026-10-09); keep it.** `opt-level = "s"` can slow the hot paths (typing, layout, paint, spell check, export). Before keeping it:
+* [x] Build to a separate folder. Not needed: the normal release build already uses this profile, and no app was running.
+* [x] Run `large-file-check -- --session-only` and compare with the step 4 tables. Done 2026-10-09: all session rows pass; typing p95 1.4 to 1.8 ms (preview view; raw view passes the same limits), no growth from 50k to 1M words.
+* [x] Run the plain `large-file-check` and `performance-check` too. Done: both pass (see the top of this file). `justwrite.exe` is 32.52 MB with this profile.
 * [ ] If the session rows regress, keep `opt-level = 3` for the hot crates only and use `"s"` for the rest, for example `[profile.release.package.typst]` and friends with `opt-level = "s"`. Or go back to `opt-level = 3` with fat LTO and accept the larger file.
 
 Further shrinking, in order of effort:

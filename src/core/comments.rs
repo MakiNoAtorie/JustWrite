@@ -192,6 +192,22 @@ impl CommentSet {
     pub fn get_mut(&mut self, id: &str) -> Option<&mut Comment> {
         self.comments.iter_mut().find(|c| c.id == id)
     }
+    /// The comment after (or before) `from` in reading order, wrapping round: chapters in the
+    /// order of `items`, then position in the text. Comments of items not listed come last.
+    pub fn step(&self, items: &[String], from: Option<&str>, forward: bool) -> Option<&str> {
+        let mut order: Vec<&Comment> = self.comments.iter().collect();
+        order.sort_by_key(|c| (items.iter().position(|i| *i == c.item).unwrap_or(items.len()), c.anchor.start));
+        let at = from.and_then(|id| order.iter().position(|c| c.id == id));
+        let n = order.len();
+        let next = match (at, forward) {
+            (_, _) if n == 0 => return None,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+            (None, true) => 0,
+            (None, false) => n - 1,
+        };
+        Some(order[next].id.as_str())
+    }
     /// Adds a comment on `range` of `text` (the neutral text of `item`).
     pub fn add(&mut self, item: &str, text: &str, range: Range<usize>, body: &str, tag: &str, now: i64) -> Result<String, String> {
         let chars: Vec<char> = text.chars().collect();
@@ -386,6 +402,22 @@ mod tests {
         let mut set = CommentSet::default();
         let id = set.add("ch1", text, range, "Check this", "Continuity", 100).unwrap();
         (set, id)
+    }
+
+    #[test]
+    fn stepping_walks_chapters_in_order_then_position_and_wraps() {
+        let mut set = CommentSet::default();
+        let late = set.add("ch2", "other text", 6..10, "b", "", 1).unwrap();
+        let early = set.add("ch2", "other text", 0..5, "a", "", 2).unwrap();
+        let first = set.add("ch1", "The quick brown fox", 4..9, "c", "", 3).unwrap();
+        let items = ["ch1".to_owned(), "ch2".to_owned()];
+        assert_eq!(set.step(&items, None, true), Some(first.as_str()));
+        assert_eq!(set.step(&items, None, false), Some(late.as_str()));
+        assert_eq!(set.step(&items, Some(&first), true), Some(early.as_str()));
+        assert_eq!(set.step(&items, Some(&early), true), Some(late.as_str()));
+        assert_eq!(set.step(&items, Some(&late), true), Some(first.as_str()));
+        assert_eq!(set.step(&items, Some(&first), false), Some(late.as_str()));
+        assert_eq!(CommentSet::default().step(&items, None, true), None);
     }
 
     #[test]

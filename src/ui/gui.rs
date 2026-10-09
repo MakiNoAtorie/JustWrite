@@ -136,6 +136,15 @@ impl App {
         self.renderer
             .text(&mut self.fonts, buffer, rect.x, rect.y, rect);
     }
+    /// A shaped, wrapped copy of `text` for a multi-line input box.
+    pub(super) fn area_buffer(&mut self, text: &str, width: f32, size: f32, tint: u32) -> Buffer {
+        let font = self.text_font();
+        let mut buffer = Buffer::new_empty(Metrics::new(size, size * 1.5));
+        buffer.set_size(Some(width), None);
+        buffer.set_text(text, &face_attrs(&font, tint, Face::Normal), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer
+    }
     /// The interface font, or the font being previewed in the font picker.
     fn text_font(&self) -> String {
         self.preview_font.clone().unwrap_or_else(|| self.settings.interface_font.clone())
@@ -283,6 +292,8 @@ impl App {
             Command::ToggleTree => self.show_tree,
             Command::TogglePanel => self.show_outline,
             Command::ToggleMarkers => self.settings.show_markers,
+            Command::RawView => !self.settings.preview,
+            Command::PreviewView => self.settings.preview,
             Command::HideNotes => self.settings.hide_notes,
             Command::Focus => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             _ => false,
@@ -315,6 +326,12 @@ impl App {
             Command::NewChapter
             | Command::NewPart
             | Command::NewPage
+            | Command::NextComment
+            | Command::PreviousComment
+            | Command::ResolveComment
+            | Command::ReplyComment
+            | Command::EditComment
+            | Command::DeleteComment
             | Command::Save
             | Command::SaveAs
             | Command::CloseProject
@@ -633,9 +650,12 @@ impl App {
         let mut x = rect.x + self.s(14.);
         let height = rect.height.saturating_sub(self.su(10.));
         let y = rect.y + self.s(5.);
-        let tools: [(&str, Face, Option<Hit>); 8] = [
+        let tools: [(&str, Face, Option<Hit>); 11] = [
             ("B", Face::Bold, Some(Hit::Command(Command::Bold))),
             ("I", Face::Italic, Some(Hit::Command(Command::Italic))),
+            ("", Face::Normal, None),
+            ("Raw", Face::Normal, Some(Hit::Command(Command::RawView))),
+            ("Preview", Face::Normal, Some(Hit::Command(Command::PreviewView))),
             ("", Face::Normal, None),
             ("Note", Face::Normal, Some(Hit::Command(Command::ToggleNote))),
             ("Comment", Face::Normal, Some(Hit::Command(Command::AddComment))),
@@ -660,6 +680,8 @@ impl App {
                 Hit::Command(Command::Bold) => format.bold,
                 Hit::Command(Command::Italic) => format.italic,
                 Hit::Command(Command::ToggleNote) => format.note,
+                Hit::Command(Command::RawView) => !self.settings.preview,
+                Hit::Command(Command::PreviewView) => self.settings.preview,
                 _ => false,
             };
             let enabled = match &hit {
@@ -732,6 +754,17 @@ impl App {
         };
         let mut settings = self.settings.clone();
         settings.font_size *= self.scale;
+        if settings.preview {
+            // The finished look follows the export preset the Export command starts from.
+            let preset = self
+                .project
+                .as_ref()
+                .and_then(|state| state.presets.get(&settings.default_preset))
+                .unwrap_or_default();
+            settings.preview_indent = (preset.indent * 72. / preset.font_size.max(1.) * 2.).round().clamp(0., 12.) as u8;
+            settings.preview_flush = preset.flush_after_break;
+            settings.preview_justify = preset.justify;
+        }
         let highlights: Vec<(usize, usize)> = if find.is_some() {
             self.overlay
                 .as_ref()
@@ -942,6 +975,15 @@ impl App {
         let footer = self.su(36.);
         let list_top = rect.y + self.s(4.);
         let capacity = (rect.height.saturating_sub(footer + self.su(4.)) / row_height) as usize;
+        if std::mem::take(&mut self.tree_reveal) {
+            if let Some(at) = selected.as_deref().and_then(|id| rows.iter().position(|r| r.id == id)) {
+                if at < self.tree_top {
+                    self.tree_top = at.saturating_sub(1);
+                } else if at >= self.tree_top + capacity.max(1) {
+                    self.tree_top = at + 1 - capacity.max(1);
+                }
+            }
+        }
         self.tree_top = self.tree_top.min(rows.len().saturating_sub(capacity));
         let drag = match &self.drag {
             Some(Drag::Node(id, origin)) if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() > 8. => Some(id.clone()),
@@ -1220,6 +1262,9 @@ impl App {
             let goals = &state.core.manifest.settings.goals;
             let chapter = self.active_item().and_then(|id| state.core.manifest.tree.find(&id).map(|n| n.words()));
             if let Some(words) = chapter {
+                if let Some(part) = self.active_item().and_then(|id| self.part_of(&id)) {
+                    stats.push_str(&format!("{part}  ·  "));
+                }
                 stats.push_str(&format!("This chapter {}", count_words(words as u64)));
             }
             let written = format!("Session +{}", thousands(state.core.session_words()));
@@ -1679,6 +1724,31 @@ impl App {
         self.split.dividers(center, &mut Vec::new(), &mut found);
         self.dividers = found;
     }
+}
+
+/// The last multi-line input box painted, kept so a click can be turned into a caret position.
+pub(super) struct AreaProbe {
+    pub rect: Rect,
+    /// How far the text is scrolled up inside `rect`.
+    pub offset: f32,
+    pub buffer: Buffer,
+}
+
+/// The layout cursor for the char at `at` in `text` (lines split at `\n`).
+pub(super) fn area_cursor(text: &str, at: usize) -> Cursor {
+    let before: String = text.chars().take(at).collect();
+    let line = before.matches('\n').count();
+    Cursor::new(line, before.len() - before.rfind('\n').map_or(0, |i| i + 1))
+}
+
+/// The char offset in `text` that the layout cursor stands for.
+pub(super) fn area_char(text: &str, cursor: &Cursor) -> usize {
+    let mut start = 0;
+    for _ in 0..cursor.line {
+        start += text[start..].find('\n').map_or(text.len() - start, |i| i + 1);
+    }
+    let end = (start + cursor.index).min(text.len());
+    text[..end].chars().count()
 }
 
 fn kind_is_shortcut(kind: &Kind) -> bool {

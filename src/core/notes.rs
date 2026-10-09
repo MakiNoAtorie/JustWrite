@@ -788,7 +788,7 @@ mod tests {
             for _ in 0..3000 {
                 let mut text = String::new();
                 for _ in 0..next(8) {
-                    let mut piece = |n: &mut dyn FnMut(usize) -> usize, len: usize| -> String {
+                    let piece = |n: &mut dyn FnMut(usize) -> usize, len: usize| -> String {
                         (0..len).map(|_| literal[n(literal.len())]).collect()
                     };
                     match next(6) {

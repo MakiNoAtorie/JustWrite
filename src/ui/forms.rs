@@ -26,6 +26,7 @@ pub enum FormKind {
     Reply(String),
     DeleteComment(String),
     Snapshot,
+    NewNote,
     NewLine,
     RenameLine(String),
     Export,
@@ -759,7 +760,7 @@ impl App {
         };
         let line = state.history.current_line().to_owned();
         let fields = vec![
-            Field::info(&format!("A snapshot keeps every chapter, page, comment and the book details as they are now, on the “{line}” line.")),
+            Field::info(&format!("A snapshot keeps every chapter, note, comment and the book details as they are now, on the “{line}” line.")),
             Field::text("message", "Message", "").hint("What is this version? For example: first draft done"),
         ];
         self.open_form(Form::new(FormKind::Snapshot, "Take a snapshot", fields).submit("Take snapshot").width(560.));
@@ -770,6 +771,15 @@ impl App {
             Field::text("name", "Name", ""),
         ];
         self.open_form(Form::new(FormKind::NewLine, "New line", fields).submit("Create line").width(540.));
+    }
+    pub(super) fn new_note_form(&mut self) {
+        let Some(state) = &self.project else {
+            self.status = "Open or create a project first.".into();
+            return;
+        };
+        let hint = Self::next_note_title(&state.core.manifest.tree);
+        let fields = vec![Field::text("name", "Name", "").hint(&hint)];
+        self.open_form(Form::new(FormKind::NewNote, "New note", fields).intro("Leave the name empty to use the suggested one.").submit("Create").width(460.));
     }
     pub(super) fn rename_line_form(&mut self, line: &str) {
         let fields = vec![Field::text("name", "New name", line)];
@@ -932,7 +942,7 @@ impl App {
             1 => {
                 let item = self.active_item().ok_or("Open the chapter you want to export")?;
                 if state.core.manifest.tree.locate(&item).is_none_or(|(s, _)| s != Section::Manuscript) {
-                    return Err("The current tab is a note page; only manuscript chapters can be exported".into());
+                    return Err("The current tab is a note; only manuscript chapters can be exported".into());
                 }
                 Scope::Chapters(vec![item])
             }
@@ -1124,6 +1134,13 @@ impl App {
         match act {
             Act::FormFocus(i) => {
                 form.set_focus(*i);
+                // A click in a multi-line box puts the caret where it landed.
+                if let (Some(probe), Some(field)) = (self.area_probes.get(i), form.fields.get(*i)) {
+                    let (x, y) = (self.mouse.x as f32 - probe.rect.x as f32, self.mouse.y as f32 - probe.rect.y as f32);
+                    let len = field.text.chars().count();
+                    let at = probe.buffer.hit(x, y + probe.offset).map_or(len, |c| super::gui::area_char(&field.text, &c));
+                    form.caret = (at < len).then_some(at);
+                }
             }
             Act::FormToggle(i) => {
                 form.set_focus(*i);
@@ -1365,6 +1382,11 @@ impl App {
                 let message = form.text("message");
                 self.take_snapshot(&message);
                 self.close_form();
+            }
+            FormKind::NewNote => {
+                let name = form.text("name");
+                self.close_form();
+                self.new_node("page", &name);
             }
             FormKind::NewLine => {
                 let name = form.text("name");
@@ -1808,32 +1830,31 @@ impl App {
         let focused = caret.is_some();
         self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent_text() } else { super::gui::mix(p.border, p.text, 0.12) });
         let inner = Rect { x: rect.x + self.s(10.), y: rect.y + self.s(6.), width: rect.width.saturating_sub(self.su(20.)), height: rect.height.saturating_sub(self.su(12.)) };
-        let chars: Vec<char> = field.text.chars().collect();
-        let at = caret.flatten().unwrap_or(chars.len()).min(chars.len());
-        let mut shown: String = chars[..at].iter().collect();
-        if focused {
-            shown.push('│');
-        }
-        shown.extend(&chars[at..]);
-        if shown.is_empty() {
-            self.label(&field.hint, inner, 14. * self.scale, p.muted);
+        let size = 14. * self.scale;
+        let line = size * 1.5;
+        let len = field.text.chars().count();
+        let at = caret.flatten().unwrap_or(len).min(len);
+        let mut buffer = self.area_buffer(&field.text, inner.width as f32, size, p.text);
+        // The caret is drawn over the text, so moving it never changes how the lines wrap.
+        let cursor = super::gui::area_cursor(&field.text, at);
+        let (x, y) = buffer.cursor_position(&cursor).unwrap_or_else(|| {
+            // An empty line has no glyph to stand on: it sits after the rows above it.
+            let above = buffer.layout_runs().filter(|run| run.line_i < cursor.line).count();
+            (0., above as f32 * line)
+        });
+        // Keep the caret inside the box when the text is longer than it.
+        let offset = (y + line - inner.height as f32).max(0.);
+        if field.text.is_empty() {
+            self.label(&field.hint, inner, size, p.muted);
         } else {
-            // Keep the last lines in view when the text is longer than the box.
-            let per_line = (inner.width as f32 / (7.2 * self.scale)).max(10.) as usize;
-            let rows = (inner.height as f32 / (14. * self.scale * 1.5)).floor().max(1.) as usize;
-            let mut lines: Vec<String> = Vec::new();
-            for l in shown.split('\n') {
-                let c: Vec<char> = l.chars().collect();
-                if c.is_empty() {
-                    lines.push(String::new());
-                }
-                for chunk in c.chunks(per_line) {
-                    lines.push(chunk.iter().collect());
-                }
-            }
-            let skip = lines.len().saturating_sub(rows);
-            let text = lines[skip..].join("\n");
-            self.label(&text, inner, 14. * self.scale, p.text);
+            self.renderer.text(&mut self.fonts, &mut buffer, inner.x, inner.y - offset as i32, inner);
+        }
+        if focused {
+            let bar = Rect { x: inner.x + x as i32, y: inner.y + (y - offset) as i32, width: self.su(1.5).max(1), height: line as u32 };
+            self.renderer.fill(bar.intersect(inner), p.accent_text());
+        }
+        if let Act::FormFocus(index) = hit {
+            self.area_probes.insert(index, super::gui::AreaProbe { rect: inner, offset, buffer });
         }
         self.hits.push((rect, Hit::Do(hit)));
     }
@@ -1871,6 +1892,15 @@ fn _types(_: CommentFilterQuery, _: CommentStatus, _: preset::Format) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn area_cursor_and_char_offset_round_trip() {
+        let text = "Vo vales\npicó\n\nend";
+        for at in 0..=text.chars().count() {
+            let cursor = super::super::gui::area_cursor(text, at);
+            assert_eq!(super::super::gui::area_char(text, &cursor), at, "offset {at}");
+        }
+    }
 
     #[test]
     fn numbers_format_without_trailing_zeros() {

@@ -14,9 +14,9 @@ pub enum Kind {
     Keymap,
     Setting(String),
     Shortcut(String),
-    /// Rename the chapter, part or page with this id.
+    /// Rename the chapter, part or note with this id.
     Rename(String),
-    /// Delete the chapter, part or page with this id.
+    /// Delete the chapter, part or note with this id.
     Delete(String),
     Close(u64),
     Quit,
@@ -86,7 +86,7 @@ impl Overlay {
     pub fn title(&self) -> &str {
         match &self.kind {
             Kind::Palette => "Command palette",
-            Kind::QuickOpen => "Go to chapter or page",
+            Kind::QuickOpen => "Go to chapter or note",
             Kind::Scenes => "Jump to scene",
             Kind::Find => "Find in this chapter",
             Kind::Replace => "Find and replace",
@@ -104,7 +104,7 @@ impl Overlay {
     pub fn placeholder(&self) -> &str {
         match &self.kind {
             Kind::Palette => "Type a command…",
-            Kind::QuickOpen => "Type a chapter or page name…",
+            Kind::QuickOpen => "Type a chapter or note name…",
             Kind::Scenes => "Type words from a scene…",
             Kind::Find | Kind::Replace => "Find…",
             Kind::ProjectSearch => "Search all chapters and pages…",

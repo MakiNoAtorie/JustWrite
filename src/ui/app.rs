@@ -34,7 +34,7 @@ pub mod spelling;
 use forms::{ExportRequest, Form};
 use project::{Panel, ProjectState};
 use screens::{Screen, ScreenAct};
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Motion, Shaping, fontdb};
+use cosmic_text::{Attrs, Buffer, Cursor, Family, FontSystem, Metrics, Motion, Shaping, fontdb};
 use ropey::Rope;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -187,6 +187,8 @@ pub struct App {
     renderer: CpuRenderer,
     fonts: FontSystem,
     labels: HashMap<String, Buffer>,
+    /// Multi-line boxes of the open form, by field index, as last painted.
+    area_probes: HashMap<usize, gui::AreaProbe>,
     font_names: Vec<String>,
     settings: Settings,
     tabs: BTreeMap<u64, Tab>,
@@ -199,6 +201,8 @@ pub struct App {
     storage: Option<Arc<dyn Storage>>,
     project: Option<ProjectState>,
     tree_top: usize,
+    /// Scroll the tree to the selected row at the next paint.
+    tree_reveal: bool,
     outline_top: usize,
     show_tree: bool,
     show_outline: bool,
@@ -340,6 +344,7 @@ impl App {
             renderer: CpuRenderer::default(),
             fonts: platform::font_system(),
             labels: HashMap::new(),
+            area_probes: HashMap::new(),
             font_names: Vec::new(),
             settings: Settings::default(),
             tabs,
@@ -355,6 +360,7 @@ impl App {
             storage: None,
             project: None,
             tree_top: 0,
+            tree_reveal: false,
             outline_top: 0,
             show_tree: true,
             show_outline: true,
@@ -449,8 +455,12 @@ impl App {
     fn title(&self) {
         if let Some(window) = &self.window {
             let project = self.project.as_ref().map(|p| p.core.title().to_owned());
+            let part = self.active_item().and_then(|id| self.part_of(&id));
             let title = match (self.active_id().and_then(|id| self.tabs.get(&id)).filter(|t| t.path.is_some()), project) {
-                (Some(t), Some(project)) => format!("{}{} — {project} — {APP_NAME}", if t.document.dirty() { "● " } else { "" }, t.name()),
+                (Some(t), Some(project)) => {
+                    let part = part.map_or(String::new(), |p| format!("{p} · "));
+                    format!("{}{part}{} — {project} — {APP_NAME}", if t.document.dirty() { "● " } else { "" }, t.name())
+                }
                 (None, Some(project)) => format!("{project} — {APP_NAME}"),
                 _ => APP_NAME.into(),
             };
@@ -1627,9 +1637,9 @@ impl App {
                     self.title();
                 }
             }
-            Command::NewChapter => self.new_node("chapter"),
-            Command::NewPart => self.new_node("part"),
-            Command::NewPage => self.new_node("page"),
+            Command::NewChapter => self.new_node("chapter", ""),
+            Command::NewPart => self.new_node("part", ""),
+            Command::NewPage => self.new_note_form(),
             Command::Rename => match self.selected_item() {
                 Some(id) => {
                     let mut overlay = Overlay::new(Kind::Rename(id.clone()));
@@ -1637,11 +1647,11 @@ impl App {
                     overlay.select_all = true;
                     self.overlay = Some(overlay);
                 }
-                None => self.status = "Click a chapter, part or page in the tree first.".into(),
+                None => self.status = "Click a chapter, part or note in the tree first.".into(),
             },
             Command::Delete => match self.selected_item() {
                 Some(id) => self.overlay = Some(Overlay::new(Kind::Delete(id))),
-                None => self.status = "Click a chapter, part or page in the tree first.".into(),
+                None => self.status = "Click a chapter, part or note in the tree first.".into(),
             },
             Command::MoveUp | Command::MoveDown => {
                 let current = self.selected_item();
@@ -1808,6 +1818,16 @@ impl App {
             Command::ToggleMarkers => {
                 self.settings.show_markers = !self.settings.show_markers;
                 self.save_settings();
+            }
+            Command::NextComment | Command::PreviousComment => self.step_comment(command == Command::NextComment),
+            Command::ResolveComment => self.comment_command("resolve"),
+            Command::ReplyComment => self.comment_command("reply"),
+            Command::EditComment => self.comment_command("edit"),
+            Command::DeleteComment => self.comment_command("delete"),
+            Command::RawView | Command::PreviewView => {
+                // The view is not a saved setting: every launch starts raw.
+                self.settings.preview = command == Command::PreviewView;
+                self.redraw();
             }
             Command::HideNotes => {
                 self.settings.hide_notes = !self.settings.hide_notes;

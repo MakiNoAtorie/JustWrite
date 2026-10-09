@@ -187,6 +187,8 @@ pub fn pack(work: &Path, target: &Path, previous: Option<Previous>) -> io::Resul
         entry.read_to_end(&mut bytes)?;
         Manifest::parse(&bytes).map_err(invalid)?;
     }
+    // Windows will not replace a file this process still holds open.
+    drop(old);
     persist(temporary, target)?;
     state.jw = stamp(target)?;
     Ok(state)
@@ -280,6 +282,7 @@ mod tests {
         archive.by_name("chapters/a.txt").unwrap().read_to_string(&mut text).unwrap();
         assert_eq!(text, "edited");
         assert_eq!(archive.len(), 4);
+        drop(archive); // Windows will not replace a file that is still open
         assert!(second.files.contains_key("chapters/b.txt"));
         // Deleted files disappear from the archive.
         fs::remove_file(work.path().join("chapters/b.txt")).unwrap();

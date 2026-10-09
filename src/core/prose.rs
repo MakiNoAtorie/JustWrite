@@ -266,6 +266,8 @@ pub struct Options<'a> {
     pub hide_notes: bool,
     /// Shown for scene-break lines when they are not being edited.
     pub scene_symbol: &'a str,
+    /// First-line indent of the chunk, in en spaces; 0 for none. Only the preview view sets it.
+    pub indent: u8,
 }
 
 /// State a chunk starts in, carried over from the lines and chunks before it.
@@ -420,6 +422,20 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
     }
     out.hidden = hid_something && out.text.trim().is_empty();
+    if options.indent > 0 && !out.hidden && !out.center && !out.text.trim().is_empty() {
+        // The indent has no source entry: the caret at the start of the line sits after it, and a
+        // click inside it lands on the first character.
+        let prefix = "\u{2002}".repeat(options.indent as usize);
+        let shift = prefix.len();
+        out.text.insert_str(0, &prefix);
+        for span in &mut out.spans {
+            span.bytes = span.bytes.start + shift..span.bytes.end + shift;
+        }
+        for entry in &mut out.source {
+            entry.0 += shift;
+        }
+        out.spans.insert(0, Span { bytes: 0..shift, style: Style::default() });
+    }
     out.source.push((out.text.len(), out.end));
     out
 }
@@ -559,7 +575,7 @@ pub fn format_at(line: &str, col: usize, marker: &Marker) -> Format {
 mod tests {
     use super::*;
     fn options(marker: &Marker) -> Options<'_> {
-        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *" }
+        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0 }
     }
 
     #[test]

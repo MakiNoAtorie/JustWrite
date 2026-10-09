@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn history_survives_reloading_and_a_torn_index_line() {
-        let mut f = fixture();
+        let f = fixture();
         let mut history = History::default();
         history.capture(&f.project, Kind::Manual, "one", 1).unwrap();
         history.capture(&f.project, Kind::Manual, "two", 2).unwrap();

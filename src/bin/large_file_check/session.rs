@@ -134,7 +134,11 @@ struct Rig {
 }
 impl Rig {
     fn new(display: &str, marks: &[(usize, usize)], width: u32, height: u32) -> (Rig, f64) {
-        let settings = Settings::default();
+        let mut settings = Settings::default();
+        // JW_BENCH_PREVIEW=1 runs the same session in the preview view (indent and justified text).
+        if std::env::var_os("JW_BENCH_PREVIEW").is_some() {
+            (settings.preview, settings.preview_indent, settings.preview_justify) = (true, 4, true);
+        }
         let marker = settings.marker();
         let start = Instant::now();
         let mut doc = Document::new(Rope::from_str(display));

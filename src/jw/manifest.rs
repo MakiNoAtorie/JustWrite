@@ -189,7 +189,7 @@ impl Tree {
     /// Inserts under `parent` (empty path: the top of the section) at `index`.
     pub fn insert(&mut self, section: Section, parent: &[usize], index: usize, node: Node) -> Result<NodePath, String> {
         if section == Section::Manuscript && matches!(node, Node::Page { .. }) {
-            return Err("Pages belong in Notes & research".into());
+            return Err("Notes belong in Notes & research".into());
         }
         if section == Section::Notes && matches!(node, Node::Chapter { .. }) {
             return Err("Chapters belong in the manuscript".into());

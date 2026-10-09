@@ -269,7 +269,13 @@ impl App {
         let Some(file) = self.project.as_ref().and_then(|p| p.core.file_of(id)) else { return };
         if let Some(p) = &mut self.project {
             p.selected = Some(id.to_owned());
+            // A chapter inside a folded part would stay out of sight in the tree.
+            let tree = &p.core.manifest.tree;
+            if let Some(part) = [Section::Manuscript, Section::Notes].into_iter().find_map(|s| tree.leaves(s).into_iter().find(|(n, _)| n.id() == id).and_then(|(_, part)| part.map(|p| p.id().to_owned()))) {
+                p.collapsed.remove(&part);
+            }
         }
+        self.tree_reveal = true;
         self.open_relative(PathBuf::from(file), 0);
     }
     /// Opens the chapter or page after (or before) the one being written, in the order of the tree.
@@ -306,7 +312,8 @@ impl App {
         }
     }
 
-    pub(super) fn new_node(&mut self, kind: &str) {
+    /// `title` names a new note; chapters and parts are numbered.
+    pub(super) fn new_node(&mut self, kind: &str, title: &str) {
         let Some(state) = &mut self.project else {
             self.status = "Open or create a project first.".into();
             return;
@@ -314,8 +321,8 @@ impl App {
         let tree = &state.core.manifest.tree;
         let (section, parent, index, node) = match kind {
             "page" => {
-                let n = tree.notes.iter().filter(|n| !n.is_part()).count() + 1;
-                (Section::Notes, Vec::new(), tree.notes.len(), Node::page(&format!("Page {n}")))
+                let title = if title.trim().is_empty() { Self::next_note_title(tree) } else { title.trim().to_owned() };
+                (Section::Notes, Vec::new(), tree.notes.len(), Node::page(&title))
             }
             "part" => {
                 let n = tree.manuscript.iter().filter(|n| n.is_part()).count() + 1;
@@ -337,18 +344,43 @@ impl App {
         };
         let id = node.id().to_owned();
         let is_part = node.is_part();
+        let label = node.title().to_owned();
         match state.core.add(section, &parent, index, node) {
-            Ok(_) => {
-                state.selected = Some(id.clone());
-                state.changed = true;
-                if !is_part {
-                    self.open_item(&id);
+            Ok(path) => {
+                let mut open = id.clone();
+                if is_part {
+                    // An empty part has nothing to write in, so it starts with its first chapter.
+                    let count = state.core.manifest.tree.leaves(Section::Manuscript).len() + 1;
+                    let chapter = Node::chapter(&format!("Chapter {count}"));
+                    let chapter_id = chapter.id().to_owned();
+                    if state.core.add(Section::Manuscript, &path, 0, chapter).is_ok() {
+                        self.status = format!("Added {label} with Chapter {count}.");
+                        open = chapter_id;
+                    }
                 }
+                state.selected = Some(open.clone());
+                state.collapsed.remove(&id);
+                state.changed = true;
+                self.tree_reveal = true;
+                self.open_item(&open);
                 self.dirty_session();
             }
             Err(error) => self.status = error,
         }
         self.redraw();
+    }
+    /// "Note 1", "Note 2", …: the first number no note in the tree already uses.
+    pub(super) fn next_note_title(tree: &manifest::Tree) -> String {
+        let used: Vec<String> = tree.leaves(Section::Notes).iter().map(|(n, _)| n.title().to_owned()).collect();
+        (tree.leaves(Section::Notes).len() + 1..).map(|n| format!("Note {n}")).find(|t| !used.contains(t)).unwrap()
+    }
+    /// The title of the part the chapter `id` sits in, if any.
+    pub(super) fn part_of(&self, id: &str) -> Option<String> {
+        let tree = &self.project.as_ref()?.core.manifest.tree;
+        [Section::Manuscript, Section::Notes]
+            .into_iter()
+            .find_map(|s| tree.leaves(s).into_iter().find(|(n, _)| n.id() == id))
+            .and_then(|(_, part)| part.map(|p| p.title().to_owned()))
     }
     pub(super) fn rename_node(&mut self, id: &str, title: &str) {
         let Some(state) = &mut self.project else { return };
@@ -360,7 +392,7 @@ impl App {
             Err(error) => self.note(&error),
         }
     }
-    /// Deletes a chapter, part or page, after saving a snapshot that still holds it.
+    /// Deletes a chapter, part or note, after saving a snapshot that still holds it.
     pub(super) fn delete_node(&mut self, id: &str) {
         let Some(state) = &mut self.project else { return };
         let title = state.core.manifest.tree.find(id).map(|n| n.title().to_owned()).unwrap_or_default();
@@ -417,6 +449,7 @@ impl App {
                 // Out of the part, after it.
                 (parent[..parent.len() - 1].to_vec(), parent[parent.len() - 1] + 1)
             } else {
+                self.status = "Already the last one.".into();
                 return;
             }
         } else if at > 0 {
@@ -427,11 +460,13 @@ impl App {
         } else if !parent.is_empty() {
             (parent[..parent.len() - 1].to_vec(), parent[parent.len() - 1])
         } else {
+            self.status = "Already the first one.".into();
             return;
         };
         match state.core.move_node(section, &path, &to_parent, to_index) {
             Ok(()) => {
                 state.changed = true;
+                self.tree_reveal = true;
                 self.dirty_session();
             }
             Err(error) => self.status = error,
@@ -456,7 +491,7 @@ impl App {
             DropTarget::End(s) => (s, Vec::new(), tree.section(s).len()),
         };
         if to_section != section {
-            self.status = "Chapters stay in the manuscript and pages stay in Notes & research.".into();
+            self.status = "Chapters stay in the manuscript and notes stay in Notes & research.".into();
             return;
         }
         match state.core.move_node(section, &from, &parent, index) {
@@ -823,6 +858,42 @@ impl App {
             "delete" => self.delete_comment_form(id),
             _ => {}
         }
+    }
+    /// The comment the caret is in, or else the one last opened from the panel.
+    fn comment_at_caret(&self) -> Option<String> {
+        let tab = self.active_id().and_then(|id| self.tabs.get(&id))?;
+        let cursor = tab.document.cursor;
+        tab.marks
+            .iter()
+            .filter(|m| !m.orphaned && m.start <= cursor && cursor <= m.end)
+            .min_by_key(|m| m.end - m.start)
+            .map(|m| m.id.clone())
+            .or_else(|| self.project.as_ref()?.active_comment.clone().filter(|id| self.project.as_ref().is_some_and(|p| p.comments.get(id).is_some())))
+    }
+    /// Keyboard version of the comment cards: Go to the next or previous comment in reading order.
+    pub(super) fn step_comment(&mut self, forward: bool) {
+        let Some(state) = &self.project else { return };
+        let items: Vec<String> = [Section::Manuscript, Section::Notes]
+            .into_iter()
+            .flat_map(|s| state.core.manifest.tree.leaves(s).into_iter().map(|(n, _)| n.id().to_owned()).collect::<Vec<_>>())
+            .collect();
+        let from = self.comment_at_caret();
+        match state.comments.step(&items, from.as_deref(), forward).map(str::to_owned) {
+            Some(id) => self.jump_to_comment(&id),
+            None => self.status = "There are no review comments yet.".into(),
+        }
+    }
+    /// Resolve, reply, edit or delete the comment at the caret.
+    pub(super) fn comment_command(&mut self, action: &str) {
+        let Some(id) = self.comment_at_caret() else {
+            self.status = "Put the caret in a commented passage first, or press F8 to go to a comment.".into();
+            return;
+        };
+        let action = match (action, self.project.as_ref().and_then(|p| p.comments.get(&id)).map(|c| c.status)) {
+            ("resolve", Some(Status::Resolved)) => "reopen",
+            (other, _) => other,
+        };
+        self.comment_action(action, &id);
     }
     pub(super) fn toggle_fold(&mut self, id: &str) {
         if let Some(state) = &mut self.project {

@@ -36,6 +36,19 @@ pub struct Settings {
     /// Whether Windows is currently in light mode; only used when `theme` is "system".
     #[serde(skip)]
     pub system_light: bool,
+    /// Show the text as it will be exported (hidden markers, first-line indent) instead of raw.
+    /// Not saved: every launch starts raw. The three fields after it are filled in from the export
+    /// preset each time the editor is painted.
+    #[serde(skip)]
+    pub preview: bool,
+    /// First-line indent in en spaces (half an em each).
+    #[serde(skip)]
+    pub preview_indent: u8,
+    /// No indent on the first paragraph of a chapter or after a scene break.
+    #[serde(skip)]
+    pub preview_flush: bool,
+    #[serde(skip)]
+    pub preview_justify: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -60,6 +73,10 @@ impl Default for Settings {
             default_preset: String::new(),
             keymap: BTreeMap::new(),
             system_light: false,
+            preview: false,
+            preview_indent: 0,
+            preview_flush: true,
+            preview_justify: false,
         }
     }
 }

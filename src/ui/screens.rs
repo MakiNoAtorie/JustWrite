@@ -643,7 +643,7 @@ impl App {
         let title = if meta.message.is_empty() { kind_name(meta.kind).to_owned() } else { meta.message.clone() };
         let title = self.fit(&title, detail.width as f32, 17.);
         self.put(&title, Rect { height: self.su(30.), ..detail }, 17., p.text, Face::Bold, Align::Left);
-        let mut info = format!("{} · {} · {} in the manuscript · {}", jw::time::local(meta.time), kind_name(meta.kind), count_words(meta.words as u64), if meta.items == 1 { "1 page or chapter".to_owned() } else { format!("{} pages and chapters", meta.items) });
+        let mut info = format!("{} · {} · {} in the manuscript · {}", jw::time::local(meta.time), kind_name(meta.kind), count_words(meta.words as u64), if meta.items == 1 { "1 chapter or note".to_owned() } else { format!("{} chapters and notes", meta.items) });
         if let Some(from) = meta.restored_from.as_deref().and_then(|id| self.project.as_ref().and_then(|s| s.history.get(id))) {
             info.push_str(&format!(" · restored from {}", jw::time::local(from.time)));
         }
