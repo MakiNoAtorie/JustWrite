@@ -211,7 +211,7 @@ fn scrolling(document: &Document, at: usize, width: u32, height: u32, steps: usi
 
 /// The scripted writing session, on the largest chapter (once) and on the whole manuscript held
 /// as a single chapter (every project), which is the worst case: one very long document.
-fn writing_sessions(file: &str, set: &CommentSet, largest: &str, neutral: &str, source: &Source, scratch: &Path, report: &mut Report) {
+fn writing_sessions(file: &str, set: &CommentSet, largest: &str, neutral: &str, source: &Source, scratch: &Path, work: &justwrite::jw::workdir::WorkDir, report: &mut Report) {
     if report.speller.is_none() {
         let (loaded, ms) = timed(|| Speller::load(Language::English, &[]));
         match loaded {
@@ -248,7 +248,7 @@ fn writing_sessions(file: &str, set: &CommentSet, largest: &str, neutral: &str, 
     let limits = session::Limits { open_document: 1000., autosave_background: 1000., replace_all_background: 2500. };
     scenarios.push(("mega", text, marks, limits));
     for (label, display, marks, limits) in scenarios {
-        let (rows, problems) = session::run(label, &display, &marks, &limits, report.speller.as_ref(), scratch);
+        let (rows, problems) = session::run(label, &display, &marks, &limits, report.speller.as_ref(), scratch, set, work);
         for row in rows {
             report.record(file, &row.name, row.ms, row.limit);
         }
@@ -391,7 +391,7 @@ fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
     report.record(&file, "scroll step", worst, SCROLL_STEP);
 
     if !report.skip_session {
-        writing_sessions(&file, &set, &largest, &neutral, &source, &session_scratch, report);
+        writing_sessions(&file, &set, &largest, &neutral, &source, &session_scratch, &project.work, report);
     }
     project.abandon();
     Ok(())

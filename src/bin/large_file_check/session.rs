@@ -9,7 +9,7 @@
 use justwrite::{
     core::{
         buffer::Document,
-        comments::{self, EditRec},
+        comments::{self, CommentSet, EditRec},
         config::Settings,
         notes::{self, Marker, to_neutral},
         prose::BlockIndex,
@@ -17,6 +17,7 @@ use justwrite::{
         typography::{Language, Typography},
         workspace,
     },
+    jw::{manifest::COMMENTS, workdir::WorkDir},
     platform,
     render::{CpuRenderer, Rect, Renderer},
     ui::editor::EditorView,
@@ -228,7 +229,7 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, f64) {
 
 /// Replays the session on `display`, a document in the form the editor holds it. `marks` are the
 /// review comments' ranges. `label` prefixes every row name.
-pub fn run(label: &str, display: &str, marks: &[(usize, usize)], limits: &Limits, speller: Option<&Speller>, scratch: &Path) -> (Vec<Row>, Vec<String>) {
+pub fn run(label: &str, display: &str, marks: &[(usize, usize)], limits: &Limits, speller: Option<&Speller>, scratch: &Path, all_comments: &CommentSet, work: &WorkDir) -> (Vec<Row>, Vec<String>) {
     let mut rows = Vec::new();
     let mut problems = Vec::new();
     let mut row = |name: &str, ms: f64, limit: f64| rows.push(Row { name: format!("{label} {name}"), ms, limit });
@@ -348,6 +349,22 @@ pub fn run(label: &str, display: &str, marks: &[(usize, usize)], limits: &Limits
         saves.push(ms);
     }
     row("autosave work (background)", max(&saves), limits.autosave_background);
+
+    // What the interface thread does before it hands a save to the worker (`sync_marks_to_project`):
+    // the chapter in its stored form, every mark mapped back to it, and comments.json rewritten
+    // (the whole project's comments, atomically, with an fsync) because typing moved the anchors.
+    let mut sync = Vec::new();
+    for _ in 0..3 {
+        let (_, ms) = timed(|| {
+            let (_, forward) = to_neutral(&rig.doc.text.to_string(), &rig.marker);
+            for m in &rig.marks {
+                black_box((forward.map(m.start), forward.map(m.end)));
+            }
+            let _ = work.write(COMMENTS, all_comments.to_json().as_bytes());
+        });
+        sync.push(ms);
+    }
+    row("autosave comment sync on interface thread", max(&sync), FRAME_WORST);
 
     // Replace all: the worker builds the new text, the interface thread swaps it in.
     let snapshot = rig.doc.text.clone();
