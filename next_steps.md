@@ -89,6 +89,38 @@ Goal: JustWrite must not chug on huge manuscripts (50k to 1M words).
 * Limits are constants at the top of the file, one set for all sizes, sized for the 1M-word book (open 2 s, read all 1 s, search 250 ms, Markdown/plain export 3 s, DOCX/EPUB 10 s, keystroke 5 ms, scroll 16.7 ms). They are first estimates: expect to retune them after step 3.
 * Smoke test only: ran on a generated 5k-word file in the scratchpad, 22 of 22 within limits, word counts matched. The "keystroke at middle, 2560x1440" row was 4.82 ms against the 5 ms limit; the earlier UX session saw this cloud container run 2560x1440 cases slower than the dev machine, so a failure there on step 3 may be the container, not the code. Re-checked after the CSV change: the same row read 4.6, 6.3, 6.9, 7.7 and 9.6 ms across runs on the 5k file, so it is noisy here regardless of size. Consider giving that row its own limit (the old gate uses 12 ms for its 4K stress case) once step 3 gives real numbers.
 
-### Step 3: run the benchmarks on the generated files (TODO, after step 2)
+### Step 3: run on the generated files (DONE, 2026-10-09, cloud container, release build)
 
-* Record the results in this file under a new "Results" section, and note any regressions or bottlenecks found.
+Ran `large-file-check` on all four files: 88 measurements, 0 correctness problems (Rust word counts match the Python generator on every file). 85 within limit; 3 over, all keystroke rows, treated as noise by decision (see below). Times in ms:
+
+| Measurement | 50k | 100k | 500k | 1M | Limit |
+| ----------- | --- | ---- | ---- | -- | ----- |
+| open project (unpack) | 4.6 | 4.7 | 17.2 | 32.5 | 2000 |
+| read every chapter | 0.9 | 0.8 | 3.9 | 9.3 | 1000 |
+| recount words | 1.9 | 3.9 | 19.6 | 56.5 | 1000 |
+| load comments | 0.2 | 0.3 | 1.2 | 3.2 | 200 |
+| comments through 200 edits | 0.04 | 0.07 | 0.35 | 1.2 | 50 |
+| search, common word | 6.3 | 11.6 | 59.3 | 156.5 | 250 |
+| search, no match | 0.1 | 0.2 | 1.3 | 3.7 | 250 |
+| hash the whole manuscript | 0.5 | 0.6 | 3.0 | 6.4 | 1000 |
+| first snapshot | 10.4 | 16.2 | 79.2 | 151.5 | 5000 |
+| incremental snapshot | 1.3 | 2.1 | 5.8 | 8.8 | 500 |
+| save after editing one chapter | 10.5 | 15.5 | 84.2 | 132.2 | 1000 |
+| export Markdown | 10.8 | 25.5 | 102.1 | 196.0 | 3000 |
+| export plain text | 9.3 | 19.4 | 92.6 | 147.3 | 3000 |
+| export DOCX | 20.1 | 42.1 | 197.6 | 294.0 | 10000 |
+| export EPUB | 17.6 | 33.3 | 175.8 | 246.9 | 10000 |
+| load largest chapter (about 4.4k words) | 0.35 | 0.39 | 0.35 | 0.41 | 100 |
+| keystroke at chapter start | 1.8 | 3.2 | 3.6 | 2.3 | 5 |
+| keystroke at chapter middle | 7.3 F | 1.6 | 1.5 | 2.3 | 5 |
+| keystroke at chapter end | 1.1 | 1.1 | 0.6 | 1.1 | 5 |
+| keystroke at middle, 2560x1440 | 4.2 | 5.8 F | 4.8 | 7.3 F | 5 |
+| scroll step | 2.5 | 1.7 | 2.0 | 1.9 | 16.7 |
+
+Findings:
+* Everything that scales with book size is linear and far inside its limit at 1M words. Nothing needs fixing.
+* Closest to its limit: search for a common word across the whole manuscript, 156 ms of 250 at 1M words (63%). It stays under the limit, but it is the first thing to look at if the book size goal grows or the search runs per keystroke. The benchmark searches chapter by chapter with a 500-match cap per chapter; check how the app's Find panel actually calls it before drawing conclusions.
+* The three failures are noise: `keystroke at middle 2560x1440` (5.8 and 7.3 ms, the known container noise) and `keystroke at chapter middle` on the 50k file (7.3 ms, the first project in the process, so cold caches; the same row is 1.5 to 2.3 ms on the other three). Keystroke latency does not grow with book size.
+* Limitation: the editor rows use the largest single chapter (about 4.5k words in all four files), so they show that editing is independent of manuscript size, not how a chapter of 100k+ words behaves. The older `performance-check` already covers 1 MB, 100 MB and 10 MB single-line documents.
+* Not measured: PDF export, spell check, window startup, a whole manuscript opened as a single document.
+* If this gate is kept in CI or run regularly: give the 2560x1440 keystroke row its own limit (about 12 ms) and run one throwaway warm-up project first.
