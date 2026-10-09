@@ -42,6 +42,13 @@ codegen-units = 1
 strip = "symbols"
 panic = "abort"
 
+# Quick local builds for run.bat; `--release` stays fat-LTO/small for shipping.
+[profile.fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+opt-level = 2
+
 [[bin]]
 name = "justwrite"
 path = "src/main.rs"

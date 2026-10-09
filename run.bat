@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-cargo run --release --bin justwrite -- %*
+cargo run --profile fast --bin justwrite -- %*
