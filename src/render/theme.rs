@@ -82,7 +82,7 @@ impl Palette {
     /// Secondary text that is switched off or only a hint (a placeholder, an unavailable
     /// command): quieter than `muted` but still at least 3:1 on `ground`.
     pub fn faint(&self, ground: u32) -> u32 {
-        mix(self.muted, ground, 0.3)
+        mix(self.muted, ground, 0.25)
     }
 }
 impl Default for Palette {
