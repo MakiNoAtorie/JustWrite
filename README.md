@@ -88,6 +88,7 @@ Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on 
 | Review comment · comments panel | Ctrl+Alt+M · Ctrl+Shift+M |
 | Find · replace · search the project | Ctrl+F · Ctrl+H · Ctrl+Shift+F |
 | Go to chapter · jump to scene | Ctrl+P · Ctrl+J |
+| Next · previous chapter | Ctrl+PageDown · Ctrl+PageUp |
 | Snapshot · history | Ctrl+Alt+S · Ctrl+Shift+H |
 | Export · preview | Ctrl+E · Ctrl+Alt+P |
 | Rename · move up · move down | F2 · Alt+↑ · Alt+↓ |

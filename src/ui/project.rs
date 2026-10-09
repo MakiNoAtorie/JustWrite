@@ -271,6 +271,25 @@ impl App {
         }
         self.open_relative(PathBuf::from(file), 0);
     }
+    /// Opens the chapter or page after (or before) the one being written, in the order of the tree.
+    pub(super) fn step_chapter(&mut self, delta: i32) {
+        let Some(state) = &self.project else { return };
+        let tree = &state.core.manifest.tree;
+        let order: Vec<String> = [Section::Manuscript, Section::Notes]
+            .into_iter()
+            .flat_map(|s| tree.leaves(s).into_iter().map(|(n, _)| n.id().to_owned()).collect::<Vec<_>>())
+            .collect();
+        let here = self.active_item().or_else(|| state.selected.clone()).and_then(|id| order.iter().position(|o| *o == id));
+        let target = match here {
+            Some(i) => i as i64 + i64::from(delta),
+            None if delta > 0 => 0,
+            None => order.len() as i64 - 1,
+        };
+        match usize::try_from(target).ok().and_then(|i| order.get(i)).cloned() {
+            Some(id) => self.open_item(&id),
+            None => self.status = if delta > 0 { "That is the last chapter." } else { "That is the first chapter." }.into(),
+        }
+    }
     pub(super) fn node_title(&self, id: &str) -> Option<String> {
         self.project.as_ref()?.core.manifest.tree.find(id).map(|n| n.title().to_owned())
     }

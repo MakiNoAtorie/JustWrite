@@ -170,6 +170,9 @@ fn contains(rect: Rect, x: f64, y: f64) -> bool {
         && y < rect.y as f64 + rect.height as f64
 }
 
+/// How long a status message stays in the footer before it fades.
+const STATUS_LIFETIME: Duration = Duration::from_secs(10);
+
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
@@ -204,6 +207,9 @@ pub struct App {
     clipboard: Clipboard,
     preedit: String,
     status: String,
+    /// The status text last seen and when it first appeared, so it can fade.
+    status_seen: String,
+    status_since: Instant,
     search_version: Arc<AtomicU64>,
     config_storage: Arc<dyn Storage>,
     config_watcher: Option<notify::RecommendedWatcher>,
@@ -357,6 +363,8 @@ impl App {
             clipboard: Clipboard::default(),
             preedit: String::new(),
             status: String::new(),
+            status_seen: String::new(),
+            status_since: Instant::now(),
             search_version: Arc::new(AtomicU64::new(0)),
             config_storage,
             config_watcher: None,
@@ -1646,6 +1654,9 @@ impl App {
                     }
                 }
             }
+            Command::NextChapter | Command::PreviousChapter => {
+                self.step_chapter(if command == Command::NextChapter { 1 } else { -1 });
+            }
             Command::NextTab | Command::PreviousTab => {
                 if let Some(pane) = self.split.pane_mut(self.active_pane) {
                     if !pane.tabs.is_empty() {
@@ -2210,6 +2221,20 @@ impl App {
                         }
                     }
                 }
+            }
+        }
+        if self.status != self.status_seen {
+            self.status_seen = self.status.clone();
+            self.status_since = now;
+        }
+        if !self.status.is_empty() {
+            let due = self.status_since + STATUS_LIFETIME;
+            if due <= now {
+                self.status.clear();
+                self.status_seen.clear();
+                self.redraw();
+            } else {
+                next = Some(next.map_or(due, |other: Instant| other.min(due)));
             }
         }
         if let Some(since) = self.hover_since {

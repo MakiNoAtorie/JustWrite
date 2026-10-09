@@ -46,6 +46,8 @@ pub enum Command {
     // Navigation
     Palette,
     QuickOpen,
+    NextChapter,
+    PreviousChapter,
     JumpScene,
     GotoLine,
     WordCount,
@@ -118,6 +120,8 @@ commands![
     (Command::ProjectSearch, "project_search", "Search the project…", "Ctrl+Shift+F"),
     (Command::Palette, "palette", "Command palette", "Ctrl+Shift+P"),
     (Command::QuickOpen, "quick_open", "Go to chapter or page…", "Ctrl+P"),
+    (Command::NextChapter, "next_chapter", "Next chapter or page", "Ctrl+PageDown"),
+    (Command::PreviousChapter, "previous_chapter", "Previous chapter or page", "Ctrl+PageUp"),
     (Command::JumpScene, "jump_scene", "Jump to scene", "Ctrl+J"),
     (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
     (Command::WordCount, "word_count", "Word count", ""),

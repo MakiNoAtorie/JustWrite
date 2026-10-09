@@ -81,6 +81,28 @@ pub fn replace_all(text: &str, query: &str, with: &str, case: bool) -> String {
     out.push_str(&text[last..]);
     out
 }
+/// The words around a match for a results list: it starts and ends on a word boundary, with an
+/// ellipsis where the text goes on, and the match itself is never cut.
+pub fn preview_around(text: &ropey::Rope, start: usize, end: usize) -> String {
+    let len = text.len_chars();
+    let mut from = start.saturating_sub(24);
+    let mut to = (end + 64).min(len);
+    let breaks = |c: char| c.is_whitespace();
+    // Move the left edge forward to the start of a word, but never past the match.
+    while from > 0 && from < start && !breaks(text.char(from - 1)) {
+        from += 1;
+    }
+    // Move the right edge back to the end of a word, but never into the match.
+    while to < len && to > end && !breaks(text.char(to)) {
+        to -= 1;
+    }
+    let body: String = text
+        .slice(from..to)
+        .chars()
+        .map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c })
+        .collect();
+    format!("{}{}{}", if from > 0 { "…" } else { "" }, body.trim(), if to < len { "…" } else { "" })
+}
 pub fn find(
     text: &ropey::Rope,
     query: &str,
@@ -110,11 +132,7 @@ pub fn find(
             let start = offset + carry[..byte].chars().count();
             let end = start + query.chars().count();
             let line = text.char_to_line(start);
-            let preview: String = text
-                .slice(start.saturating_sub(24)..(end + 64).min(text.len_chars()))
-                .chars()
-                .map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c })
-                .collect();
+            let preview = preview_around(text, start, end);
             matches.push((start, end, line, preview));
             if matches.len() >= limit {
                 return matches;
@@ -130,6 +148,20 @@ pub fn find(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn previews_cut_on_whole_words_and_mark_where_text_goes_on() {
+        let source = "Marta stopped at the gate and listened. The house behind her was silent, and so it stayed for a very long while after.";
+        let text = ropey::Rope::from_str(source);
+        let preview = &find(&text, "Marta", false, 10)[0].3;
+        assert!(preview.starts_with("Marta") && preview.ends_with('…'), "{preview}");
+        let body = preview.trim_end_matches('…');
+        let at = source.find(body).expect("the preview is text from the source");
+        assert!(source[at + body.len()..].starts_with(' '), "cut inside a word: {preview}");
+        let middle = &find(&text, "silent", false, 10)[0].3;
+        assert!(middle.starts_with('…') && middle.contains("silent"), "{middle}");
+        let short = ropey::Rope::from_str("A quiet night.");
+        assert_eq!(find(&short, "quiet", false, 10)[0].3, "A quiet night.");
+    }
     #[test]
     fn search_matches_cross_rope_chunks_and_map_to_character_offsets() {
         let text =

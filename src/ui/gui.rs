@@ -328,6 +328,8 @@ impl App {
             | Command::ProjectSearch
             | Command::QuickOpen
             | Command::NextTab
+            | Command::NextChapter
+            | Command::PreviousChapter
             | Command::PreviousTab
             | Command::SplitRight
             | Command::SplitDown
@@ -1514,6 +1516,19 @@ impl App {
                 let upper = Rect { height: line.height * 6 / 10, ..inner };
                 let lower = Rect { y: line.y + (line.height * 55 / 100) as i32, height: line.height * 4 / 10, ..inner };
                 let label = self.fit(&row.label, inner.width as f32, 13.);
+                if searching && !query.is_empty() {
+                    // Mark the matched words so the eye lands on them.
+                    let (hay, needle) = (if case { label.clone() } else { label.to_lowercase() }, if case { query.clone() } else { query.to_lowercase() });
+                    if hay.len() == label.len() {
+                        if let Some(at) = hay.find(&needle).filter(|at| label.is_char_boundary(*at) && label.is_char_boundary(at + needle.len())) {
+                            let size = 13. * self.scale;
+                            let before = self.measure(&label[..at], size, Face::Normal);
+                            let width = self.measure(&label[at..at + needle.len()], size, Face::Normal);
+                            let mark = Rect { x: inner.x + before as i32 - 1, y: line.y + self.s(4.), width: width.ceil() as u32 + 2, height: self.su(20.) };
+                            self.renderer.fill_round(mark, self.su(3.), mix(p.raised, p.accent, 0.35));
+                        }
+                    }
+                }
                 self.put(&label, Rect { y: line.y + self.s(2.), ..upper }, 13., p.text, Face::Normal, Align::Left);
                 let hint = self.fit(&row.hint, inner.width as f32, 11.);
                 self.put(&hint, lower, 11., p.muted, Face::Normal, Align::Left);

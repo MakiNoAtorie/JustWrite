@@ -96,6 +96,8 @@ pub const MENUS: &[(&str, char, Items)] = &[
             None,
             Some(Command::NextTab),
             Some(Command::PreviousTab),
+            Some(Command::NextChapter),
+            Some(Command::PreviousChapter),
             Some(Command::QuickOpen),
             Some(Command::JumpScene),
             Some(Command::GotoLine),
