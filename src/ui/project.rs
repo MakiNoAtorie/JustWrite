@@ -321,12 +321,7 @@ impl App {
             }
             _ => {
                 let count = tree.leaves(Section::Manuscript).len() + 1;
-                // After the selected chapter, or at the end.
-                let index = match state.selected.as_deref().and_then(|id| tree.locate(id)).filter(|(s, _)| *s == Section::Manuscript) {
-                    Some((_, path)) => path[path.len() - 1] + 1,
-                    None => tree.manuscript.len(),
-                };
-                (Section::Manuscript, index, Node::chapter(&format!("Chapter {count}")))
+                (Section::Manuscript, tree.manuscript.len(), Node::chapter(&format!("Chapter {count}")))
             }
         };
         let id = node.id().to_owned();
