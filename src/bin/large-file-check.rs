@@ -6,7 +6,7 @@
 //!     cargo run --release --bin large-file-check -- --quiet        # only failures and totals
 //!
 //! Each project is copied to a temporary folder first, so the generated files are never
-//! modified or locked. One line is printed per measurement; the same rows go to
+//! modified or locked. Output is CSV (`result,name,ms,limit`, P = pass, F = fail), one row per measurement; the same rows go to
 //! `large-file-results.json` next to the first project. The exit code is 1 when a limit is missed
 //! or a correctness check fails, and 2 when there is nothing to run.
 //!
@@ -86,16 +86,22 @@ impl Report {
     fn record(&mut self, file: &str, name: &str, ms: f64, limit: f64) {
         let row = Row { file: file.into(), name: name.into(), ms, limit };
         if !self.quiet || !row.pass() {
-            println!("{} {file:<10} {name:<38} {ms:>9.2} ms  (limit {limit:.1})", if row.pass() { "ok  " } else { "FAIL" });
+            // The file name is in the "----" header above, except when only failures are shown.
+            let owner = if self.quiet { format!("{file}/") } else { String::new() };
+            println!("{},{owner}{name},{ms:.2},{}", if row.pass() { "P" } else { "F" }, short(limit));
         }
         self.rows.push(row);
     }
     fn problem(&mut self, file: &str, message: String) {
-        println!("FAIL {file:<10} {message}");
+        println!("# PROBLEM {file}: {message}");
         self.problems.push(format!("{file}: {message}"));
     }
 }
 
+/// A limit without a pointless ".0": 2000 or 16.7.
+fn short(limit: f64) -> String {
+    if limit.fract() == 0. { format!("{limit:.0}") } else { format!("{limit:.1}") }
+}
 fn ms_since(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.
 }
@@ -195,10 +201,13 @@ fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
     // Opening.
     let (manifest, ms) = timed(|| archive::read_manifest(&copy));
     let manifest = manifest?;
-    report.record(&file, "read manifest.json", ms, READ_MANIFEST);
+    let manifest_ms = ms;
     let words_in_file = manifest.tree.manuscript_words();
     let chapters = manifest.tree.leaves(Section::Manuscript).len();
-    println!("---- {file}: {words_in_file} words, {chapters} chapters, {:.1} MB zip", fs::metadata(&copy).map_or(0., |m| m.len() as f64 / 1e6));
+    if !report.quiet {
+        println!("# {file} words={words_in_file} chapters={chapters}");
+    }
+    report.record(&file, "read manifest.json", manifest_ms, READ_MANIFEST);
     let (opened, ms) = timed(|| Project::open(&data, &copy, false));
     let mut project = opened.map_err(|_| "cannot open the project".to_string())?.project;
     report.record(&file, "open project (unpack)", ms, OPEN_PROJECT);
@@ -309,7 +318,7 @@ fn bench(jw: &Path, report: &mut Report) -> Result<(), String> {
         report.record(&file, &format!("keystroke at chapter {name}"), worst, KEYSTROKE);
     }
     let worst = keystrokes(&mut document, length / 2, 2560, 1440, 100);
-    report.record(&file, "keystroke at middle, 2560x1440", worst, KEYSTROKE);
+    report.record(&file, "keystroke at middle 2560x1440", worst, KEYSTROKE);
     let worst = scrolling(&document, length / 2, 1100, 760, 100);
     report.record(&file, "scroll step", worst, SCROLL_STEP);
 
@@ -339,6 +348,7 @@ fn main() {
     }
 
     let mut report = Report { rows: Vec::new(), problems: Vec::new(), quiet };
+    println!("result,name,ms,limit");
     for path in &paths {
         if let Err(message) = bench(path, &mut report) {
             report.problem(&path.display().to_string(), message);
@@ -347,7 +357,7 @@ fn main() {
 
     let failed: Vec<&Row> = report.rows.iter().filter(|r| !r.pass()).collect();
     let passed = failed.is_empty() && report.problems.is_empty();
-    println!("{} measurements, {} over limit, {} problems: {}", report.rows.len(), failed.len(), report.problems.len(), if passed { "PASS" } else { "FAIL" });
+    println!("# result P=ms below limit, F=ms at or over limit. measurements={} over_limit={} problems={} {}", report.rows.len(), failed.len(), report.problems.len(), if passed { "PASS" } else { "FAIL" });
 
     let rows: Vec<serde_json::Value> = report
         .rows
