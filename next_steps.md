@@ -20,7 +20,11 @@ None of this can be driven headlessly. Do these first; each is a short look.
   markers on every line, indents paragraphs like the default export preset, keeps the first paragraph
   of a chapter and the one after a scene break flush, and justifies when the preset does. Typing,
   selecting and clicking must work as in raw. See "Raw and preview view" below.
-* **Comment keyboard access.** F8 / Shift+F8 walk the review comments in reading order. With the caret
+* **Notes look.** `$$` notes should be in the accent colour, and a note that is a whole line (or a line
+  of a `$$$` block) should be centred. Inline notes inside a paragraph are coloured but cannot be
+  centred. A custom note colour in Settings still wins. In Preview, notes are hidden (typing `$$` in
+  Preview makes the text vanish at once: switch to Raw to write notes, or turn on "Show notes in the
+  preview").* **Comment keyboard access.** F8 / Shift+F8 walk the review comments in reading order. With the caret
   in a commented passage, the palette has Resolve, Reply, Edit and Delete for it.
 * **Tab drop to split.** Reading `drop_zone` in `src/ui/app.rs`: a dragged tab splits when released
   within about 65 px of the left, right or bottom edge of a pane, or in a strip just under the toolbar;
@@ -113,6 +117,16 @@ Plan, as asked, then what was built.
 * **Not done:** paragraph spacing from the preset, hyphenation, a per-project choice of preset for the
   preview, a keyboard shortcut.
 
+### Notes: accent colour, centred, hidden in the preview
+
+* Notes use the accent colour (`accent_text`, the readable variant) unless Settings has a note colour.
+  A chunk that is all note is centred (`present` in `src/core/prose.rs`, test
+  `a_chunk_that_is_all_note_is_centred`).
+* The preview is "the text as exported", so it hides notes. Settings > Notes > "Show notes in the
+  preview" (also View menu and the palette, `preview_notes`) keeps them; saved, default off. The
+  existing "Hide notes" setting still applies in Raw.
+* Bug found on the way: changing any setting while in Preview dropped back to Raw, because the view is
+  not a saved setting and the settings form re-parses them. `adopt` now keeps it.
 ### Gates, this machine (Windows, release build, `opt-level = "s"` with fat LTO)
 
 * `performance-check`: passes (`processing_gate_passed: true`); 2560 x 1440 stress edit p50 1.3 to

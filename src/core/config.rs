@@ -24,10 +24,12 @@ pub struct Settings {
     pub repack_minutes: u32,
     /// The marker for notes, such as `$$`. Stored text does not depend on it.
     pub note_marker: String,
-    /// Colour of notes (`#rrggbb`); empty for the theme's muted colour.
+    /// Colour of notes (`#rrggbb`); empty for the accent colour.
     pub note_color: String,
     pub note_italic: bool,
     pub hide_notes: bool,
+    /// Keep notes in the preview view. Off by default: the preview shows the text as exported.
+    pub preview_notes: bool,
     /// Underline possible spelling mistakes.
     pub spellcheck: bool,
     /// Export preset the Export command starts from.
@@ -69,6 +71,7 @@ impl Default for Settings {
             note_color: String::new(),
             note_italic: true,
             hide_notes: false,
+            preview_notes: false,
             spellcheck: true,
             default_preset: String::new(),
             keymap: BTreeMap::new(),

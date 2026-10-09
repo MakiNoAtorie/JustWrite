@@ -101,7 +101,7 @@ fn blend(a: u32, b: u32, t: f32) -> u32 {
 fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
     let palette = render::theme::Palette::new(settings.light(), settings.accent_color());
     let color = render::theme::color(if style.note {
-        let base = settings.note_colour().unwrap_or(palette.muted);
+        let base = settings.note_colour().unwrap_or(palette.accent_text());
         if style.dim { blend(base, palette.background, 0.4) } else { base }
     } else if style.dim || style.scene {
         palette.muted
@@ -264,7 +264,8 @@ impl EditorView {
                 in_line_note: start > line_start && self.line_note_before(doc, line_start, start),
             };
             let width = rect.width as f32;
-            let hide = settings.hide_notes;
+            // The preview shows the text as exported, which has no notes, unless the setting keeps them.
+            let hide = settings.hide_notes || (settings.preview && !settings.preview_notes);
             let cached = self.cache.iter().position(|tile| {
                 tile.source == source
                     && tile.raw == raw
@@ -596,6 +597,14 @@ mod tests {
         let s = shown(&v);
         assert!(s.contains("Second line") && !s.contains("whole note"), "{s}");
         assert_eq!(v.tiles.iter().filter(|t| t.height == 0.0).count(), 1, "the note-only line takes no room");
+        // The preview is the text as exported: no notes unless the setting keeps them.
+        let (v, _) = view(text, 0, 800, |s| s.preview = true);
+        assert!(!shown(&v).contains("whole note") && !shown(&v).contains("aside"), "{}", shown(&v));
+        let (v, _) = view(text, 0, 800, |s| {
+            s.preview = true;
+            s.preview_notes = true;
+        });
+        assert!(shown(&v).contains("aside") && shown(&v).contains("whole note"), "{}", shown(&v));
         let (v, _) = view(text, 0, 800, |s| s.show_markers = true);
         assert!(shown(&v).contains("$$ whole note") && shown(&v).contains("#"));
     }

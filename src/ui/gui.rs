@@ -295,6 +295,7 @@ impl App {
             Command::RawView => !self.settings.preview,
             Command::PreviewView => self.settings.preview,
             Command::HideNotes => self.settings.hide_notes,
+            Command::PreviewNotes => self.settings.preview_notes,
             Command::Focus => self.window.as_ref().is_some_and(|w| w.fullscreen().is_some()),
             _ => false,
         }

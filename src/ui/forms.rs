@@ -628,9 +628,10 @@ impl App {
             Field::toggle("spellcheck", "Underline possible misspellings", s.spellcheck).hint("Uses the project language"),
             Field::heading("Notes"),
             Field::text("note_marker", "Note marker", &s.note_marker).hint("Two or three punctuation characters, such as $$ or %%"),
-            Field::text("note_color", "Note colour", &s.note_color).hint("#rrggbb, or leave empty for grey"),
+            Field::text("note_color", "Note colour", &s.note_color).hint("#rrggbb, or leave empty for the accent colour"),
             Field::toggle("note_italic", "Italic notes", s.note_italic),
             Field::toggle("hide_notes", "Hide notes", s.hide_notes),
+            Field::toggle("preview_notes", "Show notes in the preview", s.preview_notes),
             Field::heading("Saving"),
             Field::toggle("autosave", "Save chapters while I write", s.autosave),
             Field::number("repack_minutes", "Write the .jw file every", s.repack_minutes as f32, 1., 60., 1., 0, "min"),
@@ -658,6 +659,7 @@ impl App {
         s.note_color = form.text("note_color");
         s.note_italic = form.on("note_italic");
         s.hide_notes = form.on("hide_notes");
+        s.preview_notes = form.on("preview_notes");
         s.autosave = form.on("autosave");
         s.repack_minutes = form.number("repack_minutes") as u32;
         let old = self.marker();

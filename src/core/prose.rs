@@ -422,6 +422,15 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
     }
     out.hidden = hid_something && out.text.trim().is_empty();
+    // A chunk that is all note (a note line, or a line inside a block note) is centred.
+    if !out.center && !out.hidden {
+        let mut note = false;
+        let mut prose = false;
+        for span in out.spans.iter().filter(|s| !out.text[s.bytes.clone()].trim().is_empty()) {
+            if span.style.note { note = true } else { prose = true }
+        }
+        out.center = note && !prose;
+    }
     if options.indent > 0 && !out.hidden && !out.center && !out.text.trim().is_empty() {
         // The indent has no source entry: the caret at the start of the line sits after it, and a
         // click inside it lands on the first character.
@@ -690,6 +699,23 @@ mod tests {
         // Emphasis may not leak across a note.
         let q = present("*one $$ n $$ two*\n", 0, None, Initial::default(), options(&marker));
         assert!(q.spans.iter().filter(|s| s.style.italic).count() >= 2);
+    }
+
+    #[test]
+    fn a_chunk_that_is_all_note_is_centred() {
+        let marker = Marker::default();
+        let show = |text: &str, raw: Option<usize>| present(text, 0, raw, Initial::default(), options(&marker));
+        assert!(show("$$ a whole note line\n", None).center);
+        assert!(show("$$ a whole note line\n", Some(0)).center, "also while it is edited, markers shown");
+        assert!(show("before $$ aside $$ after\n", None).center == false, "an inline note stays in the prose");
+        assert!(show("prose $$ trailing note\n", None).center == false);
+        assert!(!show("plain prose\n", None).center);
+        // Lines inside a block note.
+        let inside = present("a block line\n", 0, None, Initial { in_block: true, in_line_note: false }, options(&marker));
+        assert!(inside.center);
+        // A hidden note takes no room, centred or not.
+        let hidden = present("$$ note\n", 0, None, Initial::default(), Options { hide_notes: true, ..options(&marker) });
+        assert!(hidden.hidden);
     }
 
     #[test]

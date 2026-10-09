@@ -450,6 +450,8 @@ impl App {
     /// Takes settings loaded from disk, keeping the live Windows light/dark state.
     fn adopt(&mut self, mut settings: Settings) {
         settings.system_light = self.system_light;
+        // The preview is a view, not a saved setting, so changing a setting keeps it.
+        settings.preview = self.settings.preview;
         self.settings = settings;
     }
     fn title(&self) {
@@ -1822,6 +1824,11 @@ impl App {
             Command::RawView | Command::PreviewView => {
                 // The view is not a saved setting: every launch starts raw.
                 self.settings.preview = command == Command::PreviewView;
+                self.redraw();
+            }
+            Command::PreviewNotes => {
+                self.settings.preview_notes = !self.settings.preview_notes;
+                self.save_settings();
                 self.redraw();
             }
             Command::HideNotes => {
