@@ -1,7 +1,6 @@
 use crate::core::{buffer::Document, prose::BlockIndex, storage::Storage};
 use crate::ui::app::project::TabMark;
 use crate::ui::editor::EditorView;
-use ropey::Rope;
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
 pub struct Tab {

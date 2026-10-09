@@ -147,9 +147,6 @@ pub fn project_error(error: OpenError) -> String {
 }
 
 impl App {
-    pub(super) fn project_ref(&self) -> Option<&ProjectState> {
-        self.project.as_ref()
-    }
     /// Identifies the chapter or page shown in a tab.
     pub(super) fn item_of_tab(&self, tab: u64) -> Option<String> {
         let path = self.tabs.get(&tab)?.path.as_ref()?.to_string_lossy().replace('\\', "/");

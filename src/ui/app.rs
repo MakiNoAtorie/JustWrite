@@ -32,12 +32,12 @@ pub mod screens;
 #[path = "spelling.rs"]
 pub mod spelling;
 use forms::{ExportRequest, Form};
-use project::{DropTarget, Panel, ProjectState};
+use project::{Panel, ProjectState};
 use screens::{Screen, ScreenAct};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Motion, Shaping, fontdb};
 use ropey::Rope;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     num::NonZeroU32,
     path::{Path, PathBuf},
     sync::{
@@ -3093,7 +3093,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 Err(error) => self.status = format!("Settings error: {error}"),
             },
-            _ => {}
         }
         self.title();
         self.redraw();

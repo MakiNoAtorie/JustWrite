@@ -1,7 +1,7 @@
 //! Dialogs made of labelled fields: text, numbers, choices, switches and buttons. The same widget
 //! serves settings, export, book details, project settings, import and the small prompts.
 use super::*;
-use super::gui::{Align, Face, Look, hovered, mix, selected_fill};
+use super::gui::{Align, Face, Look};
 use crate::{
     core::{
         comments::{Filter as CommentFilterQuery, Status as CommentStatus},
@@ -14,7 +14,7 @@ use crate::{
     },
     history,
     import::{self, split},
-    jw::{self, book::BookDetails, manifest::Section},
+    jw::{self, manifest::Section},
 };
 use std::ops::Range;
 

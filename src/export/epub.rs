@@ -98,7 +98,7 @@ pub fn write(doc: &Doc, preset: &Preset) -> io::Result<Vec<u8>> {
     let mut items: Vec<Item> = Vec::new();
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     let mut toc: Vec<(String, String, usize)> = Vec::new(); // (title, href, depth)
-    let mut add_page = |items: &mut Vec<Item>, files: &mut Vec<(String, Vec<u8>)>, id: &str, title: &str, body: String, props: &'static str| {
+    let add_page = |items: &mut Vec<Item>, files: &mut Vec<(String, Vec<u8>)>, id: &str, title: &str, body: String, props: &'static str| {
         let href = format!("text/{id}.xhtml");
         items.push(Item { id: id.to_owned(), href: href.clone(), media: "application/xhtml+xml", properties: props, spine: true });
         files.push((format!("OEBPS/{href}"), xhtml(lang, title, &body).into_bytes()));

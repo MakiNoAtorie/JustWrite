@@ -99,9 +99,6 @@ fn kind_name(kind: SnapshotKind) -> &'static str {
 }
 
 impl App {
-    pub(super) fn screen_open(&self) -> bool {
-        self.screen.is_some()
-    }
     pub(super) fn close_screen(&mut self) {
         self.screen = None;
         if let Some(form) = self.parked_form.take() {

@@ -20,7 +20,7 @@ fn local(name: &str) -> &str {
     name.rsplit(':').next().unwrap_or(name)
 }
 fn attr(e: &quick_xml::events::BytesStart, key: &str) -> Option<String> {
-    e.attributes().flatten().find(|a| local(a.key.as_ref()) == key).and_then(|a| a.unescape_value().ok().map(|v| v.into_owned()))
+    e.attributes().flatten().find(|a| local(a.key.as_ref()) == key).and_then(|a| a.normalized_value(quick_xml::XmlVersion::default()).ok().map(|v| v.into_owned()))
 }
 /// `w:b`, `w:b w:val="0"`, ...: whether the property is on.
 fn toggle(e: &quick_xml::events::BytesStart) -> bool {

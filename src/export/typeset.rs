@@ -227,7 +227,6 @@ fn prelude(doc: &Doc, preset: &Preset) -> String {
 
 fn chapter_functions(preset: &Preset) -> String {
     let p = preset;
-    let text_height = p.page_height - p.margin_top - p.margin_bottom;
     let recto = p.recto_start;
     let align = if p.chapter_align == Align::Center { "center" } else { "left" };
     let text_height = p.page_height - p.margin_top - p.margin_bottom;

@@ -3,7 +3,7 @@
 use super::*;
 use crate::ui::{
     layout::Divider,
-    menu::{self, EDITOR_MENU, MENUS, NEW_MENU, Popup, TAB_MENU, TREE_MENU},
+    menu::{self, EDITOR_MENU, MENUS, Popup, TAB_MENU, TREE_MENU},
 };
 use cosmic_text::{Style as FontStyle, Weight};
 
@@ -934,7 +934,7 @@ impl App {
                 width: rect.width.saturating_sub(self.su(12.)),
                 height: row_height,
             };
-            if let Some((label, section)) = row.heading {
+            if let Some((label, _)) = row.heading {
                 let head = Rect { x: line.x + self.s(6.), y: line.y + self.s(4.), width: line.width, height: line.height };
                 self.put(label, head, 10.5, mix(p.muted, p.accent, 0.3), Face::Bold, Align::Left);
                 let text = "+ New";
@@ -1138,7 +1138,7 @@ impl App {
             let inner_x = card.x + self.s(10.);
             let inner_w = card.width.saturating_sub(self.su(20.));
             let quote: String = c.quote.replace('\n', " ");
-            let quote = self.fit(&format!("“{quote}”"), inner_w as f32, 11.5);
+            let quote = self.fit(&quote, inner_w as f32, 11.5);
             self.put(&quote, Rect { x: inner_x, y: card.y + self.s(6.), width: inner_w, height: self.su(20.) }, 11.5, p.muted, Face::Italic, Align::Left);
             self.label(&c.body, Rect { x: inner_x, y: card.y + self.s(28.), width: inner_w, height: self.su(58.) }, 12.5 * self.scale, if c.status == CommentStatus::Resolved { p.muted } else { p.text });
             let mut meta = String::new();

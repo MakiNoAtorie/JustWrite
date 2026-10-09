@@ -119,7 +119,7 @@ pub fn split(raw: &Raw, options: &Options) -> Result<Imported, String> {
             format!("{}{}{}", notes::LINE, if rest.is_empty() { "" } else { " " }, rest)
         })
     };
-    let mut flush = |current: &mut Option<Builder>, slots: &mut Vec<Slot>| {
+    let flush = |current: &mut Option<Builder>, slots: &mut Vec<Slot>| {
         if let Some(b) = current.take() {
             slots.push(Slot::Chapter(b));
         }
