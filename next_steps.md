@@ -78,13 +78,16 @@ Goal: JustWrite must not chug on huge manuscripts (50k to 1M words).
 * Not covered yet: `history/` (snapshots) is not generated. Build it in the benchmarks with `History::capture` if needed.
 * Note: the generated files have NOT yet been opened by the Rust code. Step 3 covers that.
 
-### Step 2: timing benchmarks and speed tests (TODO, waiting for go-ahead)
+### Step 2: timing benchmarks and speed tests (DONE, not yet run on the big files)
 
-Plan:
-* Extend `src/bin/performance-check.rs`, or add a bin or test next to it, that loads `bench_data/*.jw` (skip with a clear message if missing).
-* Keep output tiny: one line per measurement, plus a JSON report. No per-iteration prints.
-* Cover: open and unpack, `Manifest::parse`, read every chapter, word counts, comment load and mapping, search, history capture and compare, Markdown export, edit and scroll latency at the end of a big chapter.
-* Give each a limit in ms, with a pass/fail exit code.
+* Tool: `src/bin/large-file-check.rs` (bin `large-file-check`, registered in `Cargo.toml`). Separate from `performance-check`, so the existing gate stays fast.
+* Run: `cargo run --release --bin large-file-check` (every `bench_data/*.jw`, smallest first), `-- path/to/a.jw` for chosen files, `-- --quiet` for failures and totals only. `JW_BENCH_DIR` overrides the folder. Exit code 0 pass, 1 over limit or correctness problem, 2 no files found.
+* Each project is copied to a temp folder first, so `bench_data/*.jw` are never modified or locked.
+* Output: one line per measurement (`ok`/`FAIL`, file, name, ms, limit), a one-line summary, and `bench_data/large-file-results.json` (git-ignored). 22 measurements per file.
+* Measured: read manifest, open (unpack), read every chapter, recount words (also checks the total against the manifest, so it catches Rust and Python word counts disagreeing), load comments, comments through 200 edits, search (common word and no match, across all chapters), hash manuscript, first snapshot, incremental snapshot, save after one-chapter edit, export (Markdown, plain, DOCX, EPUB), load the largest chapter into the editor, keystroke latency at chapter start, middle and end (1100x760) and at the middle at 2560x1440, scroll step.
+* Not measured: PDF export (typst, very slow on 1M words; add it on its own if wanted), the whole manuscript as one document, spell check, opening the window.
+* Limits are constants at the top of the file, one set for all sizes, sized for the 1M-word book (open 2 s, read all 1 s, search 250 ms, Markdown/plain export 3 s, DOCX/EPUB 10 s, keystroke 5 ms, scroll 16.7 ms). They are first estimates: expect to retune them after step 3.
+* Smoke test only: ran on a generated 5k-word file in the scratchpad, 22 of 22 within limits, word counts matched. The "keystroke at middle, 2560x1440" row was 4.82 ms against the 5 ms limit; the earlier UX session saw this cloud container run 2560x1440 cases slower than the dev machine, so a failure there on step 3 may be the container, not the code.
 
 ### Step 3: run the benchmarks on the generated files (TODO, after step 2)
 

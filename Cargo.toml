@@ -49,6 +49,10 @@ path = "src/main.rs"
 name = "performance-check"
 path = "src/bin/performance-check.rs"
 
+[[bin]]
+name = "large-file-check"
+path = "src/bin/large-file-check.rs"
+
 # The Hunspell dictionaries expand large affix tables; keep that fast even in debug builds.
 [profile.dev.package.zspell]
 opt-level = 3
