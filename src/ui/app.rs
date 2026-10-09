@@ -813,14 +813,7 @@ impl App {
                             score,
                             Row {
                                 label: command.name.into(),
-                                hint: shortcut.replace(
-                                    "Ctrl",
-                                    if cfg!(target_os = "macos") {
-                                        "Cmd"
-                                    } else {
-                                        "Ctrl"
-                                    },
-                                ),
+                                hint: commands::display_shortcut(shortcut),
                                 action: if kind == Kind::Keymap {
                                     Action::Shortcut(command.key.into())
                                 } else {

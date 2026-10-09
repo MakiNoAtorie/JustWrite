@@ -1,7 +1,7 @@
 //! Dialogs made of labelled fields: text, numbers, choices, switches and buttons. The same widget
 //! serves settings, export, book details, project settings, import and the small prompts.
 use super::*;
-use super::gui::{Align, Face, Look};
+use super::gui::{Align, Face, Look, count_words};
 use crate::{
     core::{
         comments::{Filter as CommentFilterQuery, Status as CommentStatus},
@@ -1432,7 +1432,7 @@ impl App {
             Ok(meta) => {
                 state.changed = false;
                 state.last_snapshot = Instant::now();
-                self.status = format!("Snapshot taken: {} words.", meta.words);
+                self.status = format!("Snapshot taken: {}.", count_words(meta.words as u64));
                 self.pack_project(false);
                 self.refresh_history();
             }

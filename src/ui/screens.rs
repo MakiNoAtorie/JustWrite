@@ -1,6 +1,6 @@
 //! Full-window views: the snapshot history, the comparison of two versions, and the paged preview.
 use super::*;
-use super::gui::{Align, Face, Look, hovered, mix, selected_fill};
+use super::gui::{Align, Face, Look, count_words, hovered, mix, selected_fill};
 use crate::{
     core::comments::CommentSet,
     export::typeset::{Bitmap, Typeset},
@@ -607,14 +607,15 @@ impl App {
             self.put("No snapshots on this line yet. Press Ctrl+Alt+S to take one.", Rect { x: list.x + self.s(16.), y: list.y + self.s(16.), width: list.width - self.su(32.), height: self.su(30.) }, 12.5, p.muted, Face::Normal, Align::Left);
         }
         let row_height = self.s(58.);
-        let visible = (list.height as i32 / row_height).max(1) as usize;
+        let inset = self.s(6.);
+        let visible = ((list.height as i32 - inset) / row_height).max(1) as usize;
         if v.selected >= v.scroll + visible {
             v.scroll = v.selected + 1 - visible;
         }
         v.scroll = v.scroll.min(v.snapshots.len().saturating_sub(visible));
         let now = jw::time::now();
         for (n, meta) in v.snapshots.iter().enumerate().skip(v.scroll).take(visible) {
-            let row = Rect { x: list.x + self.s(6.), y: list.y + (n - v.scroll) as i32 * row_height, width: list.width - self.su(12.), height: row_height as u32 - 2 };
+            let row = Rect { x: list.x + self.s(6.), y: list.y + inset + (n - v.scroll) as i32 * row_height, width: list.width - self.su(12.), height: row_height as u32 - 2 };
             if n == v.selected {
                 self.renderer.fill_round(row, self.su(6.), selected_fill(p.background, p));
             } else if self.hot(row) {
@@ -624,7 +625,7 @@ impl App {
             let title = if meta.message.is_empty() { kind_name(meta.kind).to_owned() } else { meta.message.clone() };
             let title = self.fit(&title, row.width as f32 - self.s(110.) as f32, 13.5);
             self.put(&title, Rect { x: row.x + self.s(12.), y: row.y + self.s(4.), width: row.width - self.su(24.), height: self.su(24.) }, 13.5, p.text, if meta.kind == SnapshotKind::Manual { Face::Bold } else { Face::Normal }, Align::Left);
-            let sub = format!("{} · {} · {} words", jw::time::local(meta.time), jw::time::ago(meta.time, now), meta.words);
+            let sub = format!("{} · {} · {}", jw::time::local(meta.time), jw::time::ago(meta.time, now), count_words(meta.words as u64));
             self.put(&sub, Rect { x: row.x + self.s(12.), y: row.y + self.s(30.), width: row.width - self.su(24.), height: self.su(20.) }, 11.5, p.muted, Face::Normal, Align::Left);
             let badge = if marked { "marked".to_owned() } else { kind_name(meta.kind).to_owned() };
             let tint = match meta.kind {
@@ -642,7 +643,7 @@ impl App {
         let title = if meta.message.is_empty() { kind_name(meta.kind).to_owned() } else { meta.message.clone() };
         let title = self.fit(&title, detail.width as f32, 17.);
         self.put(&title, Rect { height: self.su(30.), ..detail }, 17., p.text, Face::Bold, Align::Left);
-        let mut info = format!("{} · {} · {} words in the manuscript · {} pages and chapters", jw::time::local(meta.time), kind_name(meta.kind), meta.words, meta.items);
+        let mut info = format!("{} · {} · {} in the manuscript · {}", jw::time::local(meta.time), kind_name(meta.kind), count_words(meta.words as u64), if meta.items == 1 { "1 page or chapter".to_owned() } else { format!("{} pages and chapters", meta.items) });
         if let Some(from) = meta.restored_from.as_deref().and_then(|id| self.project.as_ref().and_then(|s| s.history.get(id))) {
             info.push_str(&format!(" · restored from {}", jw::time::local(from.time)));
         }
@@ -683,9 +684,9 @@ impl App {
             let row = Rect { x: detail.x, y: list_top + self.s(22.) + (n - v.change_scroll) as i32 * item_height, width: detail.width, height: item_height as u32 - 4 };
             self.renderer.framed(row, self.su(6.), p.surface, p.border);
             let (label, tint) = match change.status {
-                diff::Status::Added => ("Added since", 0x6cc27a),
-                diff::Status::Removed => ("Deleted since", 0xe0706c),
-                diff::Status::Changed => ("Edited", p.accent),
+                diff::Status::Added => ("Added since", p.success_text()),
+                diff::Status::Removed => ("Deleted since", p.danger_text()),
+                diff::Status::Changed => ("Edited", p.accent_text()),
                 diff::Status::Unchanged => (if change.was.is_some() { "Renamed" } else { "Moved" }, p.muted),
             };
             let name = self.fit(&change.title, row.width as f32 * 0.4, 13.);
@@ -732,9 +733,9 @@ impl App {
             let name = self.fit(&name, row.width as f32 - self.s(20.) as f32, 13.);
             self.put(&name, Rect { x: row.x + self.s(10.), y: row.y + self.s(3.), width: row.width - self.su(20.), height: self.su(24.) }, 13., p.text, Face::Normal, Align::Left);
             let (label, tint) = match item.status {
-                diff::Status::Added => ("Added", 0x6cc27a),
-                diff::Status::Removed => ("Deleted", 0xe0706c),
-                diff::Status::Changed => ("Edited", p.accent),
+                diff::Status::Added => ("Added", p.success_text()),
+                diff::Status::Removed => ("Deleted", p.danger_text()),
+                diff::Status::Changed => ("Edited", p.accent_text()),
                 diff::Status::Unchanged => (if item.was.is_some() { "Renamed" } else { "Moved" }, p.muted),
             };
             self.put(&format!("{label} · {} → {} words", item.words_a, item.words_b), Rect { x: row.x + self.s(10.), y: row.y + self.s(24.), width: row.width - self.su(20.), height: self.su(20.) }, 11., tint, Face::Normal, Align::Left);
@@ -769,9 +770,9 @@ impl App {
                     break;
                 }
                 let tint = match sign {
-                    '+' => 0x6cc27a,
-                    '-' => 0xe0706c,
-                    _ => p.accent,
+                    '+' => p.success_text(),
+                    '-' => p.danger_text(),
+                    _ => p.accent_text(),
                 };
                 self.put(&sign.to_string(), Rect { x: content.x, y, width: self.su(18.), height: self.su(22.) }, 13., tint, Face::Bold, Align::Left);
                 let used = self.paragraph(line, Rect { x: content.x + self.s(20.), y, width: content.width - self.su(20.), height: content.height }, p.text, content);

@@ -208,9 +208,24 @@ pub fn resolve(
     })
 }
 
+/// A stored shortcut as shown to people: Cmd for Ctrl on a Mac, arrows as arrows.
+pub fn display_shortcut(raw: &str) -> String {
+    raw.replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })
+        .replace("ArrowUp", "↑")
+        .replace("ArrowDown", "↓")
+        .replace("ArrowLeft", "←")
+        .replace("ArrowRight", "→")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shortcuts_are_shown_with_arrows() {
+        assert_eq!(display_shortcut("Alt+ArrowUp"), "Alt+↑");
+        assert_eq!(display_shortcut("Ctrl+Shift+ArrowRight"), format!("{}+Shift+→", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }));
+        assert_eq!(display_shortcut("F11"), "F11");
+    }
     #[test]
     fn every_default_shortcut_round_trips_and_can_be_disabled() {
         for command in COMMANDS {

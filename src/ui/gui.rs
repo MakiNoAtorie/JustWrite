@@ -208,6 +208,23 @@ impl App {
         }
         String::new()
     }
+    /// Like `fit`, but keeps the end of the text too: "Chapter 3" and "Chapter 4" stay
+    /// different as "Chap…r 3" and "Chap…r 4" where an end cut would show "Chap…" twice.
+    pub(super) fn fit_middle(&mut self, text: &str, width: f32, size: f32) -> String {
+        let scaled = size * self.scale;
+        if self.measure(text, scaled, Face::Normal) <= width {
+            return text.into();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        for keep in (1..chars.len()).rev() {
+            let head = (keep * 3).div_ceil(5);
+            let candidate: String = chars[..head].iter().chain(['…'].iter()).chain(chars[chars.len() - (keep - head)..].iter()).collect();
+            if self.measure(&candidate, scaled, Face::Normal) <= width {
+                return candidate;
+            }
+        }
+        self.fit(text, width, size)
+    }
     pub(super) fn button(&mut self, text: &str, rect: Rect, hit: Hit, look: Look, p: Palette) {
         self.button_face(text, rect, hit, look, Face::Normal, Align::Center, p);
     }
@@ -319,12 +336,13 @@ impl App {
         }
     }
     pub(super) fn shortcut_of(&self, command: &commands::CommandInfo) -> String {
-        self.settings
-            .keymap
-            .get(command.key)
-            .map(String::as_str)
-            .unwrap_or(command.shortcut)
-            .replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })
+        commands::display_shortcut(
+            self.settings
+                .keymap
+                .get(command.key)
+                .map(String::as_str)
+                .unwrap_or(command.shortcut),
+        )
     }
     /// Status-bar hint for whatever button the pointer is over.
     pub(super) fn tip_at_mouse(&self) -> Option<(Rect, String)> {
@@ -535,7 +553,7 @@ impl App {
     pub(super) fn tab_geometry(&self, pane: &Pane, rect: Rect) -> (usize, usize, u32) {
         let usable = rect.width.saturating_sub(self.su(34.));
         let count = pane.tabs.len().max(1) as u32;
-        let width = (usable / count).clamp(self.su(100.), self.su(190.));
+        let width = (usable / count).clamp(self.su(128.), self.su(200.));
         let fit = (usable / width).max(1) as usize;
         let first = if pane.tabs.len() <= fit {
             0
@@ -570,8 +588,8 @@ impl App {
             } else if hover {
                 self.renderer.fill(tab_rect, mix(p.surface, p.background, 0.5));
             }
-            let room = width.saturating_sub(self.su(52.)) as f32;
-            let text = self.fit(&name, room, 12.5);
+            let room = width.saturating_sub(self.su(46.)) as f32;
+            let text = self.fit_middle(&name, room, 12.5);
             self.put(
                 &text,
                 Rect { x: tab_rect.x + self.s(12.), width: room as u32, ..tab_rect },
@@ -993,7 +1011,7 @@ impl App {
         let goal = state.core.manifest.settings.goals.project_words as u64;
         let foot = Rect { y: rect.y + rect.height as i32 - footer as i32, height: footer, ..rect };
         self.renderer.fill(Rect { height: 1, ..foot }, p.border);
-        let label = if goal > 0 { format!("{} of {} words", thousands(total), thousands(goal)) } else { format!("{} words", thousands(total)) };
+        let label = if goal > 0 { format!("{} of {} words", thousands(total), thousands(goal)) } else { count_words(total) };
         self.put(&label, Rect { x: foot.x + self.s(14.), y: foot.y + self.s(2.), width: foot.width - self.su(28.), height: self.su(22.) }, 11.5, p.muted, Face::Normal, Align::Left);
         if goal > 0 {
             let bar = Rect { x: foot.x + self.s(14.), y: foot.y + foot.height as i32 - self.s(10.), width: foot.width - self.su(28.), height: self.su(4.) };
@@ -1200,7 +1218,7 @@ impl App {
             let goals = &state.core.manifest.settings.goals;
             let chapter = self.active_item().and_then(|id| state.core.manifest.tree.find(&id).map(|n| n.words()));
             if let Some(words) = chapter {
-                stats.push_str(&format!("This chapter {} words", thousands(words as u64)));
+                stats.push_str(&format!("This chapter {}", count_words(words as u64)));
             }
             let written = format!("Session +{}", thousands(state.core.session_words()));
             if !stats.is_empty() {
@@ -1315,7 +1333,7 @@ impl App {
         let inner = Rect { x: rect.x + self.s(12.), width: rect.width.saturating_sub(self.su(24.)), ..rect };
         if text.is_empty() && !(focused && caret.is_some()) {
             if focused {
-                self.put("│", inner, 15., p.accent, Face::Normal, Align::Left);
+                self.put("│", inner, 15., p.accent_text(), Face::Normal, Align::Left);
             }
             let hint = Rect { x: inner.x + if focused { self.s(6.) } else { 0 }, ..inner };
             self.put(placeholder, hint, 15., p.muted, Face::Normal, Align::Left);
@@ -1594,7 +1612,7 @@ impl App {
             y += self.s(46.);
         }
         if kind_is_shortcut(&kind) {
-            let shown = if query.is_empty() { "No shortcut".to_owned() } else { query.replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }) };
+            let shown = if query.is_empty() { "No shortcut".to_owned() } else { commands::display_shortcut(&query) };
             let cap = Rect { x: inner.x, y, width: inner.width, height: self.su(48.) };
             self.renderer.framed(cap, self.su(7.), p.background, p.accent_text());
             self.put(&shown, cap, 18., p.text, Face::Bold, Align::Center);
@@ -1660,6 +1678,10 @@ fn face_attrs(font: &str, tint: u32, face: Face) -> Attrs<'_> {
     }
 }
 
+/// `1 word`, `12,345 words`
+pub(super) fn count_words(n: u64) -> String {
+    format!("{} word{}", thousands(n), if n == 1 { "" } else { "s" })
+}
 /// `12,345`
 pub(super) fn thousands(n: u64) -> String {
     let digits = n.to_string();

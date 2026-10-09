@@ -75,6 +75,10 @@ impl Palette {
     pub fn danger_text(&self) -> u32 {
         if self.light { 0xb8433f } else { 0xe8837f }
     }
+    /// Positive text (something added), at least 4.5:1 in both themes.
+    pub fn success_text(&self) -> u32 {
+        if self.light { 0x2f7a3a } else { 0x6cc27a }
+    }
     /// Warning text (an orphaned comment, a safety snapshot), at least 4.5:1 in both themes.
     pub fn warning_text(&self) -> u32 {
         if self.light { 0x9a5a1f } else { 0xe0a070 }
@@ -159,7 +163,7 @@ mod tests {
         for light in [false, true] {
             let p = Palette::new(light, ACCENTS[0]);
             for ground in [p.background, p.surface, p.raised] {
-                for (name, text) in [("danger", p.danger_text()), ("warning", p.warning_text())] {
+                for (name, text) in [("danger", p.danger_text()), ("warning", p.warning_text()), ("success", p.success_text())] {
                     assert!(
                         contrast(text, ground) >= MIN_TEXT_CONTRAST,
                         "{name} text on {ground:06x} (light: {light}) is {:.2}",
