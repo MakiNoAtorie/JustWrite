@@ -327,6 +327,10 @@ impl App {
             | Command::Paste
             | Command::Bold
             | Command::Italic
+            | Command::AlignLeft
+            | Command::AlignCenter
+            | Command::AlignRight
+            | Command::AlignJustify
             | Command::ToggleNote
             | Command::NoteParagraph
             | Command::Find
@@ -662,9 +666,14 @@ impl App {
         let mut x = rect.x + self.s(14.);
         let height = rect.height.saturating_sub(self.su(10.));
         let y = rect.y + self.s(5.);
-        let tools: [(&str, Face, Option<Hit>); 11] = [
+        let tools: [(&str, Face, Option<Hit>); 16] = [
             ("B", Face::Bold, Some(Hit::Command(Command::Bold))),
             ("I", Face::Italic, Some(Hit::Command(Command::Italic))),
+            ("", Face::Normal, None),
+            ("Left", Face::Normal, Some(Hit::Command(Command::AlignLeft))),
+            ("Center", Face::Normal, Some(Hit::Command(Command::AlignCenter))),
+            ("Right", Face::Normal, Some(Hit::Command(Command::AlignRight))),
+            ("Justify", Face::Normal, Some(Hit::Command(Command::AlignJustify))),
             ("", Face::Normal, None),
             ("Raw", Face::Normal, Some(Hit::Command(Command::RawView))),
             ("Preview", Face::Normal, Some(Hit::Command(Command::PreviewView))),
@@ -692,6 +701,10 @@ impl App {
                 Hit::Command(Command::Bold) => format.bold,
                 Hit::Command(Command::Italic) => format.italic,
                 Hit::Command(Command::ToggleNote) => format.note,
+                Hit::Command(Command::AlignLeft) => format.align == Some(prose::Align::Left),
+                Hit::Command(Command::AlignCenter) => format.align == Some(prose::Align::Center),
+                Hit::Command(Command::AlignRight) => format.align == Some(prose::Align::Right),
+                Hit::Command(Command::AlignJustify) => format.align == Some(prose::Align::Justify),
                 Hit::Command(Command::RawView) => !self.settings.preview,
                 Hit::Command(Command::PreviewView) => self.settings.preview,
                 _ => false,
@@ -728,7 +741,8 @@ impl App {
                     let end = if line + 1 < t.document.text.len_lines() { t.document.text.line_to_char(line + 1) } else { t.document.text.len_chars() };
                     let to = end.min(t.document.cursor + 1000);
                     let text = t.document.text.slice(from..to).to_string();
-                    prose::format_at(&text, t.document.cursor - from, &marker)
+                    let head: String = t.document.text.slice(start..).chars().take(4).collect();
+                    prose::Format { align: prose::align_tag(&head).map(|t| t.0), ..prose::format_at(&text, t.document.cursor - from, &marker) }
                 })
                 .unwrap_or_default();
             self.paint_toolbar(Rect { y: rect.y + header as i32, height: toolbar, ..rect }, format, p);

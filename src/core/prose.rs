@@ -31,6 +31,44 @@ pub fn is_scene_break(line: &str) -> bool {
     }
 }
 
+// ---- alignment ------------------------------------------------------------------------------
+
+/// Paragraph alignment, set by a tag at the start of the line: `::<` left, `::|` centre, `::>`
+/// right, `::=` justified. A paragraph without a tag follows the layout's default.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+    Justify,
+}
+impl Align {
+    pub const ALL: [Align; 4] = [Align::Left, Align::Center, Align::Right, Align::Justify];
+    /// CSS and Typst name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Align::Left => "left",
+            Align::Center => "center",
+            Align::Right => "right",
+            Align::Justify => "justify",
+        }
+    }
+    pub fn tag(self) -> &'static str {
+        match self {
+            Align::Left => "::<",
+            Align::Center => "::|",
+            Align::Right => "::>",
+            Align::Justify => "::=",
+        }
+    }
+}
+/// The alignment tag that starts `line`, and how many bytes it takes with the space after it.
+pub fn align_tag(line: &str) -> Option<(Align, usize)> {
+    let align = Align::ALL.into_iter().find(|a| line.starts_with(a.tag()))?;
+    let len = align.tag().len();
+    Some((align, len + usize::from(line[len..].starts_with(' '))))
+}
+
 // ---- emphasis -------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -243,6 +281,8 @@ pub struct Presentation {
     pub center: bool,
     /// Every character of the chunk is a hidden note: it takes no room.
     pub hidden: bool,
+    /// Alignment set by a tag on the chunk's first line.
+    pub align: Option<Align>,
     pub start: usize,
     pub end: usize,
 }
@@ -279,6 +319,8 @@ pub struct Initial {
     pub in_block: bool,
     /// The chunk continues a line note begun in an earlier chunk of the same line.
     pub in_line_note: bool,
+    /// The line this chunk continues began with an alignment tag.
+    pub align: Option<Align>,
 }
 
 /// Presents a bounded chunk of display-form text. `cursor_line` is the index (within `source`)
@@ -291,6 +333,8 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         Marker,
         Escape,
         Ending,
+        /// An alignment tag: hidden except on the line being edited.
+        Tag,
     }
     let mut out = Presentation { start, end: start + source.chars().count(), ..Default::default() };
     let mut char_offset = start;
@@ -317,6 +361,13 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
             });
         }
         class[body_end..].fill(Class::Ending);
+        let tag = align_tag(line).filter(|_| !started_in_block && class[0] == Class::Prose);
+        if let Some((_, len)) = tag {
+            class[..len].fill(Class::Tag);
+        }
+        if line_i == 0 {
+            out.align = tag.map(|t| t.0).or(initial.align);
+        }
         let block_marker_line = scan
             .segs
             .iter()
@@ -425,6 +476,10 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
                     visible = if block_marker_line { !hide_notes_here } else { raw };
                 }
                 Class::Escape => {
+                    style.dim = true;
+                    visible = raw;
+                }
+                Class::Tag => {
                     style.dim = true;
                     visible = raw;
                 }
@@ -580,6 +635,8 @@ pub struct Format {
     pub bold: bool,
     pub italic: bool,
     pub note: bool,
+    /// Alignment tag on the cursor's line; filled in by the caller, not by `format_at`.
+    pub align: Option<Align>,
 }
 /// `line` is the cursor's line (possibly a window of a very long one) and `col` the cursor column
 /// in it, in characters.
@@ -677,6 +734,24 @@ mod tests {
     }
 
     #[test]
+    fn align_tags_are_read_and_hidden_off_the_cursor_line() {
+        assert_eq!(align_tag("::| Dear Sir"), Some((Align::Center, 4)));
+        assert_eq!(align_tag("::>"), Some((Align::Right, 3)));
+        assert_eq!(align_tag("plain ::| text"), None);
+        let marker = Marker::default();
+        let hidden = present("::| Dear *Sir*
+", 0, None, Initial::default(), options(&marker));
+        assert_eq!((hidden.text.as_str(), hidden.align), ("Dear Sir
+", Some(Align::Center)));
+        let shown = present("::| Dear Sir
+", 0, Some(0), Initial::default(), options(&marker));
+        assert_eq!(shown.text, "::| Dear Sir
+");
+        let continued = Initial { align: Some(Align::Right), ..Initial::default() };
+        assert_eq!(present("rest of it", 0, None, continued, options(&marker)).align, Some(Align::Right));
+    }
+
+    #[test]
     fn markers_show_only_on_the_emphasis_holding_the_caret() {
         let marker = Marker::default();
         let at = |caret: usize| present("a *b* **c** d\n", 0, Some(0), Initial::default(), Options { caret: Some(caret), ..options(&marker) }).text;
@@ -721,9 +796,9 @@ mod tests {
         // A block note line keeps its marker visible as a fence.
         let fence = present("$$$\n", 0, None, Initial::default(), options(&marker));
         assert_eq!(fence.text, "$$$\n");
-        let inside = present("inside\n", 0, None, Initial { in_block: true, in_line_note: false }, options(&marker));
+        let inside = present("inside\n", 0, None, Initial { in_block: true, ..Initial::default() }, options(&marker));
         assert!(inside.spans.iter().filter(|s| inside.text[s.bytes.clone()].contains("inside")).all(|s| s.style.note));
-        let continued = present("rest of a long note", 0, None, Initial { in_block: false, in_line_note: true }, options(&marker));
+        let continued = present("rest of a long note", 0, None, Initial { in_line_note: true, ..Initial::default() }, options(&marker));
         assert!(continued.spans.iter().all(|s| s.style.note || continued.text[s.bytes.clone()].trim().is_empty()));
         // Escaped marker: literal text, backslash concealed.
         let literal = present("cost \\$$ five\n", 0, None, Initial::default(), options(&marker));
@@ -753,7 +828,7 @@ mod tests {
         assert!(show("prose $$ trailing note\n", None).center == false);
         assert!(!show("plain prose\n", None).center);
         // Lines inside a block note.
-        let inside = present("a block line\n", 0, None, Initial { in_block: true, in_line_note: false }, options(&marker));
+        let inside = present("a block line\n", 0, None, Initial { in_block: true, ..Initial::default() }, options(&marker));
         assert!(inside.center);
         // A hidden note takes no room, centred or not.
         let hidden = present("$$ note\n", 0, None, Initial::default(), Options { hide_notes: true, ..options(&marker) });

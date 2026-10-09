@@ -377,9 +377,15 @@ fn chapter_page(chapter: &Chapter, preset: &Preset, language: Language) -> (Stri
                 body.push_str(&format!("<p class=\"scene\">{}</p>\n", esc(&sanitize_break(&preset.scene_break))));
                 after_break = true;
             }
-            Block::Paragraph(inlines) => {
+            Block::Paragraph(inlines, align) => {
+                use crate::core::prose::Align as A;
                 let class = if after_break && preset.flush_after_break { " class=\"first\"" } else { "" };
-                body.push_str(&format!("<p{class}>{}</p>\n", inline_html(inlines)));
+                let style = match align {
+                    Some(a @ (A::Center | A::Right)) => format!(" style=\"text-align:{};text-indent:0\"", a.name()),
+                    Some(a) => format!(" style=\"text-align:{}\"", a.name()),
+                    None => String::new(),
+                };
+                body.push_str(&format!("<p{class}{style}>{}</p>\n", inline_html(inlines)));
                 after_break = false;
             }
         }

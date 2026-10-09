@@ -145,6 +145,11 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
         .metadata(usize::from(style.misspelled))
         .metrics(Metrics::new(size, size * settings.line_height))
 }
+/// The alignment tag the line starting at `line_start` begins with.
+fn line_align(doc: &Document, line_start: usize) -> Option<prose::Align> {
+    let head: String = doc.text.slice(line_start..).chars().take(4).collect();
+    prose::align_tag(&head).map(|t| t.0)
+}
 fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
     let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * settings.line_height));
     buffer.set_size(Some(width), None);
@@ -160,9 +165,18 @@ fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, settings
         Shaping::Advanced,
         None,
     );
-    if preview.center || justify {
+    let align = match preview.align {
+        Some(prose::Align::Left) => Some(Align::Left),
+        Some(prose::Align::Center) => Some(Align::Center),
+        Some(prose::Align::Right) => Some(Align::Right),
+        Some(prose::Align::Justify) => Some(Align::Justified),
+        None if preview.center => Some(Align::Center),
+        None if justify => Some(Align::Justified),
+        None => None,
+    };
+    if align.is_some() {
         for line in &mut buffer.lines {
-            line.set_align(Some(if preview.center { Align::Center } else { Align::Justified }));
+            line.set_align(align);
         }
     }
     buffer.shape_until_scroll(fonts, false);
@@ -345,6 +359,7 @@ impl EditorView {
         let initial = Initial {
             in_block: blocks.in_block(line),
             in_line_note: start > line_start && self.line_note_before(doc, line_start, start),
+            align: if start > line_start { line_align(doc, line_start) } else { None },
         };
         // The preview shows the text as exported, which has no notes, unless the setting keeps them.
         let hide = settings.hide_notes || (settings.preview && !settings.preview_notes);
@@ -782,7 +797,7 @@ mod tests {
         let settings = Settings::default();
         let marker = Marker::default();
         let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None };
-        let whole = prose::present(&text, 0, Some(0), Initial { in_block: false, in_line_note: false }, options);
+        let whole = prose::present(&text, 0, Some(0), Initial::default(), options);
         let expected: Vec<usize> = FONTS.with(|fonts| {
             shape(&whole, Wrap::WordOrGlyph, 600., false, &settings, &mut fonts.borrow_mut())
                 .layout_runs()

@@ -527,10 +527,18 @@ impl Writer<'_> {
                     self.paragraph("SceneBreak", "", &text_run(&preset.scene_break, ""));
                     self.after_break = true;
                 }
-                Block::Paragraph(inlines) => {
+                Block::Paragraph(inlines, align) => {
+                    use crate::core::prose::Align as A;
                     let style = if self.after_break && preset.flush_after_break { "BodyFlush" } else { "Body" };
                     let content = self.inlines(inlines);
-                    self.paragraph(style, "", &content);
+                    let ppr = match align {
+                        Some(A::Center) => "<w:ind w:firstLine=\"0\"/><w:jc w:val=\"center\"/>",
+                        Some(A::Right) => "<w:ind w:firstLine=\"0\"/><w:jc w:val=\"right\"/>",
+                        Some(A::Left) => "<w:jc w:val=\"left\"/>",
+                        Some(A::Justify) => "<w:jc w:val=\"both\"/>",
+                        None => "",
+                    };
+                    self.paragraph(style, ppr, &content);
                     self.after_break = false;
                 }
             }

@@ -1811,6 +1811,19 @@ impl App {
                     self.edited(id);
                 }
             }
+            Command::AlignLeft | Command::AlignCenter | Command::AlignRight | Command::AlignJustify => {
+                if let Some(id) = editable {
+                    let align = match command {
+                        Command::AlignLeft => prose::Align::Left,
+                        Command::AlignCenter => prose::Align::Center,
+                        Command::AlignRight => prose::Align::Right,
+                        _ => prose::Align::Justify,
+                    };
+                    let doc = &mut self.tabs.get_mut(&id).unwrap().document;
+                    doc.align_lines(align);
+                    self.edited(id);
+                }
+            }
             Command::ToggleNote | Command::NoteParagraph => {
                 if let Some(id) = editable {
                     let marker = self.marker();
