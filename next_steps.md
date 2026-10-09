@@ -12,9 +12,9 @@ None of this can be driven headlessly. Do these first; each is a short look.
 * **Reply to comment box.** Open the comments panel and press Reply. Click inside earlier text to place the
   caret; move it with the arrow keys (Home and End go to the start and end of the whole text). The wrapping of the lines must not change as the
   caret moves. Type more than four lines: the box should keep the caret in view.
-* **Parts.** New part: it should appear with "Chapter N" inside, open that chapter, scroll the tree to
-  it, and show the part name in the footer ("Part 1 · This chapter ...") and in the window title.
-  Create a second part, move it with Alt+Up and Alt+Down, drag a chapter into it, fold it.
+* **Parts are gone.** There is no New part command or button. Open an old project that had parts: the
+  chapters should be there in the same order with no part rows. Move chapters with Alt+Up/Alt+Down and
+  by dragging; the tree should scroll to the moved chapter.
 * **New note.** "+ New" ▸ New note (Ctrl+Alt+N) asks for a name; empty uses the "Note 1" placeholder.
 * **Raw and Preview buttons** on the formatting bar (also View menu and the palette). Preview hides
   markers on every line, indents paragraphs like the default export preset, keeps the first paragraph
@@ -31,9 +31,13 @@ None of this can be driven headlessly. Do these first; each is a short look.
 
 ## Decisions taken in the feedback pass (change them if you disagree)
 
-* **A new part starts with its first chapter.** An empty part had nothing to open or write in, which
-  is what made it look dead. Delete the chapter to get an empty part back.
-* **Only notes ask for a name on creation.** Chapters and parts stay numbered ("Chapter 4", "Part 2")
+* **Parts were removed (maintainer's call, 2026-10-09).** A part was a folder of chapters with no text
+  of its own, which gave a writer nothing. There is no way to create one; imports drop part headings;
+  opening a project flattens existing parts (and note groups) into their chapters, in order, and the
+  next save writes it that way. `Node::Part`, the export part headings and the tree's fold/drop code
+  are still in the source for old files but nothing reaches them; delete them if you want the code
+  gone too.
+* **Only notes ask for a name on creation.** Chapters stay numbered ("Chapter 4")
   so starting a chapter is still one keystroke. Say so if they should ask too.
 * **Comment cards: keyboard through commands, not panel focus.** The panel itself still has no
   arrow-key focus; instead every card action is a command on the comment at the caret. Panel focus
@@ -72,12 +76,10 @@ None of this can be driven headlessly. Do these first; each is a short look.
   draws the caret as a bar over it, scrolls to keep the caret in view, and a click places the caret
   (`paint_area`, `area_buffer`, `area_cursor`, `area_char`). Affects every multi-line box (book
   details, comments). Test: `area_cursor_and_char_offset_round_trip`.
-* **Parts.** Found by reading, not by seeing: the tree never scrolled to a new or moved item (a new
-  part is appended at the end of the manuscript, often below the visible rows), an empty part could not
-  be written in, a moved item inside a folded part stayed hidden, and nothing showed which part a
-  chapter belongs to. Now: the tree scrolls to the selected item on create, move and open
-  (`tree_reveal`), a new part comes with a chapter, opening a chapter unfolds its part, moving past the
-  first or last place says so, and the part shows in the footer and window title (`part_of`).
+* **Tree scrolling.** The tree never scrolled to a new or moved item, so a new chapter at the end could
+  sit below the visible rows. It now scrolls to the selected item on create, move and open
+  (`tree_reveal`); moving past the first or last place says so. (The part-specific work done earlier
+  the same day was removed again; see the decision above.)
 * **"Page" is now "note".** Menu, palette, tree prompts and messages say note; the default name is
   "Note N" (first free number); creation opens a "New note" dialog with that name as placeholder.
   Stored data is unchanged (the manifest node type is still `Page`; command key `new_page`).
@@ -277,7 +279,7 @@ Manual checks in the real window (open `bench_data/bench_1m.jw`):
 * [ ] Open a very long chapter: import a whole 1M-word `.txt` as one chapter (File > Import) to try the "mega" case for real.
 * [ ] Open the comments panel at 1812 comments: scrolling, filtering by tag and status, clicking a comment to jump to it, adding and resolving.
 * [ ] Spell-check underlines while typing: appear promptly, no stutter, on real prose (not the generated 30-word vocabulary).
-* [ ] The project tree with 329 chapters in 28 parts: scrolling, dragging a chapter to reorder, collapsing parts.
+* [ ] The project tree with 329 chapters (the generated files still carry 28 parts; they are flattened on open): scrolling, dragging a chapter to reorder.
 * [ ] Find and Replace all in a 1M-word project, from the UI.
 * [ ] Export DOCX, EPUB and PDF of the whole 1M-word book from the UI. PDF (typst) was never measured and is likely the slowest; check the progress feedback and that the window stays responsive while it runs.
 * [ ] History panel: first snapshot, restoring one, comparing two, with a 1M-word project.

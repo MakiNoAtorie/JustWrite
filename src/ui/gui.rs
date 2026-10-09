@@ -324,7 +324,6 @@ impl App {
             | Command::CloseTab => tab.is_some() && project,
             Command::Rename | Command::Delete | Command::MoveUp | Command::MoveDown => project && self.selected_item().is_some(),
             Command::NewChapter
-            | Command::NewPart
             | Command::NewPage
             | Command::NextComment
             | Command::PreviousComment
@@ -1262,9 +1261,6 @@ impl App {
             let goals = &state.core.manifest.settings.goals;
             let chapter = self.active_item().and_then(|id| state.core.manifest.tree.find(&id).map(|n| n.words()));
             if let Some(words) = chapter {
-                if let Some(part) = self.active_item().and_then(|id| self.part_of(&id)) {
-                    stats.push_str(&format!("{part}  ·  "));
-                }
                 stats.push_str(&format!("This chapter {}", count_words(words as u64)));
             }
             let written = format!("Session +{}", thousands(state.core.session_words()));

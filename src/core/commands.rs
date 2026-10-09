@@ -13,7 +13,6 @@ pub enum Command {
     Quit,
     // Chapters and notes
     NewChapter,
-    NewPart,
     NewPage,
     Rename,
     Delete,
@@ -98,7 +97,6 @@ commands![
     (Command::CloseProject, "close_project", "Close project", ""),
     (Command::Quit, "quit", "Exit", "Alt+F4"),
     (Command::NewChapter, "new_chapter", "New chapter", "Ctrl+N"),
-    (Command::NewPart, "new_part", "New part or act", ""),
     (Command::NewPage, "new_page", "New note", "Ctrl+Alt+N"),
     (Command::Rename, "rename", "Rename…", "F2"),
     (Command::Delete, "delete", "Delete…", ""),

@@ -235,6 +235,20 @@ impl Tree {
         self.remove(section, from);
         self.insert(section, &parent, index, node)
     }
+    /// Replaces every part (in both sections) by its chapters, in place.
+    pub fn flatten_parts(&mut self) {
+        for list in [&mut self.manuscript, &mut self.notes] {
+            if list.iter().any(Node::is_part) {
+                *list = std::mem::take(list)
+                    .into_iter()
+                    .flat_map(|node| match node {
+                        Node::Part { children, .. } => children,
+                        other => vec![other],
+                    })
+                    .collect();
+            }
+        }
+    }
     /// Chapters and pages of a section in reading order, with the part each belongs to.
     pub fn leaves(&self, section: Section) -> Vec<(&Node, Option<&Node>)> {
         let mut out = Vec::new();
@@ -370,7 +384,9 @@ impl Manifest {
         }
     }
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let manifest: Self = serde_json::from_slice(bytes).map_err(|e| format!("Unreadable manifest.json: {e}"))?;
+        let mut manifest: Self = serde_json::from_slice(bytes).map_err(|e| format!("Unreadable manifest.json: {e}"))?;
+        // Parts are gone from the app; projects that have them keep their chapters in order.
+        manifest.tree.flatten_parts();
         if manifest.format != FORMAT {
             return Err("This is not a JustWrite project".into());
         }
@@ -467,7 +483,12 @@ mod tests {
         let mut json: serde_json::Value = serde_json::from_str(&m.to_json()).unwrap();
         json["future_feature"] = serde_json::json!({"a": 1});
         let back = Manifest::parse(json.to_string().as_bytes()).unwrap();
-        assert_eq!(back.tree, m.tree);
+        // Parts are flattened on reading: the chapters stay, in order.
+        let mut flat = m.tree.clone();
+        flat.flatten_parts();
+        assert_eq!(back.tree, flat);
+        assert!(!back.tree.manuscript.iter().any(Node::is_part));
+        assert_eq!(titles(&back.tree), ["Prologue", "One", "Two", "Epilogue"]);
         assert!(back.extra.contains_key("future_feature"));
         assert!(back.to_json().contains("future_feature"));
         assert_eq!(m.to_json().contains("\"format_version\": 1"), true);

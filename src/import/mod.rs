@@ -71,26 +71,19 @@ pub fn into_new_project(data: &Path, jw: &Path, imported: &split::Imported) -> R
     Ok(project)
 }
 
-/// Adds the imported chapters (and parts) at the end of an existing manuscript. Word comments
-/// become review comments.
+/// Adds the imported chapters at the end of an existing manuscript. Part headings are dropped:
+/// there are no parts. Word comments become review comments.
 pub fn append(project: &mut Project, imported: &split::Imported) -> Result<usize, String> {
     let mut comments = project.work.read(COMMENTS).map(|b| CommentSet::parse(&b)).unwrap_or_default();
     let mut count = 0;
-    let mut part_path: Option<Vec<usize>> = None;
     for item in &imported.items {
         match item {
-            split::Item::Part(title) => {
-                let at = project.manifest.tree.manuscript.len();
-                part_path = Some(project.add(Section::Manuscript, &[], at, Node::part(title))?);
-            }
+            split::Item::Part(_) => {}
             split::Item::Chapter(chapter) => {
                 let node = Node::chapter(&chapter.title);
                 let id = node.id().to_owned();
-                let (parent, at) = match &part_path {
-                    Some(p) => (p.clone(), project.manifest.tree.get(Section::Manuscript, p).map_or(0, |n| n.children().len())),
-                    None => (Vec::new(), project.manifest.tree.manuscript.len()),
-                };
-                project.add(Section::Manuscript, &parent, at, node)?;
+                let at = project.manifest.tree.manuscript.len();
+                project.add(Section::Manuscript, &[], at, node)?;
                 project.write_text(&id, &chapter.text).map_err(|e| e.to_string())?;
                 for c in &chapter.comments {
                     let _ = comments.add(&id, &chapter.text, c.range.clone(), &c.body, "", c.created);
@@ -122,10 +115,11 @@ mod tests {
         let jw = out.path().join("novel.jw");
         let mut project = into_new_project(data.path(), &jw, &imported).unwrap();
         let tree = &project.manifest.tree.manuscript;
-        assert_eq!(tree.len(), 2);
-        assert!(tree[0].is_part() && tree[0].title() == "Part One" && tree[0].children().len() == 2);
+        // The part headings are dropped; the chapters stay in order.
+        assert_eq!(tree.iter().map(|n| n.title()).collect::<Vec<_>>(), ["Dawn", "Noon", "Night"]);
+        assert!(tree.iter().all(|n| !n.is_part()));
         assert_eq!(project.manifest.title, "My Novel");
-        let dawn = tree[0].children()[0].id().to_owned();
+        let dawn = tree[0].id().to_owned();
         assert_eq!(project.read_text(&dawn).unwrap(), "It was *early*.\n");
         assert_eq!(project.manuscript_words(), 3 + 3 + 1);
         // Importing into an existing project appends.
@@ -134,12 +128,12 @@ mod tests {
         let raw = read(&more).unwrap();
         let imported = split::split(&raw, &split::Options { by: split::By::Pattern("^CHAPTER".into()), ..Default::default() }).unwrap();
         assert_eq!(append(&mut project, &imported).unwrap(), 1);
-        assert_eq!(project.manifest.tree.manuscript.len(), 3);
-        assert_eq!(project.manifest.tree.manuscript[2].title(), "CHAPTER 9");
+        assert_eq!(project.manifest.tree.manuscript.len(), 4);
+        assert_eq!(project.manifest.tree.manuscript[3].title(), "CHAPTER 9");
         project.close().unwrap();
         // It reopens from the file.
         let again = Project::open(data.path(), &jw, false).ok().unwrap();
-        assert_eq!(again.project.manifest.tree.manuscript.len(), 3);
+        assert_eq!(again.project.manifest.tree.manuscript.len(), 4);
         assert!(read(&out.path().join("missing.docx")).is_err());
         let _ = CommentSet::default();
     }

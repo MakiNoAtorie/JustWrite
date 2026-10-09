@@ -419,7 +419,6 @@ fn preset_fields(p: &Preset) -> Vec<Field> {
         Field::heading("Chapters"),
         Field::choice("chapter_heading", "Chapter titles", labels(&["None", "Number only", "Title only", "Number and title"]), position(&HEADINGS, p.chapter_heading)),
         Field::choice("number_style", "Chapter numbers", labels(&["1, 2, 3", "I, II, III", "One, Two, Three"]), position(&NUMBERS, p.number_style)),
-        Field::toggle("part_headings", "Part headings", p.part_headings),
         Field::text("scene_break", "Scene-break symbol", &p.scene_break).hint("For example #, * * * or ❦"),
         Field::heading("Page").when("format", PAGED),
         Field::choice("trim", "Page size", trims, trim).when("format", PAGED),
@@ -483,7 +482,6 @@ fn read_preset(form: &Form, base: &Preset) -> Preset {
     p.about_author = form.on("about_author");
     p.chapter_heading = HEADINGS[form.choice("chapter_heading").min(3)];
     p.number_style = NUMBERS[form.choice("number_style").min(2)];
-    p.part_headings = form.on("part_headings");
     p.scene_break = form.raw("scene_break").trim().to_owned();
     if p.scene_break.is_empty() {
         p.scene_break = "#".into();
@@ -987,7 +985,6 @@ impl App {
         fields.push(Field::heading("How to cut it into chapters"));
         fields.push(Field::choice("by", "Start a new chapter at", labels(&["Each heading", "Each paragraph matching a pattern", "Each page break", "Nowhere: one chapter"]), by));
         fields.push(Field::number("level", "Heading level for chapters", level as f32, 1., 6., 1., 0, "").when("by", &[0]));
-        fields.push(Field::toggle("parts", "Higher headings become parts", suggestion.parts).when("by", &[0]));
         fields.push(Field::text("pattern", "Pattern (regular expression)", &pattern).hint("For example ^(Chapter|CHAPTER) \\d+").when("by", &[1]));
         fields.push(Field::heading("Notes"));
         fields.push(Field::text("prefix", "Lines starting with this are notes", &suggestion.comment_prefix).hint("such as # or //"));
@@ -1554,7 +1551,7 @@ impl App {
             2 => split::By::PageBreaks,
             _ => split::By::Whole,
         };
-        let options = split::Options { by, parts: form.on("parts") && form.choice("by") == 0, comment_prefix: form.raw("prefix").trim().to_owned() };
+        let options = split::Options { by, parts: form.choice("by") == 0, comment_prefix: form.raw("prefix").trim().to_owned() };
         let into_new = form.choice("target") == 0;
         self.import_into_new = into_new;
         let proxy = self.proxy.clone();

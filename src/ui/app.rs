@@ -455,12 +455,8 @@ impl App {
     fn title(&self) {
         if let Some(window) = &self.window {
             let project = self.project.as_ref().map(|p| p.core.title().to_owned());
-            let part = self.active_item().and_then(|id| self.part_of(&id));
             let title = match (self.active_id().and_then(|id| self.tabs.get(&id)).filter(|t| t.path.is_some()), project) {
-                (Some(t), Some(project)) => {
-                    let part = part.map_or(String::new(), |p| format!("{p} · "));
-                    format!("{}{part}{} — {project} — {APP_NAME}", if t.document.dirty() { "● " } else { "" }, t.name())
-                }
+                (Some(t), Some(project)) => format!("{}{} — {project} — {APP_NAME}", if t.document.dirty() { "● " } else { "" }, t.name()),
                 (None, Some(project)) => format!("{project} — {APP_NAME}"),
                 _ => APP_NAME.into(),
             };
@@ -1638,7 +1634,6 @@ impl App {
                 }
             }
             Command::NewChapter => self.new_node("chapter", ""),
-            Command::NewPart => self.new_node("part", ""),
             Command::NewPage => self.new_note_form(),
             Command::Rename => match self.selected_item() {
                 Some(id) => {

@@ -269,11 +269,6 @@ impl App {
         let Some(file) = self.project.as_ref().and_then(|p| p.core.file_of(id)) else { return };
         if let Some(p) = &mut self.project {
             p.selected = Some(id.to_owned());
-            // A chapter inside a folded part would stay out of sight in the tree.
-            let tree = &p.core.manifest.tree;
-            if let Some(part) = [Section::Manuscript, Section::Notes].into_iter().find_map(|s| tree.leaves(s).into_iter().find(|(n, _)| n.id() == id).and_then(|(_, part)| part.map(|p| p.id().to_owned()))) {
-                p.collapsed.remove(&part);
-            }
         }
         self.tree_reveal = true;
         self.open_relative(PathBuf::from(file), 0);
@@ -312,75 +307,43 @@ impl App {
         }
     }
 
-    /// `title` names a new note; chapters and parts are numbered.
+    /// `title` names a new note; chapters are numbered.
     pub(super) fn new_node(&mut self, kind: &str, title: &str) {
         let Some(state) = &mut self.project else {
             self.status = "Open or create a project first.".into();
             return;
         };
         let tree = &state.core.manifest.tree;
-        let (section, parent, index, node) = match kind {
+        let (section, index, node) = match kind {
             "page" => {
                 let title = if title.trim().is_empty() { Self::next_note_title(tree) } else { title.trim().to_owned() };
-                (Section::Notes, Vec::new(), tree.notes.len(), Node::page(&title))
-            }
-            "part" => {
-                let n = tree.manuscript.iter().filter(|n| n.is_part()).count() + 1;
-                (Section::Manuscript, Vec::new(), tree.manuscript.len(), Node::part(&format!("Part {n}")))
+                (Section::Notes, tree.notes.len(), Node::page(&title))
             }
             _ => {
                 let count = tree.leaves(Section::Manuscript).len() + 1;
-                // After the selected chapter, or at the end of the selected part.
-                let place = state.selected.as_deref().and_then(|id| tree.locate(id)).filter(|(s, _)| *s == Section::Manuscript);
-                let (parent, index) = match place {
-                    Some((_, path)) => match tree.get(Section::Manuscript, &path) {
-                        Some(n) if n.is_part() => (path.clone(), n.children().len()),
-                        _ => (path[..path.len() - 1].to_vec(), path[path.len() - 1] + 1),
-                    },
-                    None => (Vec::new(), tree.manuscript.len()),
+                // After the selected chapter, or at the end.
+                let index = match state.selected.as_deref().and_then(|id| tree.locate(id)).filter(|(s, _)| *s == Section::Manuscript) {
+                    Some((_, path)) => path[path.len() - 1] + 1,
+                    None => tree.manuscript.len(),
                 };
-                (Section::Manuscript, parent, index, Node::chapter(&format!("Chapter {count}")))
+                (Section::Manuscript, index, Node::chapter(&format!("Chapter {count}")))
             }
         };
         let id = node.id().to_owned();
-        let is_part = node.is_part();
-        let label = node.title().to_owned();
-        match state.core.add(section, &parent, index, node) {
-            Ok(path) => {
-                let mut open = id.clone();
-                if is_part {
-                    // An empty part has nothing to write in, so it starts with its first chapter.
-                    let count = state.core.manifest.tree.leaves(Section::Manuscript).len() + 1;
-                    let chapter = Node::chapter(&format!("Chapter {count}"));
-                    let chapter_id = chapter.id().to_owned();
-                    if state.core.add(Section::Manuscript, &path, 0, chapter).is_ok() {
-                        self.status = format!("Added {label} with Chapter {count}.");
-                        open = chapter_id;
-                    }
-                }
-                state.selected = Some(open.clone());
-                state.collapsed.remove(&id);
+        match state.core.add(section, &[], index, node) {
+            Ok(_) => {
+                state.selected = Some(id.clone());
                 state.changed = true;
-                self.tree_reveal = true;
-                self.open_item(&open);
+                self.open_item(&id);
                 self.dirty_session();
             }
             Err(error) => self.status = error,
         }
         self.redraw();
-    }
-    /// "Note 1", "Note 2", …: the first number no note in the tree already uses.
+    }    /// "Note 1", "Note 2", …: the first number no note in the tree already uses.
     pub(super) fn next_note_title(tree: &manifest::Tree) -> String {
         let used: Vec<String> = tree.leaves(Section::Notes).iter().map(|(n, _)| n.title().to_owned()).collect();
         (tree.leaves(Section::Notes).len() + 1..).map(|n| format!("Note {n}")).find(|t| !used.contains(t)).unwrap()
-    }
-    /// The title of the part the chapter `id` sits in, if any.
-    pub(super) fn part_of(&self, id: &str) -> Option<String> {
-        let tree = &self.project.as_ref()?.core.manifest.tree;
-        [Section::Manuscript, Section::Notes]
-            .into_iter()
-            .find_map(|s| tree.leaves(s).into_iter().find(|(n, _)| n.id() == id))
-            .and_then(|(_, part)| part.map(|p| p.title().to_owned()))
     }
     pub(super) fn rename_node(&mut self, id: &str, title: &str) {
         let Some(state) = &mut self.project else { return };
