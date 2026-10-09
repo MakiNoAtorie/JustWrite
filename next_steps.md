@@ -176,3 +176,41 @@ Read from `src/ui/app.rs` (`save`, `UserEvent::Saved`) and `src/ui/project.rs` (
 
 **Fix applied (2026-10-09):** autosave no longer runs `sync_marks_to_project`. `autosave()` in `src/ui/app.rs` only sets `Tab::marks_stale` and starts the background write (`save()` is now `sync_marks_to_project` + `write_tab`; explicit saves still sync). The marks are written back at the next flush: `flush_tabs` (also covers tabs that are clean but stale), `close_tab`, `shutdown_project`, and the repack timer in `project_tick` (`sync_stale_marks`). Safety: comment anchors re-find themselves from their quote and context when a chapter is opened (`reanchor_item`), so a stale `comments.json` after a crash is repaired, not lost. All 154 unit tests pass. NOT checked in the real window (no display here): worth a manual check on the dev machine that, after writing in a chapter that has comments, closing and reopening the project (and a snapshot restore) puts the comment highlights in the right place.
 The benchmark row is now `comment sync at flush or repack, interface thread` (limit 100 ms, rare event). It models the old function; it does not run the app, so it cannot prove the autosave path itself is clean. That is shown by the code: autosave only flips a flag.
+
+### Remaining tests (to run locally, with a real display; for the maintainer, Claude or Codex)
+
+Everything above ran headless in a cloud container: real code, no window. These are the checks that need a real machine. Tick them off here as they are done.
+
+Setup on the dev machine:
+1. `python3 tools/gen_bench_jw.py` (makes `bench_data/*.jw`; add `--sizes` for other sizes).
+2. `cargo run --release --bin large-file-check` (about 3 to 5 minutes; use `-- --quiet` for failures only, `-- --session-only` for the writing session only). Read the CSV: `P` = pass, `F` = over limit. Compare with the tables in steps 3 and 4.
+3. `cargo run --release --bin performance-check` (the older gate; it also rewrites `performance-results.json`, so only commit that if the numbers are meant to be the new baseline).
+
+Re-run and re-judge on the dev machine:
+* [ ] Re-run `large-file-check` and note which of the 3 container failures survive. Expected to disappear: `keystroke at middle 2560x1440` and the worst-of-3000 spikes. If `keystroke at middle 2560x1440` still fails, give it its own limit (about 12 ms) or investigate.
+* [ ] Re-tune the limits at the top of `src/bin/large-file-check.rs` and `src/bin/large_file_check/session.rs` to real numbers (they are first estimates, one set for all sizes).
+* [ ] Search: 156 ms of 250 at 1M words in this container. Check how the Find panel really calls `workspace::find` (per keystroke? per chapter? limit?) and measure that exact path.
+
+Manual checks in the real window (open `bench_data/bench_1m.jw`):
+* [ ] Open time: from double-click or File > Open to a usable window. Feel for a pause; time it with a stopwatch if it seems long.
+* [ ] Type for a minute in a chapter that has comments, in a 1M-word project. Watch for stutter, especially right after pausing about a second (the autosave moment).
+* [ ] The autosave fix (`5e0bc1c`): write in a chapter that has comments, then close and reopen the project. Comment highlights must be in the right place. Repeat with a snapshot restore and with an export (Export reads `comments.json`). Also: edit above a comment, close the tab (not the project), reopen the chapter.
+* [ ] Scroll with the mouse wheel, trackpad and PageUp/PageDown through a long chapter; drag the scrollbar if there is one. Watch for dropped frames.
+* [ ] Resize and maximise the window while a 1M-word project is open (including a 4K or 2560x1440 monitor, and fractional scaling on Windows).
+* [ ] Open a very long chapter: import a whole 1M-word `.txt` as one chapter (File > Import) to try the "mega" case for real.
+* [ ] Open the comments panel at 1812 comments: scrolling, filtering by tag and status, clicking a comment to jump to it, adding and resolving.
+* [ ] Spell-check underlines while typing: appear promptly, no stutter, on real prose (not the generated 30-word vocabulary).
+* [ ] The project tree with 329 chapters in 28 parts: scrolling, dragging a chapter to reorder, collapsing parts.
+* [ ] Find and Replace all in a 1M-word project, from the UI.
+* [ ] Export DOCX, EPUB and PDF of the whole 1M-word book from the UI. PDF (typst) was never measured and is likely the slowest; check the progress feedback and that the window stays responsive while it runs.
+* [ ] History panel: first snapshot, restoring one, comparing two, with a 1M-word project.
+* [ ] Save to a slow location (network or cloud-synced folder) while typing; the repack and fsync happen on workers but a slow disk is the main unknown.
+* [ ] Memory: watch the process memory with the 1M-word project open and after an hour of use (a leak would show as steady growth).
+* [ ] Startup time of the app itself (`startup-results.txt` is in `.gitignore`; there is a separate startup check mentioned in `src/bin/performance-check.rs` output).
+* [ ] IME input (a CJK or accent-composition keyboard) while typing in the big project.
+
+Not built yet (add if wanted):
+* PDF export timing in `large-file-check` (typst; likely minutes at 1M words, so gate it behind a flag).
+* A test with realistic prose (a public-domain novel as the source text, not the 30-word generator) for spell check and layout.
+* Opening a 1M-word chapter on a worker thread: check the load path `Storage::read` streaming (`append_loaded`) and that typing stays responsive while a big chapter is still loading.
+* A cold-cache run (drop the OS file cache before opening) for the open-time numbers.
