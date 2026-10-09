@@ -214,3 +214,26 @@ Not built yet (add if wanted):
 * A test with realistic prose (a public-domain novel as the source text, not the 30-word generator) for spell check and layout.
 * Opening a 1M-word chapter on a worker thread: check the load path `Storage::read` streaming (`append_loaded`) and that typing stays responsive while a big chapter is still loading.
 * A cold-cache run (drop the OS file cache before opening) for the open-time numbers.
+
+## Executable size
+
+Measured 2026-10-09, Windows, `cargo build --release --bin justwrite`:
+
+| Profile | `justwrite.exe` |
+| ------- | --------------- |
+| `lto = "thin"`, `codegen-units = 1`, `strip`, `panic = "abort"` (before) | 40.92 MB |
+| `lto = "fat"`, `opt-level = "s"` (now in `Cargo.toml`) | 32.51 MB |
+
+About 5.1 MB of the exe is the embedded fonts and dictionaries (`assets/`). The rest is mostly typst.
+
+**The smaller build is not yet proven fast enough.** `opt-level = "s"` can slow the hot paths (typing, layout, paint, spell check, export). Before keeping it:
+* [ ] Build to a separate folder (`cargo build --release --target-dir target\small`) so a running app does not lock the exe.
+* [ ] Run `cargo run --release --bin large-file-check -- --session-only` and compare with the step 4 tables: typing p95 about 2 ms, worst of 3000 under 16.7 ms, paste 5000 words under 50 ms, no growth from 50k to 1M words. Any `F` row that was `P` before is a regression from the profile.
+* [ ] Run the plain `large-file-check` and `performance-check` too. The old gate has the tightest limits (5 ms keystroke).
+* [ ] If the session rows regress, keep `opt-level = 3` for the hot crates only and use `"s"` for the rest, for example `[profile.release.package.typst]` and friends with `opt-level = "s"`. Or go back to `opt-level = 3` with fat LTO and accept the larger file.
+
+Further shrinking, in order of effort:
+* `opt-level = "z"` (smaller again, slower again; same session check applies).
+* Drop unused typst features: `typst-kit` is already `default-features = false`; look for PDF, SVG and image codecs pulled in by `typst-pdf` and `typst-render` that the export path never uses (`cargo bloat --release --crates` shows what is big).
+* Fonts: ship one body face family instead of Courier Prime, Libertinus Serif and Tinos together, or load the rarely used ones from disk on first use instead of `include_bytes!`. Dictionaries (`es.index.dic`, `en.index.dic`) could be compressed in the exe and unpacked on first spell-check load (89 ms today).
+* UPX compression: usually halves the file, but adds startup cost and often triggers antivirus false positives. Not recommended for a writing tool people install from the web.
