@@ -595,7 +595,18 @@ impl App {
                 .get(id)
                 .is_some_and(|t| t.path.is_none() && t.document.text.len_chars() == 0)
         });
+        // A chapter replaces the chapter in the current tab; new tabs are the user's to make.
+        let replaced = self.active_id().filter(|old| Some(old) != reuse.as_ref() && self.tabs.get(old).is_some_and(|t| t.path.is_some()));
         let id = reuse.unwrap_or_else(|| self.new_tab(self.active_pane));
+        if let Some(old) = replaced {
+            if let Some(pane) = self.split.pane_mut(self.active_pane) {
+                if let Some(at) = pane.tabs.iter().position(|t| *t == old) {
+                    pane.tabs.retain(|t| *t != id);
+                    pane.tabs.insert(at, id);
+                    pane.active = at;
+                }
+            }
+        }
         let mut tab = Tab::new(id);
         tab.path = Some(path.clone());
         tab.root = self.root.clone();
@@ -603,6 +614,9 @@ impl App {
         tab.loading = true;
         tab.restore_cursor = Some(position);
         self.tabs.insert(id, tab);
+        if let Some(old) = replaced {
+            self.close_tab(old, false);
+        }
         self.refresh_titles();
         let proxy = self.proxy.clone();
         storage.read(
