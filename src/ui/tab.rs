@@ -21,6 +21,9 @@ pub struct Tab {
     pub title: Option<String>,
     /// Review comments anchored in this text.
     pub marks: Vec<TabMark>,
+    /// Autosave skipped writing these marks back to the project (a rewrite of comments.json is
+    /// costly in a big book); it happens at the next flush, close or repack instead.
+    pub marks_stale: bool,
     /// What the spelling underlines in this tab were computed for.
     pub spell_signature: u64,
 }
@@ -42,6 +45,7 @@ impl Tab {
             disk_epoch: 0,
             title: None,
             marks: Vec::new(),
+            marks_stale: false,
             spell_signature: 0,
         }
     }

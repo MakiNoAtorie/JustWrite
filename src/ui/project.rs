@@ -247,6 +247,7 @@ impl App {
     }
     /// Writes everything out and lets go of the project: final snapshot, repack, lock.
     pub(super) fn shutdown_project(&mut self) {
+        self.sync_stale_marks();
         let Some(mut state) = self.project.take() else { return };
         self.root = None;
         self.storage = None;
@@ -584,6 +585,9 @@ impl App {
     }
     /// Writes the editor positions of a tab's comments back into the project, in stored form.
     pub(super) fn sync_marks_to_project(&mut self, tab_id: u64) {
+        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+            tab.marks_stale = false;
+        }
         let Some(item) = self.item_of_tab(tab_id) else { return };
         let marker = self.marker();
         let Some(tab) = self.tabs.get(&tab_id) else { return };
@@ -606,6 +610,14 @@ impl App {
         }
         if changed {
             let _ = state.core.work.write(COMMENTS, state.comments.to_json().as_bytes());
+        }
+    }
+
+    /// Writes back the marks of every tab that autosave left alone. Cheap when there are none.
+    pub(super) fn sync_stale_marks(&mut self) {
+        let ids: Vec<u64> = self.tabs.iter().filter(|(_, t)| t.marks_stale).map(|(id, _)| *id).collect();
+        for id in ids {
+            self.sync_marks_to_project(id);
         }
     }
 
@@ -945,6 +957,7 @@ impl App {
             }
         }
         if now >= due_pack {
+            self.sync_stale_marks();
             self.project.as_mut()?.last_pack = now;
             if self.project.as_ref()?.core.is_dirty() && !self.project.as_ref()?.blocked {
                 self.pack_project(false);

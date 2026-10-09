@@ -542,10 +542,18 @@ impl App {
     }
     /// Writes every changed open chapter now, so what is on disk matches what is on screen.
     pub(super) fn flush_tabs(&mut self) {
-        let ids: Vec<u64> = self.tabs.iter().filter(|(_, t)| t.document.dirty() && !t.loading && !t.failed && !t.saving && t.path.is_some()).map(|(id, _)| *id).collect();
+        let ids: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|(_, t)| (t.document.dirty() || t.marks_stale) && !t.loading && !t.failed && !t.saving && t.path.is_some())
+            .map(|(id, _)| *id)
+            .collect();
         for id in ids {
             self.sync_marks_to_project(id);
             let Some(tab) = self.tabs.get_mut(&id) else { continue };
+            if !tab.document.dirty() {
+                continue;
+            }
             let (Some(storage), Some(path)) = (tab.storage.clone(), tab.path.clone()) else { continue };
             let text = tab.document.text.clone();
             match storage.write(&path, &text) {

@@ -40,6 +40,8 @@ pub struct Limits {
 
 const FRAME: f64 = 5.;
 /// The single worst of thousands of keystrokes is a scheduler spike more often than a slow path, so it is held to a 60 Hz frame; the p95 above it is held to the 5 ms budget.
+/// Things the interface thread does only at a flush, close or repack timer, never per keystroke or autosave.
+const RARE_EVENT: f64 = 100.;
 const FRAME_WORST: f64 = 1000. / 60.;
 const BIG_EDIT: f64 = 50.;
 const REPLACE_APPLY: f64 = 100.;
@@ -350,9 +352,11 @@ pub fn run(label: &str, display: &str, marks: &[(usize, usize)], limits: &Limits
     }
     row("autosave work (background)", max(&saves), limits.autosave_background);
 
-    // What the interface thread does before it hands a save to the worker (`sync_marks_to_project`):
-    // the chapter in its stored form, every mark mapped back to it, and comments.json rewritten
-    // (the whole project's comments, atomically, with an fsync) because typing moved the anchors.
+    // `sync_marks_to_project`: the chapter in its stored form, every mark mapped back to it, and
+    // comments.json rewritten (the whole project's comments, atomically, with an fsync) because
+    // typing moved the anchors. Autosave no longer does this; it runs, on the interface thread,
+    // at a flush (snapshot, export, closing a tab or the project) and at the repack timer, so it
+    // is a rare event held to 100 ms and not to a frame.
     let mut sync = Vec::new();
     for _ in 0..3 {
         let (_, ms) = timed(|| {
@@ -364,7 +368,7 @@ pub fn run(label: &str, display: &str, marks: &[(usize, usize)], limits: &Limits
         });
         sync.push(ms);
     }
-    row("autosave comment sync on interface thread", max(&sync), FRAME_WORST);
+    row("comment sync at flush or repack, interface thread", max(&sync), RARE_EVENT);
 
     // Replace all: the worker builds the new text, the interface thread swaps it in.
     let snapshot = rig.doc.text.clone();

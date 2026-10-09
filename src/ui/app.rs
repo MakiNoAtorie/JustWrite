@@ -614,6 +614,12 @@ impl App {
     }
     fn save(&mut self, id: u64, _save_as: bool) {
         self.sync_marks_to_project(id);
+        self.write_tab(id);
+    }
+    /// Starts writing a tab's text in the background. The marks are not written back to the
+    /// project here: that converts the whole chapter and rewrites comments.json, with an fsync,
+    /// on the interface thread. Autosave leaves them stale for the next flush, close or repack.
+    fn write_tab(&mut self, id: u64) {
         let Some(tab) = self.tabs.get_mut(&id) else {
             return;
         };
@@ -645,6 +651,9 @@ impl App {
             self.overlay = Some(Overlay::new(Kind::Close(id)));
             self.redraw();
             return;
+        }
+        if self.tabs.get(&id).is_some_and(|t| t.marks_stale) {
+            self.sync_marks_to_project(id);
         }
         if let Some(tab) = self.tabs.remove(&id) {
             let _ = self.scanner.send(Scan {
@@ -2262,7 +2271,10 @@ impl App {
             next = Some(next.map_or(due, |other: Instant| other.min(due)));
         }
         for id in save {
-            self.save(id, false);
+            if let Some(tab) = self.tabs.get_mut(&id) {
+                tab.marks_stale |= !tab.marks.is_empty();
+            }
+            self.write_tab(id);
         }
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
