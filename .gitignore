@@ -4,3 +4,6 @@
 /startup-results.txt
 /screenshots/
 *.bmp
+
+# Generated benchmark projects (tools/gen_bench_jw.py)
+/bench_data/
