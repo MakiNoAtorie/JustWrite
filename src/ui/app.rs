@@ -170,6 +170,13 @@ fn contains(rect: Rect, x: f64, y: f64) -> bool {
         && y < rect.y as f64 + rect.height as f64
 }
 
+/// The window size to open at, in logical pixels, for a screen of the given logical size: the
+/// usual 1280 x 800, but never more than most of the screen, so that a taskbar or dock and the
+/// window's own title bar still fit on a small laptop display.
+fn default_window_size(screen_width: f64, screen_height: f64) -> (f64, f64) {
+    ((screen_width * 0.9).clamp(640., 1280.), (screen_height * 0.85).clamp(420., 800.))
+}
+
 /// How long a status message stays in the footer before it fades.
 const STATUS_LIFETIME: Duration = Duration::from_secs(10);
 
@@ -2844,11 +2851,16 @@ impl ApplicationHandler<UserEvent> for App {
             .and_then(|session| session.window)
             .filter(|w| w.width >= 300 && w.height >= 200);
         self.saved_window = saved;
+        let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
+        let (width, height) = monitor.as_ref().map_or((1280., 800.), |m| {
+            let scale = m.scale_factor().max(0.5);
+            default_window_size(m.size().width as f64 / scale, m.size().height as f64 / scale)
+        });
         let mut attributes = Window::default_attributes()
             .with_visible(!cfg!(test))
             .with_title(APP_NAME)
             .with_theme(None)
-            .with_inner_size(LogicalSize::new(1280., 800.))
+            .with_inner_size(LogicalSize::new(width, height))
             .with_min_inner_size(LogicalSize::new(440., 300.));
         if let Some(state) = saved {
             // Only reuse the position if it is still on a connected monitor.
@@ -2859,7 +2871,9 @@ impl ApplicationHandler<UserEvent> for App {
                     && state.x + 80 < p.x + s.width as i32
                     && state.y + 40 < p.y + s.height as i32
             });
-            attributes = attributes.with_inner_size(winit::dpi::PhysicalSize::new(state.width, state.height));
+            // A remembered size from a bigger screen is trimmed to the one in use.
+            let (limit_w, limit_h) = monitor.as_ref().map_or((u32::MAX, u32::MAX), |m| (m.size().width, m.size().height));
+            attributes = attributes.with_inner_size(winit::dpi::PhysicalSize::new(state.width.min(limit_w), state.height.min(limit_h)));
             if on_screen {
                 attributes = attributes.with_position(winit::dpi::PhysicalPosition::new(state.x, state.y));
             }
@@ -3257,5 +3271,18 @@ impl ApplicationHandler<UserEvent> for App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod window_size_tests {
+    use super::default_window_size;
+
+    #[test]
+    fn big_screens_get_the_usual_size_and_small_ones_leave_room() {
+        assert_eq!(default_window_size(2560., 1440.), (1280., 800.));
+        let (w, h) = default_window_size(1366., 768.);
+        assert!(w < 1366. && h < 768. - 60., "{w} x {h} leaves no room for a taskbar");
+        assert_eq!(default_window_size(300., 200.), (640., 420.), "never absurdly small");
     }
 }
