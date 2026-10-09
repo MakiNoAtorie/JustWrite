@@ -150,6 +150,10 @@ pub struct Form {
     pub room: f32,
     /// Extra data the submit handler needs.
     pub data: Vec<String>,
+    /// The focus was last moved with the keyboard, so the focused row is marked.
+    pub keyboard: bool,
+    /// The submit button destroys something.
+    pub danger: bool,
 }
 impl Form {
     pub fn new(kind: FormKind, title: &str, fields: Vec<Field>) -> Self {
@@ -168,12 +172,18 @@ impl Form {
             dropdown: None,
             room: 400.,
             data: Vec::new(),
+            keyboard: false,
+            danger: false,
         };
         form.focus = form.first_focus();
         form
     }
     pub fn submit(mut self, caption: &str) -> Self {
         self.submit = Some(caption.into());
+        self
+    }
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
         self
     }
     pub fn no_submit(mut self) -> Self {
@@ -560,7 +570,10 @@ impl App {
                     tab.document.mark_saved(tab.document.revision, text);
                     tab.edited = None;
                 }
-                Err(error) => self.status = format!("Could not save {}: {error}", tab.name()),
+                Err(error) => {
+                    let message = format!("Could not save {}: {error}", tab.name());
+                    self.fail(message);
+                }
             }
         }
     }
@@ -738,7 +751,7 @@ impl App {
     }
     pub(super) fn delete_comment_form(&mut self, id: &str) {
         let fields = vec![Field::info("The comment and its replies are removed from the project. This cannot be undone, but earlier snapshots keep their copy.")];
-        self.open_form(Form::new(FormKind::DeleteComment(id.into()), "Delete this comment?", fields).submit("Delete").width(480.));
+        self.open_form(Form::new(FormKind::DeleteComment(id.into()), "Delete this comment?", fields).submit("Delete").danger().width(480.));
     }
     pub(super) fn locked_form(&mut self, path: PathBuf, conflict: jw::lock::Conflict) {
         let fields = vec![
@@ -751,7 +764,7 @@ impl App {
         let fields = vec![Field::info(
             "The .jw file was changed by something other than this window since it was opened, for example by a sync service or another computer. Overwriting replaces those changes with the version open here. “Save a copy” keeps both.",
         )];
-        self.open_form(Form::new(FormKind::Overwrite, "The project file changed", fields).submit("Overwrite").button("Save a copy…", "copy").width(580.));
+        self.open_form(Form::new(FormKind::Overwrite, "The project file changed", fields).submit("Overwrite").danger().button("Save a copy…", "copy").width(580.));
     }
     pub(super) fn snapshot_form(&mut self) {
         let Some(state) = &self.project else {
@@ -1023,7 +1036,10 @@ impl App {
                 self.close_form();
                 return true;
             }
-            Key::Named(NamedKey::Tab) => form.move_focus(!self.modifiers.shift_key()),
+            Key::Named(NamedKey::Tab) => {
+                form.keyboard = true;
+                form.move_focus(!self.modifiers.shift_key());
+            }
             Key::Named(NamedKey::Enter) => {
                 if primary && form.submit.is_some() {
                     self.submit_form();
@@ -1042,10 +1058,10 @@ impl App {
                     form.dropdown = Some((form.focus, 0));
                 }
             }
-            Key::Named(NamedKey::ArrowDown) if !typed => form.move_focus(true),
-            Key::Named(NamedKey::ArrowUp) if !typed => form.move_focus(false),
-            Key::Named(NamedKey::ArrowDown) if !area => form.move_focus(true),
-            Key::Named(NamedKey::ArrowUp) if !area => form.move_focus(false),
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) if !area => {
+                form.keyboard = true;
+                form.move_focus(matches!(key, Key::Named(NamedKey::ArrowDown)));
+            }
             Key::Named(NamedKey::PageDown) => form.scroll_by(6),
             Key::Named(NamedKey::PageUp) => form.scroll_by(-6),
             Key::Named(NamedKey::Backspace) if typed => {
@@ -1128,18 +1144,16 @@ impl App {
         }
     }
     pub(super) fn form_act(&mut self, act: &Act) {
+        let at = self.probe_char();
         let Some(form) = &mut self.form else { return };
+        form.keyboard = false;
         let mut changed: Option<String> = None;
         match act {
             Act::FormFocus(i) => {
                 form.set_focus(*i);
-                // A click in a multi-line box puts the caret where it landed.
-                if let (Some(probe), Some(field)) = (self.area_probes.get(i), form.fields.get(*i)) {
-                    let (x, y) = (self.mouse.x as f32 - probe.rect.x as f32, self.mouse.y as f32 - probe.rect.y as f32);
-                    let len = field.text.chars().count();
-                    let at = probe.buffer.hit(x, y + probe.offset).map_or(len, |c| super::gui::area_char(&field.text, &c));
-                    form.caret = (at < len).then_some(at);
-                }
+                // A click in a text box puts the caret where it landed.
+                let len = form.fields.get(*i).map_or(0, |f| f.text.chars().count());
+                form.caret = at.filter(|at| *at < len);
             }
             Act::FormToggle(i) => {
                 form.set_focus(*i);
@@ -1675,7 +1689,14 @@ impl App {
         let list_height = (footer_top - y - self.s(4.)).max(self.s(60.));
         form.room = list_height as f32 / scale;
         let shown: Vec<usize> = (0..form.fields.len()).filter(|i| form.shown(*i)).collect();
-        let start = shown.iter().position(|i| *i >= form.scroll).unwrap_or(0);
+        // Scrolling stops when the last field reaches the bottom of the list.
+        let (mut last_start, mut tail) = (shown.len(), 0);
+        while last_start > 0 && tail + self.s(form.fields[shown[last_start - 1]].height(field_width)) <= list_height {
+            tail += self.s(form.fields[shown[last_start - 1]].height(field_width));
+            last_start -= 1;
+        }
+        let start = shown.iter().position(|i| *i >= form.scroll).unwrap_or(0).min(last_start).min(shown.len().saturating_sub(1));
+        form.scroll = shown.get(start).copied().unwrap_or(0);
         let label_width = (inner_width as f32 * 0.42) as i32;
         let control_x = rect.x + pad + label_width;
         let control_width = inner_width as i32 - label_width;
@@ -1691,6 +1712,7 @@ impl App {
             used += height;
             drawn += 1;
             let focused = form.focus == i;
+            let marked = focused && form.keyboard;
             let field = form.fields[i].clone();
             match &field.control {
                 Control::Heading => {
@@ -1701,8 +1723,7 @@ impl App {
                 }
                 _ => {
                     let label_rect = Rect { width: label_width as u32 - self.su(10.), ..row };
-                    if focused {
-                        self.renderer.fill_round(Rect { x: row.x - self.s(8.), y: row.y + self.s(2.), width: row.width + self.su(16.), height: row.height.saturating_sub(self.su(4.)) }, self.su(6.), super::gui::selected_fill(p.raised, p).min(p.raised.max(p.surface)));
+                    if marked {
                         self.renderer.fill_round(Rect { x: row.x - self.s(8.), y: row.y + self.s(2.), width: row.width + self.su(16.), height: row.height.saturating_sub(self.su(4.)) }, self.su(6.), super::gui::mix(p.raised, p.accent, 0.1));
                     }
                     if !field.label.is_empty() {
@@ -1715,7 +1736,7 @@ impl App {
                     match &field.control {
                         Control::Text => {
                             let caret = if focused { form.caret } else { None };
-                            self.field(control, &field.text, &field.hint, caret, focused, Act::FormFocus(i), p);
+                            self.field(control, &field.text, &field.hint, caret, focused, false, Act::FormFocus(i), p);
                         }
                         Control::Area(_) => {
                             self.paint_area(control, &field, focused.then_some(form.caret), Act::FormFocus(i), p);
@@ -1727,7 +1748,7 @@ impl App {
                             let plus = Rect { x: stepper.x + stepper.width as i32 - self.s(30.), width: self.su(30.), ..stepper };
                             let middle = Rect { x: minus.x + minus.width as i32, width: stepper.width - minus.width * 2, ..stepper };
                             let caret = if focused { form.caret } else { None };
-                            self.field(middle, &field.text, "", caret, focused, Act::FormFocus(i), p);
+                            self.field(middle, &field.text, "", caret, focused, false, Act::FormFocus(i), p);
                             self.button("−", minus, Hit::Do(Act::FormStep(i, -1)), Look::Outline, p);
                             self.button("+", plus, Hit::Do(Act::FormStep(i, 1)), Look::Outline, p);
                             if !unit.is_empty() {
@@ -1744,7 +1765,8 @@ impl App {
                             } else {
                                 let text = self.fit(&current, control.width as f32 - self.s(40.) as f32, 13.);
                                 let open = form.dropdown.is_some_and(|(f, _)| f == i);
-                                self.button_face(&format!("{text}  ▾"), control, Hit::Do(Act::FormDrop(i)), if open || focused { Look::Active } else { Look::Outline }, Face::Normal, Align::Left, p);
+                                self.button_face(&text, control, Hit::Do(Act::FormDrop(i)), if open || marked { Look::Active } else { Look::Outline }, Face::Normal, Align::Left, p);
+                                self.put("▾", Rect { width: control.width.saturating_sub(self.su(12.)), ..control }, 14., p.muted, Face::Normal, Align::Right);
                                 if open {
                                     dropdown_anchor = Some((i, control));
                                 }
@@ -1762,24 +1784,14 @@ impl App {
                         }
                         Control::Button(caption) => {
                             let text = self.fit(caption, control.width as f32 - self.s(24.) as f32, 13.);
-                            self.button(&text, control, Hit::Do(Act::FormButton(i)), if focused { Look::Active } else { Look::Outline }, p);
+                            self.button(&text, control, Hit::Do(Act::FormButton(i)), if marked { Look::Active } else { Look::Outline }, p);
                         }
                         Control::Heading | Control::Info => {}
-                    }
-                    if !field.hint.is_empty() && matches!(field.control, Control::Number { .. } | Control::Choice(_)) && false {
-                        let _ = &field.hint;
                     }
                 }
             }
         }
-        // Scrollbar hint
-        if drawn < shown.len() - start || start > 0 {
-            let track = Rect { x: rect.x + rect.width as i32 - self.s(10.), y, width: self.su(4.), height: list_height as u32 };
-            let total = shown.len().max(1);
-            let thumb = ((track.height as usize * drawn.max(1) / total) as u32).max(self.su(24.)).min(track.height);
-            let offset = (track.height - thumb) as usize * start / total.saturating_sub(drawn).max(1);
-            self.renderer.fill_round(Rect { y: track.y + offset as i32, height: thumb, ..track }, self.su(2.), p.border);
-        }
+        self.scroll_thumb(Rect { x: rect.x, y, width: rect.width - self.su(4.), height: list_height as u32 }, start, drawn, shown.len(), p);
         // Footer
         self.renderer.fill(Rect { x: rect.x + 1, y: footer_top, width: rect.width - 2, height: 1 }, p.border);
         if !form.note.is_empty() {
@@ -1794,7 +1806,7 @@ impl App {
         let mut buttons: Vec<(String, Act, Look)> = Vec::new();
         match &form.submit {
             Some(caption) => {
-                buttons.push((caption.clone(), Act::FormSubmit, Look::Primary));
+                buttons.push((caption.clone(), Act::FormSubmit, if form.danger { Look::Danger } else { Look::Primary }));
                 buttons.push(("Cancel".into(), Act::Dismiss, Look::Outline));
             }
             None => buttons.push(("Done".into(), Act::Dismiss, Look::Primary)),
@@ -1833,7 +1845,7 @@ impl App {
         let line = size * 1.5;
         let len = field.text.chars().count();
         let at = caret.flatten().unwrap_or(len).min(len);
-        let mut buffer = self.area_buffer(&field.text, inner.width as f32, size, p.text);
+        let mut buffer = self.area_buffer(&field.text, Some(inner.width as f32), size, p.text);
         // The caret is drawn over the text, so moving it never changes how the lines wrap.
         let cursor = super::gui::area_cursor(&field.text, at);
         let (x, y) = buffer.cursor_position(&cursor).unwrap_or_else(|| {
@@ -1844,7 +1856,7 @@ impl App {
         // Keep the caret inside the box when the text is longer than it.
         let offset = (y + line - inner.height as f32).max(0.);
         if field.text.is_empty() {
-            self.label(&field.hint, inner, size, p.muted);
+            self.label(&field.hint, inner, size, p.faint(p.background));
         } else {
             self.renderer.text(&mut self.fonts, &mut buffer, inner.x, inner.y - offset as i32, inner);
         }
@@ -1852,9 +1864,7 @@ impl App {
             let bar = Rect { x: inner.x + x as i32, y: inner.y + (y - offset) as i32, width: self.su(1.5).max(1), height: line as u32 };
             self.renderer.fill(bar.intersect(inner), p.accent_text());
         }
-        if let Act::FormFocus(index) = hit {
-            self.area_probes.insert(index, super::gui::AreaProbe { rect: inner, offset, buffer });
-        }
+        self.probes.push(super::gui::AreaProbe { rect, origin: (inner.x as f32, inner.y as f32 - offset), text: field.text.clone(), buffer });
         self.hits.push((rect, Hit::Do(hit)));
     }
     #[allow(clippy::too_many_arguments)]

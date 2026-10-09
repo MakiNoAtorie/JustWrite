@@ -637,6 +637,7 @@ impl App {
             self.put(&badge, Rect { x: row.x, y: row.y + self.s(4.), width: row.width - self.su(12.), height: self.su(24.) }, 11., if marked { p.accent_text() } else { tint }, Face::Bold, Align::Right);
             self.hits.push((row, Hit::Do(Act::Screen(ScreenAct::Select(n)))));
         }
+        self.scroll_thumb(Rect { y: list.y + inset, height: (visible as i32 * row_height) as u32, width: list.width - 1, ..list }, v.scroll, visible, v.snapshots.len(), p);
         // Details
         let detail = Rect { x: list.x + list.width as i32 + self.s(20.), y: area.y + self.s(16.), width: area.width.saturating_sub(left_width + self.su(40.)), height: area.height.saturating_sub(self.su(32.)) };
         let Some(meta) = v.snapshots.get(v.selected).cloned() else { return };

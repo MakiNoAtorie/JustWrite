@@ -111,6 +111,17 @@ impl App {
             );
         }
     }
+    /// A thin scrollbar thumb down the right edge of `track`, for a list showing `visible` of its
+    /// `total` rows from row `first`. Nothing is drawn when everything fits.
+    pub(super) fn scroll_thumb(&mut self, track: Rect, first: usize, visible: usize, total: usize, p: Palette) {
+        if total <= visible || track.height == 0 {
+            return;
+        }
+        let thumb = ((track.height as usize * visible.max(1) / total) as u32).max(self.su(20.)).min(track.height);
+        let offset = (track.height - thumb) as usize * first.min(total - visible) / (total - visible);
+        let bar = Rect { x: track.x + track.width as i32 - self.s(5.), y: track.y + offset as i32, width: self.su(3.), height: thumb };
+        self.renderer.fill_round(bar, self.su(2.), mix(p.border, p.muted, 0.35));
+    }
     pub(super) fn s(&self, value: f32) -> i32 {
         (value * self.scale).round() as i32
     }
@@ -136,11 +147,11 @@ impl App {
         self.renderer
             .text(&mut self.fonts, buffer, rect.x, rect.y, rect);
     }
-    /// A shaped, wrapped copy of `text` for a multi-line input box.
-    pub(super) fn area_buffer(&mut self, text: &str, width: f32, size: f32, tint: u32) -> Buffer {
+    /// A shaped copy of `text` for an input box, wrapped at `width` if there is one.
+    pub(super) fn area_buffer(&mut self, text: &str, width: Option<f32>, size: f32, tint: u32) -> Buffer {
         let font = self.text_font();
         let mut buffer = Buffer::new_empty(Metrics::new(size, size * 1.5));
-        buffer.set_size(Some(width), None);
+        buffer.set_size(width, None);
         buffer.set_text(text, &face_attrs(&font, tint, Face::Normal), Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         buffer
@@ -304,6 +315,7 @@ impl App {
         let tab = self.active_id().and_then(|id| self.tabs.get(&id));
         let project = self.project.is_some();
         let selection = tab.is_some_and(|t| !t.document.selection().is_empty());
+        let editable = tab.is_some_and(|t| t.path.is_some());
         match command {
             Command::Reopen => !self.closed.is_empty() && project,
             Command::Cut | Command::Copy => selection && project,
@@ -321,8 +333,8 @@ impl App {
             | Command::Replace
             | Command::JumpScene
             | Command::GotoLine
-            | Command::WordCount
-            | Command::CloseTab => tab.is_some() && project,
+            | Command::WordCount => editable && project,
+            Command::CloseTab => tab.is_some() && project,
             Command::Rename | Command::Delete | Command::MoveUp | Command::MoveDown => project && self.selected_item().is_some(),
             Command::NewChapter
             | Command::NewPage
@@ -768,7 +780,7 @@ impl App {
         let highlights: Vec<(usize, usize)> = if find.is_some() {
             self.overlay
                 .as_ref()
-                .filter(|o| !o.query.is_empty())
+                .filter(|o| !o.query.is_empty() && o.tab == Some(id))
                 .map(|o| {
                     o.rows
                         .iter()
@@ -787,9 +799,12 @@ impl App {
         tab.view.highlights = highlights;
         tab.view.configure(&settings, &symbol);
         tab.view.layout(&tab.document, &tab.blocks, &settings, &mut self.fonts, editor_rect);
-        if std::env::var_os("JW_DEBUG").is_some() { eprintln!("top={} len={} cursor={} tiles={} rect_h={}", tab.view.top, tab.document.text.len_chars(), tab.document.cursor, tab.view.tiles.len(), editor_rect.height); }
-        tab.view.paint(&tab.document, &mut self.fonts, &mut self.renderer);
-        let empty = tab.document.text.len_chars() == 0 && !tab.loading && tab.path.is_some();
+        // The empty pane of a new split has no file, so no text and no caret.
+        let vacant = tab.path.is_none();
+        if !vacant {
+            tab.view.paint(&tab.document, &mut self.fonts, &mut self.renderer);
+        }
+        let empty = tab.document.text.len_chars() == 0 && !tab.loading && !vacant;
         let (len_chars, len_lines, top_char) =
             (tab.document.text.len_chars(), tab.document.text.len_lines(), tab.view.top);
         if empty && !focus {
@@ -801,7 +816,11 @@ impl App {
             };
             self.put("Start writing…", hint, 16., p.faint(p.background), Face::Normal, Align::Left);
         }
-        if !focus {
+        if vacant {
+            let hint = Rect { y: editor_rect.y + editor_rect.height as i32 / 3, height: self.su(24.), ..editor_rect };
+            self.put("Click a chapter or note in the tree to open it here.", hint, 13., p.muted, Face::Normal, Align::Center);
+        }
+        if !focus && !vacant {
             let scrollbar = Rect {
                 x: rect.x + rect.width as i32 - self.s(9.),
                 y: editor_rect.y,
@@ -838,7 +857,7 @@ impl App {
         let Some(overlay) = &self.overlay else {
             return;
         };
-        let (replace, query, replacement, secondary, caret, case, focused) = (
+        let (replace, query, replacement, secondary, caret, case, focused, whole) = (
             overlay.kind == Kind::Replace,
             overlay.query.clone(),
             overlay.replacement.clone(),
@@ -846,6 +865,7 @@ impl App {
             overlay.caret,
             overlay.case,
             overlay.focused,
+            overlay.select_all,
         );
         let (found, selected, pending) = (overlay.rows.len(), overlay.selected, overlay.pending);
         self.renderer.fill(rect, p.surface);
@@ -882,7 +902,7 @@ impl App {
         self.put(&text, counter, 12., if found == 0 && !query.is_empty() { p.danger_text() } else { p.muted }, Face::Normal, Align::Right);
         let width = (counter.x - rect.x - pad - self.s(8.)).max(80) as u32;
         let first = Rect { x: rect.x + pad, y, width, height };
-        self.field(first, &query, "Find…", if secondary { None } else { caret }, focused && !secondary, Act::Field(false), p);
+        self.field(first, &query, "Find…", if secondary { None } else { caret }, focused && !secondary, whole, Act::Field(false), p);
         if replace {
             let y2 = y + self.s(40.);
             let all = Rect { x: close.x + close.width as i32 - self.s(104.), y: y2, width: self.su(104.), height };
@@ -891,7 +911,7 @@ impl App {
             self.button("Replace", one, Hit::Do(Act::Replace(false)), Look::Primary, p);
             let width = (one.x - rect.x - pad - self.s(8.)).max(80) as u32;
             let second = Rect { x: rect.x + pad, y: y2, width, height };
-            self.field(second, &replacement, "Replace with…", if secondary { caret } else { None }, focused && secondary, Act::Field(true), p);
+            self.field(second, &replacement, "Replace with…", if secondary { caret } else { None }, focused && secondary, whole, Act::Field(true), p);
         }
     }
     /// A see-through copy of the dragged tab at the pointer, plus a line where it will be inserted.
@@ -996,13 +1016,14 @@ impl App {
                 width: rect.width.saturating_sub(self.su(12.)),
                 height: row_height,
             };
-            if let Some((label, _)) = row.heading {
+            if let Some((label, section)) = row.heading {
                 let head = Rect { x: line.x + self.s(6.), y: line.y + self.s(4.), width: line.width, height: line.height };
                 self.put(label, head, 10.5, mix(p.muted, p.accent_text(), 0.5), Face::Bold, Align::Left);
                 let text = "+ New";
                 let width = self.measure(text, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(16.);
                 let add = Rect { x: line.x + line.width as i32 - width as i32 - self.s(2.), y: line.y + self.s(2.), width, height: line.height - self.su(4.) };
-                self.button(text, add, Hit::Do(Act::NewMenu), Look::Plain, p);
+                let command = if section == manifest::Section::Notes { Command::NewPage } else { Command::NewChapter };
+                self.button(text, add, Hit::Command(command), Look::Plain, p);
                 continue;
             }
             let is_selected = selected.as_deref() == Some(row.id.as_str());
@@ -1049,6 +1070,7 @@ impl App {
             }
             self.hits.push((line, Hit::Node(row.id.clone())));
         }
+        self.scroll_thumb(Rect { y: list_top, height: capacity as u32 * row_height, ..rect }, self.tree_top, capacity, rows.len(), p);
         // Totals
         let state = self.project.as_ref().unwrap();
         let total = state.core.manuscript_words();
@@ -1143,6 +1165,7 @@ impl App {
             self.put(&snippet, Rect { x: row.x + self.s(10.), y: row.y + self.s(22.), width: row.width - self.su(20.), height: self.su(22.) }, 12.5, p.text, Face::Normal, Align::Left);
             self.hits.push((row, Hit::Scene(*line)));
         }
+        self.scroll_thumb(Rect { y: top, height: (capacity as i32 * row_height) as u32, ..rect }, self.outline_top, capacity, starts.len(), p);
     }
     fn paint_comments(&mut self, rect: Rect, p: Palette) {
         let Some(state) = &self.project else { return };
@@ -1232,6 +1255,7 @@ impl App {
                 bx += width as i32 + self.s(2.);
             }
         }
+        self.scroll_thumb(Rect { y: top, height: (capacity as i32 * card_height) as u32, ..rect }, self.outline_top, capacity, list.len(), p);
     }
     pub(super) fn paint_footer(&mut self, rect: Rect, p: Palette) {
         self.renderer.fill(rect, p.surface);
@@ -1243,12 +1267,13 @@ impl App {
             ("Settings", Command::Settings, false),
             ("Focus", Command::Focus, false),
             ("Split", Command::SplitRight, false),
-            ("Panel", Command::TogglePanel, self.show_outline),
-            ("Chapters", Command::ToggleTree, self.show_tree),
+            // Lit only while the panel is on screen: a narrow window hides both.
+            ("Panel", Command::TogglePanel, self.outline_rect.is_some()),
+            ("Chapters", Command::ToggleTree, self.tree_rect.is_some()),
         ];
         for (text, command, on) in buttons {
-            // Without a project there is no tree, panel or split to toggle.
-            if self.project.is_none() && matches!(command, Command::ToggleTree | Command::TogglePanel | Command::SplitRight) {
+            // Without a project, or behind a full-window view, there is no tree, panel or split to toggle.
+            if (self.project.is_none() || self.screen.is_some()) && matches!(command, Command::ToggleTree | Command::TogglePanel | Command::SplitRight) {
                 continue;
             }
             let width = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
@@ -1301,8 +1326,9 @@ impl App {
             busy.into()
         };
         let area = Rect { x: rect.x + self.s(14.), y: rect.y, width: (right - rect.x - self.s(20.)).max(10) as u32, height: rect.height };
+        let tint = if message == self.status_error { p.danger_text() } else { p.muted };
         let message = self.fit(&message, area.width as f32, 11.5);
-        self.put(&message, area, 11.5, p.muted, Face::Normal, Align::Left);
+        self.put(&message, area, 11.5, tint, Face::Normal, Align::Left);
     }
     pub(super) fn paint_welcome(&mut self, rect: Rect, p: Palette) {
         let width = rect.width.saturating_sub(self.su(48.)).min(self.su(560.));
@@ -1372,30 +1398,44 @@ impl App {
         self.hits.push((rect, Hit::Do(Act::Block)));
         rect
     }
-    pub(super) fn field(&mut self, rect: Rect, text: &str, placeholder: &str, caret: Option<usize>, focused: bool, hit: Act, p: Palette) {
+    /// A one-line input. `caret` is in chars (`None` is the end); `selected` shows the whole text
+    /// as selected, which is what typing will replace.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn field(&mut self, rect: Rect, text: &str, placeholder: &str, caret: Option<usize>, focused: bool, selected: bool, hit: Act, p: Palette) {
         self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent_text() } else { mix(p.border, p.text, 0.12) });
         let inner = Rect { x: rect.x + self.s(12.), width: rect.width.saturating_sub(self.su(24.)), ..rect };
-        if text.is_empty() && !(focused && caret.is_some()) {
-            if focused {
-                self.put("│", inner, 15., p.accent_text(), Face::Normal, Align::Left);
-            }
-            let hint = Rect { x: inner.x + if focused { self.s(6.) } else { 0 }, ..inner };
-            self.put(placeholder, hint, 15., p.muted, Face::Normal, Align::Left);
-        } else {
-            let chars: Vec<char> = text.chars().collect();
-            let at = caret.unwrap_or(chars.len()).min(chars.len());
-            let mut shown: String = chars[..at].iter().collect();
-            if focused {
-                shown.push('│');
-            }
-            shown.extend(&chars[at..]);
-            // Keep the end of long text (where the caret usually is) in view.
-            let keep = (inner.width as f32 / (7.5 * self.scale)) as usize;
-            let skip = shown.chars().count().saturating_sub(keep.max(8));
-            let visible: String = shown.chars().skip(if caret.is_none() { skip } else { 0 }).collect();
-            self.put(&visible, inner, 15., p.text, Face::Normal, Align::Left);
+        let size = 14. * self.scale;
+        let line = (size * 1.5).ceil() as u32;
+        let row = Rect { y: inner.y + (inner.height as i32 - line as i32) / 2, height: line, ..inner };
+        if text.is_empty() {
+            self.put(placeholder, inner, 14., p.faint(p.background), Face::Normal, Align::Left);
         }
+        let len = text.chars().count();
+        let at = caret.unwrap_or(len).min(len);
+        let mut buffer = self.area_buffer(text, None, size, p.text);
+        // The caret is drawn over the text, so moving it never shifts the letters.
+        let x = buffer.cursor_position(&area_cursor(text, at)).map_or(0., |(x, _)| x);
+        // Long text slides left so the caret stays inside the box.
+        let slide = (x - inner.width as f32 + self.s(2.) as f32).max(0.);
+        let origin = inner.x as f32 - slide;
+        if selected && focused && !text.is_empty() {
+            let width = buffer.layout_runs().map(|run| run.line_w).fold(0., f32::max).ceil() as u32 + 2;
+            self.renderer.fill(Rect { x: origin as i32 - 1, width, ..row }.intersect(inner), p.selection);
+        }
+        self.renderer.text(&mut self.fonts, &mut buffer, origin as i32, row.y, row);
+        if focused && !selected {
+            let bar = Rect { x: (origin + x) as i32, y: row.y + self.s(1.), width: self.su(1.5).max(1), height: line.saturating_sub(self.su(2.)) };
+            self.renderer.fill(bar, p.accent_text());
+        }
+        self.probes.push(AreaProbe { rect, origin: (origin, row.y as f32), text: text.to_owned(), buffer });
         self.hits.push((rect, Hit::Do(hit)));
+    }
+    /// The char under the pointer in the text box it is over, as last painted.
+    pub(super) fn probe_char(&self) -> Option<usize> {
+        let probe = self.probes.iter().rev().find(|probe| contains(probe.rect, self.mouse.x, self.mouse.y))?;
+        let bottom = probe.buffer.layout_runs().last().map_or(0., |run| run.line_top + run.line_height - 1.);
+        let (x, y) = (self.mouse.x as f32 - probe.origin.0, (self.mouse.y as f32 - probe.origin.1).clamp(0., bottom));
+        Some(probe.buffer.hit(x, y).map_or(probe.text.chars().count(), |cursor| area_char(&probe.text, &cursor)))
     }
     pub(super) fn paint_overlay(&mut self, window: Rect, top: i32, p: Palette) {
         let Some(overlay) = &self.overlay else {
@@ -1425,24 +1465,17 @@ impl App {
             return;
         };
         let (kind, title, rows_total) = (overlay.kind.clone(), overlay.title().to_owned(), overlay.rows.len());
-        let (query, replacement, secondary, caret, case) = (
-            overlay.query.clone(),
-            overlay.replacement.clone(),
-            overlay.secondary,
-            overlay.caret,
-            overlay.case,
-        );
+        let (query, caret, case, all) = (overlay.query.clone(), overlay.caret, overlay.case, overlay.select_all);
         let placeholder = overlay.placeholder().to_owned();
         let pending = overlay.pending;
         let (selected, scroll) = (overlay.selected, overlay.scroll);
-        let searching = matches!(kind, Kind::Find | Kind::Replace | Kind::ProjectSearch);
+        let searching = kind == Kind::ProjectSearch;
         let keymap = matches!(kind, Kind::Keymap | Kind::Palette);
         let width = window.width.saturating_sub(self.su(40.)).min(self.su(720.));
         let x = (window.width - width) as i32 / 2;
         let y = top + self.s(40.);
         let (row_height, pad) = (self.su(if matches!(kind, Kind::Setting(_)) { 40. } else if keymap { 36. } else { 46. }), self.s(14.));
         let fixed = self.su(46.) + self.su(46.)
-            + if kind == Kind::Replace { self.su(46.) } else { 0 }
             + if searching { self.su(40.) } else { 0 }
             + self.su(14.);
         let room = window.height.saturating_sub(y as u32 + self.su(24.) + fixed) / row_height;
@@ -1464,16 +1497,9 @@ impl App {
             self.button("← Settings", back, Hit::Command(Command::Settings), Look::Plain, p);
         }
         cursor += self.s(46.);
-        // Input fields
-        let field = |app: &App, y: i32| Rect { x: x + pad, y, width: width - pad as u32 * 2, height: app.su(38.) };
-        let first = field(self, cursor);
-        self.field(first, &query, &placeholder, caret, !secondary, Act::Field(false), p);
+        let input = Rect { x: x + pad, y: cursor, width: width - pad as u32 * 2, height: self.su(38.) };
+        self.field(input, &query, &placeholder, caret, true, all, Act::Field(false), p);
         cursor += self.s(46.);
-        if kind == Kind::Replace {
-            let second = field(self, cursor);
-            self.field(second, &replacement, "Replace with…", caret, secondary, Act::Field(true), p);
-            cursor += self.s(46.);
-        }
         if searching {
             let bar = Rect { x: x + pad, y: cursor, width: width - pad as u32 * 2, height: self.su(32.) };
             let count = if pending {
@@ -1486,16 +1512,8 @@ impl App {
                 format!("{rows_total} match{}", if rows_total == 1 { "" } else { "es" })
             };
             self.put(&count, bar, 12., p.muted, Face::Normal, Align::Left);
-            let mut right = bar.x + bar.width as i32;
-            let case_button = Rect { x: right - self.s(104.), y: bar.y, width: self.su(104.), height: bar.height };
+            let case_button = Rect { x: bar.x + bar.width as i32 - self.s(104.), y: bar.y, width: self.su(104.), height: bar.height };
             self.button("Match case", case_button, Hit::Do(Act::Case), if case { Look::Active } else { Look::Outline }, p);
-            right = case_button.x - self.s(8.);
-            if kind == Kind::Replace {
-                let all = Rect { x: right - self.s(96.), width: self.su(96.), ..case_button };
-                self.button("Replace all", all, Hit::Do(Act::Replace(true)), Look::Outline, p);
-                let one = Rect { x: all.x - self.s(84.), width: self.su(76.), ..case_button };
-                self.button("Replace", one, Hit::Do(Act::Replace(false)), Look::Primary, p);
-            }
             cursor += self.s(40.);
         }
         cursor += self.s(6.);
@@ -1577,12 +1595,7 @@ impl App {
             }
             self.hits.push((line, Hit::Row(number)));
         }
-        if rows_total > visible {
-            let track = Rect { x: x + width as i32 - self.s(7.), y: cursor, width: self.su(4.), height: row_height * visible as u32 };
-            let thumb = ((track.height as usize * visible / rows_total) as u32).max(self.su(20.));
-            let offset = (track.height - thumb) as usize * scroll / (rows_total - visible).max(1);
-            self.renderer.fill_round(Rect { y: track.y + offset as i32, height: thumb, ..track }, self.su(2.), p.border);
-        }
+        self.scroll_thumb(Rect { x, y: cursor, width: width - self.su(2.), height: row_height * visible as u32 }, scroll, visible, rows_total, p);
     }
     pub(super) fn dialog_buttons(&mut self, rect: Rect, buttons: &[(&str, Act, Look)], p: Palette) {
         let height = self.su(34.);
@@ -1600,7 +1613,7 @@ impl App {
             return;
         };
         let kind = overlay.kind.clone();
-        let (query, caret, note, title) = (overlay.query.clone(), overlay.caret, overlay.note.clone(), overlay.title().to_owned());
+        let (query, caret, note, title, all) = (overlay.query.clone(), overlay.caret, overlay.note.clone(), overlay.title().to_owned(), overlay.select_all);
         let dirty = self.tabs.values().filter(|t| t.document.dirty()).count();
         let name_of = |id: u64| self.tabs.get(&id).map(|t| t.name()).unwrap_or_default();
         let title_of = |id: &str| self.node_title(id).unwrap_or_default();
@@ -1665,7 +1678,7 @@ impl App {
         y += self.s(10.);
         if input {
             let area = Rect { y, height: self.su(38.), ..inner };
-            self.field(area, &query, self.overlay.as_ref().map_or("", |o| o.placeholder()).to_owned().as_str(), caret, true, Act::Field(false), p);
+            self.field(area, &query, self.overlay.as_ref().map_or("", |o| o.placeholder()).to_owned().as_str(), caret, true, all, Act::Field(false), p);
             y += self.s(46.);
         }
         if kind_is_shortcut(&kind) {
@@ -1723,11 +1736,13 @@ impl App {
     }
 }
 
-/// The last multi-line input box painted, kept so a click can be turned into a caret position.
+/// An input box as last painted, kept so a click can be turned into a caret position.
 pub(super) struct AreaProbe {
+    /// The whole box; a click anywhere in it counts.
     pub rect: Rect,
-    /// How far the text is scrolled up inside `rect`.
-    pub offset: f32,
+    /// Where the text starts on screen, scrolling included.
+    pub origin: (f32, f32),
+    pub text: String,
     pub buffer: Buffer,
 }
 

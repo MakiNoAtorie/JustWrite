@@ -58,6 +58,8 @@ pub struct Overlay {
     pub visible: usize,
     /// Whether keystrokes go to this overlay; a docked find bar loses focus when you click the text.
     pub focused: bool,
+    /// The tab whose text the find bar's matches were found in.
+    pub tab: Option<u64>,
 }
 impl Overlay {
     pub fn new(kind: Kind) -> Self {
@@ -77,6 +79,7 @@ impl Overlay {
             scroll: 0,
             visible: 10,
             focused: true,
+            tab: None,
         }
     }
     /// Find and replace live in a bar above the text instead of a centred box.

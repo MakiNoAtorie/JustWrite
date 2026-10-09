@@ -233,7 +233,7 @@ impl App {
         if duplicate {
             note = "This file is a copy of another project; it now has its own identity.".into();
         }
-        self.status = if note.is_empty() { format!("Opened {}", path.display()) } else { note };
+        self.status = if note.is_empty() { format!("Opened {}", path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned())) } else { note };
         // Open the first chapter so the window is not empty.
         let first = self
             .project
@@ -259,7 +259,7 @@ impl App {
         let _ = history::prune::prune(&mut state.history, &state.core, now);
         match state.core.close() {
             Ok(()) => {}
-            Err(error) => self.status = format!("Could not save the project file: {error}"),
+            Err(error) => self.fail(format!("Could not save the project file: {error}")),
         }
     }
 
@@ -752,7 +752,7 @@ impl App {
                 state.blocked = true;
                 self.changed_outside_form();
             }
-            Err(Some(error)) => self.status = format!("Could not write the project file: {error}"),
+            Err(Some(error)) => self.fail(format!("Could not write the project file: {error}")),
         }
     }
     pub(super) fn save_project_as(&mut self, path: PathBuf) {

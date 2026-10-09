@@ -1,7 +1,7 @@
 # Next steps
 
-State after the feedback pass of 2026-10-09 (Windows development machine, release build). All 158 unit
-tests pass; `performance-check` passes; `large-file-check` passes 204 of 204 measurements.
+State after the UX and polish pass of 2026-10-09 (Windows development machine, release build). All 161
+unit tests pass; `performance-check` passes; `large-file-check` passes 204 of 204 measurements.
 
 ## Needs a person at the real window
 
@@ -63,9 +63,89 @@ None of this can be driven headlessly. Do these first; each is a short look.
   measure that exact path; the benchmark's whole-book search is 156 ms of 250 at 1M words.
 * Export dialog and paged preview: seen, not audited for spacing, focus highlight on the first row,
   page indicator.
-* The single-line text fields (`field` in `src/ui/gui.rs`) still cannot place the caret with a click;
-  only the multi-line boxes can now. Same technique would work (use `area_buffer`).
 * Up and Down arrows do not move the caret between lines inside a multi-line box.
+* Text fields in dialogs have no selection of their own (no Shift+arrows, Ctrl+A or Ctrl+C); only the
+  find, rename and palette fields show "everything selected" when they open.
+* Comment cards in the side panel have a fixed height, so a one-line comment leaves empty space.
+* An emphasis (`*…*`) that crosses a chunk boundary inside a paragraph longer than about 170 words
+  loses its style in the second chunk (`tile_at` in `src/ui/editor.rs` starts each chunk plain).
+* `Kind::ChangeWorkspace` in `src/ui/overlay.rs` is never created; its handlers are dead code.
+
+## UX and polish pass (2026-10-09, second pass)
+
+Looked at in the real window (light and dark theme, 1280 x 800 and narrow), driven with window
+messages against a copy of `bench_50k.jw` in its own data folder.
+
+### Editor
+
+* **Long paragraphs wrapped wrongly.** A paragraph over 1024 characters is shaped in chunks, and each
+  chunk used to wrap on its own, so there was a short row and a forced break in the middle of the
+  paragraph, and the rows moved when it was scrolled. A chunk now gives its last, partly filled row to
+  the next chunk, which starts there (`Tile::cut`, `tile_at`), so the rows are the same as if the
+  paragraph had been shaped in one piece. Test: `a_long_paragraph_wraps_as_if_it_were_shaped_in_one_piece`.
+* **Scrolling up after a jump moved by paragraphs.** After Find, a scene or comment jump, or opening a
+  chapter, one wheel notch up moved three paragraphs, not three rows. `scroll_by` now lays out the
+  paragraphs above and steps through their rows. Test: `scrolling_up_after_a_jump_moves_by_rows`.
+* **Typing past the bottom edge** moved the paragraph to the top of the window. The view now moves by
+  the row or two it takes; only a real jump recentres (`EditorView::layout`).
+* **Page Up and Page Down** move a screenful less two rows (they moved 18 rows whatever the window size).
+* **The empty pane of a new split accepted typing** that could never be saved, and then blocked
+  "Save all & exit". It is read-only now and says "Click a chapter or note in the tree to open it here."
+
+### Find and replace
+
+* Find starts from the caret, not from the top of the chapter, and stays on the match while the
+  query is refined.
+* The find bar follows the active tab and the text (it kept the matches of the chapter it was opened in).
+* Replace all keeps the caret where it was (it jumped to the end of the chapter) and says how many
+  matches it replaced; Replace with nothing to replace says so in the footer.
+
+### Text fields and dialogs
+
+* One-line fields (find, rename, palette, every dialog) draw a real caret, show the "all selected"
+  state, scroll with the caret, and a click places the caret (`field`, `probe_char` in `src/ui/gui.rs`).
+* The focused row of a dialog is marked only after Tab or the arrow keys, not when it opens.
+* A dialog no longer scrolls past its last field; dropdown arrows sit at the right edge; "Delete" and
+  "Overwrite" buttons are red.
+* The tree, the scenes and comments panels and the snapshot list show a scrollbar thumb when they
+  hold more than fits.
+
+### Saving and messages
+
+* With "Save chapters while I write" on, closing a tab or the program saves and goes on; it no longer
+  asks. With it off the question is still asked, and "Exit without saving" now really does not save
+  (it used to write the changes anyway).
+* Close project saves first and closes (it asked to be run twice).
+* A failed save stays in the footer in red until another message replaces it; typing no longer
+  clears it (`App::fail`).
+* "Opened novel.jw" instead of the full path.
+
+### Menus
+
+* View has the view switches (raw, preview, notes, marks) that were under Format; a new Go menu has
+  the navigation commands. "+ New" beside MANUSCRIPT makes a chapter and beside NOTES & RESEARCH a
+  note, without a menu in between.
+* The footer hides the tree, panel and split buttons on the history and preview screens and lights
+  them only when the panel is on screen.
+
+### Gates after this pass (release build, quiet machine)
+
+* `performance-check` passes. The rows are as before except the stress case (10 MB single line,
+  2560 x 1440): edit p50 5.4 ms and max 6.5 to 7.8 ms against 4.2 and 5.4 ms before, limit 12 ms. The
+  rows there are now full to the right edge, so about a third more text is on screen to draw; the
+  time per glyph is the same. `performance-results.json` was left as it was.
+* `large-file-check` passes, 204 of 204. A project made of paragraphs of 350 to 2500 words (not in
+  `bench_data`) gives typing p50 1.6 to 1.8 ms, p95 1.9 to 2.1 ms, worst 3.4 ms (limits 5 and 16.7 ms).
+* Both gates judge the worst sample, so they fail when anything else compiles or runs beside them.
+  Two runs in this pass failed for that reason only and passed when run alone.
+
+### Not done, by choice
+
+* The autosave message still says "Saved" after every pause; it no longer overwrites a message that
+  says more (replaced, deleted, restored).
+* Typing was driven with window messages, so shortcuts with Ctrl or Alt were exercised through the
+  menus, not the keyboard. The IME, drag and drop of tabs and tree rows, and the native file dialogs
+  were not looked at; the list at the top of this file still applies.
 
 ## Fixed in the feedback pass
 

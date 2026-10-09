@@ -138,7 +138,6 @@ enum Act {
     MatchStep(i32),
     ToggleReplace,
     Screen(ScreenAct),
-    NewMenu,
     CommentDo(&'static str, String),
     CommentFilter(&'static str),
     OpenRecent(usize),
@@ -187,8 +186,8 @@ pub struct App {
     renderer: CpuRenderer,
     fonts: FontSystem,
     labels: HashMap<String, Buffer>,
-    /// Multi-line boxes of the open form, by field index, as last painted.
-    area_probes: HashMap<usize, gui::AreaProbe>,
+    /// The text boxes painted in this frame, for placing the caret with a click.
+    probes: Vec<gui::AreaProbe>,
     font_names: Vec<String>,
     settings: Settings,
     tabs: BTreeMap<u64, Tab>,
@@ -218,6 +217,8 @@ pub struct App {
     clipboard: Clipboard,
     preedit: String,
     status: String,
+    /// A status message that reports lost work stays until another message replaces it.
+    status_error: String,
     /// The status text last seen and when it first appeared, so it can fade.
     status_seen: String,
     status_since: Instant,
@@ -344,7 +345,7 @@ impl App {
             renderer: CpuRenderer::default(),
             fonts: platform::font_system(),
             labels: HashMap::new(),
-            area_probes: HashMap::new(),
+            probes: Vec::new(),
             font_names: Vec::new(),
             settings: Settings::default(),
             tabs,
@@ -376,6 +377,7 @@ impl App {
             clipboard: Clipboard::default(),
             preedit: String::new(),
             status: String::new(),
+            status_error: String::new(),
             status_seen: String::new(),
             status_since: Instant::now(),
             search_version: Arc::new(AtomicU64::new(0)),
@@ -418,6 +420,15 @@ impl App {
             pending_import: None,
             pending_jump: None,
         }
+    }
+    /// Reports a failure that must not be missed: unlike other messages it does not fade and
+    /// typing does not clear it.
+    pub(super) fn fail(&mut self, message: String) {
+        self.status_error = message.clone();
+        self.status = message;
+    }
+    pub(super) fn failing(&self) -> bool {
+        !self.status.is_empty() && self.status == self.status_error
     }
     fn id(&mut self) -> u64 {
         let id = self.next_id;
@@ -490,7 +501,13 @@ impl App {
             tab.view.ensure_cursor(&tab.document);
         }
         self.scan(id, false);
-        self.status.clear();
+        if !self.failing() {
+            self.status.clear();
+        }
+        if self.overlay.as_ref().is_some_and(|o| o.docked() && !o.focused) {
+            // Typing in the text with the find bar open: its matches follow.
+            self.refresh_overlay();
+        }
         self.title();
         self.redraw();
     }
@@ -656,7 +673,12 @@ impl App {
     }
     fn close_tab(&mut self, id: u64, discard: bool) {
         if !discard && self.tabs.get(&id).is_some_and(|t| t.document.dirty()) {
-            self.overlay = Some(Overlay::new(Kind::Close(id)));
+            if self.settings.autosave {
+                // Saving is automatic, so there is nothing to ask: save, then close.
+                self.unsaved(Kind::Close(id), false);
+            } else {
+                self.overlay = Some(Overlay::new(Kind::Close(id)));
+            }
             self.redraw();
             return;
         }
@@ -975,9 +997,11 @@ impl App {
                             tab.path.clone().unwrap_or_default(),
                         )
                     });
+                let tab = self.active_id();
                 if let Some(overlay) = &mut self.overlay {
                     overlay.version = version;
                     overlay.pending = true;
+                    overlay.tab = tab;
                 }
                 std::thread::spawn(move || {
                     let mut rows = Vec::new();
@@ -1124,7 +1148,8 @@ impl App {
         self.redraw();
     }
     fn note(&mut self, text: &str) {
-        if let Some(overlay) = &mut self.overlay {
+        // Dialogs show their own message; the find bar has no room, so it uses the footer.
+        if let Some(overlay) = self.overlay.as_mut().filter(|o| !o.docked()) {
             overlay.note = text.into();
         } else {
             self.status = text.into();
@@ -1254,7 +1279,14 @@ impl App {
             self.overlay = None;
             match kind {
                 Kind::Close(id) => self.close_tab(id, true),
-                Kind::Quit => self.persist_session(true),
+                Kind::Quit => {
+                    // Leaving writes out whatever is unsaved, so forget those edits first.
+                    for tab in self.tabs.values_mut() {
+                        let (revision, text) = (tab.document.revision, tab.document.text.clone());
+                        tab.document.mark_saved(revision, text);
+                    }
+                    self.persist_session(true)
+                }
                 Kind::ChangeWorkspace(path) => {
                     self.shutdown_project();
                     self.clear_tabs();
@@ -1316,6 +1348,10 @@ impl App {
         let Some(tab) = self.tabs.get_mut(&id) else {
             return;
         };
+        if all && found.is_none() {
+            self.note("There is no match to replace.");
+            return;
+        }
         if all {
             let snapshot = tab.document.text.clone();
             let (revision, epoch) = (tab.document.revision, tab.disk_epoch);
@@ -1329,7 +1365,7 @@ impl App {
             return;
         }
         let Some(found) = found else {
-            self.note("Pick a match from the list first.");
+            self.note("There is no match to replace.");
             return;
         };
         let current = (found.end <= tab.document.text.len_chars() && found.start <= found.end)
@@ -1340,10 +1376,8 @@ impl App {
         if same {
             tab.document.replace(found.start..found.end, &replacement);
             self.edited(id);
+            // The caret is now after the new words, so the search moves on to the next match.
             self.refresh_overlay();
-            if let Some(overlay) = &mut self.overlay {
-                overlay.selected = selected;
-            }
         } else {
             self.note("The match changed. Search refreshed; try again.");
             self.refresh_overlay();
@@ -1385,10 +1419,13 @@ impl App {
             Act::Block => {}
             Act::Press(name) => self.press(name),
             Act::Field(secondary) => {
+                let at = self.probe_char();
                 if let Some(o) = &mut self.overlay {
                     o.secondary = secondary;
-                    o.caret = None;
                     o.focused = true;
+                    o.select_all = false;
+                    let len = o.input().chars().count();
+                    o.caret = at.filter(|at| *at < len);
                 }
             }
             Act::MatchStep(delta) => self.step_match(delta),
@@ -1407,7 +1444,6 @@ impl App {
             }
             Act::Replace(all) => self.replace(all),
             Act::Screen(action) => self.screen_act(action),
-            Act::NewMenu => self.open_popup(crate::ui::menu::NEW_MENU, rect.x, rect.y + rect.height as i32),
             Act::OpenRecent(index) => {
                 if let Some(path) = self.recent.iter().filter(|r| r.is_file()).nth(index).cloned() {
                     self.open_project_checked(path);
@@ -1612,6 +1648,8 @@ impl App {
     fn command(&mut self, command: Command) {
         self.dirty_session();
         let active = self.active_id();
+        // Only a loaded chapter or note takes edits; the empty pane of a new split has no file.
+        let editable = active.filter(|id| self.tabs.get(id).is_some_and(|t| t.path.is_some() && !t.loading && !t.failed));
         match command {
             Command::NewProject => self.choose(Choose::NewProject),
             Command::OpenProject => self.choose(Choose::OpenProject),
@@ -1626,9 +1664,12 @@ impl App {
                 }
             }
             Command::CloseProject => {
+                self.flush_tabs();
                 if self.tabs.values().any(|t| t.document.dirty()) {
-                    self.save_all();
-                    self.status = "Saving… close the project again once it is saved.".into();
+                    // A write is still under way, or it failed and the footer says why.
+                    if !self.failing() {
+                        self.status = "Still saving… close the project again in a moment.".into();
+                    }
                 } else {
                     self.shutdown_project();
                     self.clear_tabs();
@@ -1692,7 +1733,7 @@ impl App {
                 }
             }
             Command::Undo | Command::Redo => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     if let Some(tab) = self.tabs.get_mut(&id) {
                         if command == Command::Undo {
                             tab.document.undo();
@@ -1712,7 +1753,7 @@ impl App {
                 }
             }
             Command::Copy | Command::Cut => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     let tab = &self.tabs[&id];
                     let range = tab.document.selection();
                     if !range.is_empty() {
@@ -1729,7 +1770,7 @@ impl App {
                 }
             }
             Command::Paste => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     match self.clipboard.read() {
                         Ok(text) => {
                             let tab = self.tabs.get_mut(&id).unwrap();
@@ -1745,14 +1786,14 @@ impl App {
                 }
             }
             Command::Bold | Command::Italic => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     let doc = &mut self.tabs.get_mut(&id).unwrap().document;
                     doc.toggle_emphasis(if command == Command::Bold { "**" } else { "*" });
                     self.edited(id);
                 }
             }
             Command::ToggleNote | Command::NoteParagraph => {
-                if let Some(id) = active {
+                if let Some(id) = editable {
                     let marker = self.marker();
                     let doc = &mut self.tabs.get_mut(&id).unwrap().document;
                     let selection = if command == Command::NoteParagraph { paragraph_around(&doc.text, doc.cursor) } else { doc.selection() };
@@ -1852,10 +1893,13 @@ impl App {
                 }
             }
             Command::Quit => {
-                if self.tabs.values().any(|t| t.document.dirty()) {
-                    self.show(Kind::Quit);
-                } else {
+                if !self.tabs.values().any(|t| t.document.dirty()) {
                     self.persist_session(true);
+                } else if self.settings.autosave {
+                    // Saving is automatic, so there is nothing to ask: save, then leave.
+                    self.unsaved(Kind::Quit, false);
+                } else {
+                    self.show(Kind::Quit);
                 }
             }
         }
@@ -1999,7 +2043,7 @@ impl App {
             .as_ref()
             .map(|p| (p.core.manifest.settings.typography.clone(), p.core.manifest.settings.language));
         let tab = self.tabs.get_mut(&id).unwrap();
-        if tab.loading || tab.failed || self.project.is_none() {
+        if tab.loading || tab.failed || tab.path.is_none() || self.project.is_none() {
             return;
         }
         let mut edited = false;
@@ -2057,14 +2101,11 @@ impl App {
                 tab.view.ensure_cursor(&tab.document);
             }
             Key::Named(NamedKey::PageUp | NamedKey::PageDown) => {
-                tab.view.scroll(
-                    &tab.document,
-                    if matches!(key, Key::Named(NamedKey::PageDown)) {
-                        18
-                    } else {
-                        -18
-                    },
-                );
+                let mut settings = self.settings.clone();
+                settings.font_size *= self.scale;
+                let rows = tab.view.page(&settings);
+                let rows = if matches!(key, Key::Named(NamedKey::PageDown)) { rows } else { -rows };
+                tab.view.scroll_by(&tab.document, &tab.blocks, &settings, &mut self.fonts, rows);
                 tab.document.select(tab.view.top, shift);
             }
             Key::Named(NamedKey::Backspace) => {
@@ -2265,7 +2306,7 @@ impl App {
             self.status_seen = self.status.clone();
             self.status_since = now;
         }
-        if !self.status.is_empty() {
+        if !self.status.is_empty() && !self.failing() {
             let due = self.status_since + STATUS_LIFETIME;
             if due <= now {
                 self.status.clear();
@@ -2310,8 +2351,13 @@ impl App {
             return;
         }
         self.scale = self.scale_override.unwrap_or(window.scale_factor() as f32);
+        if self.overlay.as_ref().is_some_and(|o| o.docked() && o.tab != self.active_id()) {
+            // The find bar now sits over another chapter: search that one.
+            self.refresh_overlay();
+        }
         self.renderer.resize(size.width, size.height);
         self.hits.clear();
+        self.probes.clear();
         self.pane_rects.clear();
         let palette = Palette::new(self.settings.light(), self.settings.accent_color());
         let full = Rect {
@@ -2746,10 +2792,12 @@ impl App {
         self.mouse = position;
         match self.drag.clone() {
             Some(Drag::Selection(id)) => {
+                let mut settings = self.settings.clone();
+                settings.font_size *= self.scale;
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     if let Some(rect) = tab.view.rect {
                         if position.y < rect.y as f64 {
-                            tab.view.scroll(&tab.document, -2);
+                            tab.view.scroll_by(&tab.document, &tab.blocks, &settings, &mut self.fonts, -2);
                         }
                         if position.y > (rect.y + rect.height as i32) as f64 {
                             tab.view.scroll(&tab.document, 2);
@@ -2975,6 +3023,10 @@ impl ApplicationHandler<UserEvent> for App {
                             self.scan(id, true);
                             self.rebuild_marks(id);
                             self.apply_jump();
+                            if self.overlay.as_ref().is_some_and(|o| o.docked()) {
+                                // The find bar was waiting for this text.
+                                self.refresh_overlay();
+                            }
                         }
                         ReadEvent::Error(error) => {
                             tab.loading = false;
@@ -2993,12 +3045,15 @@ impl ApplicationHandler<UserEvent> for App {
                             if tab.document.dirty() {
                                 tab.edited = Some(Instant::now());
                             }
-                            self.status = "Saved".into();
+                            // A message that says more (what was replaced, deleted, restored) stays.
+                            if self.status.is_empty() || self.status == "Saving…" || self.failing() {
+                                self.status = "Saved".into();
+                            }
                         }
                         Err(error) => {
-                            self.status = format!("Save failed: {error}");
-                            self.after_save = None;
                             tab.edited = None;
+                            self.after_save = None;
+                            self.fail(format!("Save failed: {error}"));
                         }
                     }
                     self.scan(id, false);
@@ -3051,15 +3106,25 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::Rows(version, rows) => {
+                let caret = self.active_id().and_then(|id| self.tabs.get(&id)).map_or(0, |t| t.document.selection().start);
+                let mut follow = false;
                 if let Some(overlay) = &mut self.overlay {
                     if overlay.version == version {
                         overlay.rows = rows;
                         overlay.pending = false;
-                        overlay.selected =
-                            overlay.selected.min(overlay.rows.len().saturating_sub(1));
+                        overlay.selected = if overlay.docked() {
+                            // Find starts from the caret, not from the top of the chapter.
+                            overlay.rows.iter().position(|r| matches!(&r.action, Action::Match(m) if m.start >= caret)).unwrap_or(0)
+                        } else {
+                            overlay.selected.min(overlay.rows.len().saturating_sub(1))
+                        };
+                        // While the author types in the text, the matches update but the caret stays.
+                        follow = overlay.focused;
                     }
                 }
-                self.preview_match();
+                if follow {
+                    self.preview_match();
+                }
             }
             UserEvent::Config(result) => match result {
                 Ok((settings, session)) => {
@@ -3127,10 +3192,18 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Replaced(id, epoch, revision, text) => {
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     if tab.document.revision == revision && tab.disk_epoch == epoch {
-                        let end = tab.document.text.len_chars();
+                        let (end, caret) = (tab.document.text.len_chars(), tab.document.cursor);
                         tab.document.replace_rope(0..end, text);
+                        // Stay where the author was instead of landing at the end of the chapter.
+                        tab.document.select(caret, false);
+                        let count = self.overlay.as_ref().map_or(0, |o| o.rows.len());
                         self.edited(id);
                         self.refresh_overlay();
+                        self.status = match count {
+                            1 => "Replaced 1 match.".into(),
+                            2..500 => format!("Replaced {count} matches."),
+                            _ => "Replaced every match.".into(),
+                        };
                     } else {
                         self.status =
                             "The document changed during replace-all. Please run it again.".into();
@@ -3223,7 +3296,7 @@ impl ApplicationHandler<UserEvent> for App {
                     overlay.type_text(&text);
                     self.refresh_overlay();
                 } else if self.screen.is_some() || self.project.is_none() {
-                } else if let Some(id) = self.active_id() {
+                } else if let Some(id) = self.active_id().filter(|id| self.tabs.get(id).is_some_and(|t| t.path.is_some() && !t.loading && !t.failed)) {
                     self.tabs.get_mut(&id).unwrap().document.insert(&text);
                     self.edited(id);
                 }
@@ -3291,8 +3364,10 @@ impl ApplicationHandler<UserEvent> for App {
                     .find(|(_, rect)| contains(*rect, x, y))
                 {
                     if let Some(id) = self.split.pane(*pane).and_then(Pane::tab) {
+                        let mut settings = self.settings.clone();
+                        settings.font_size *= self.scale;
                         if let Some(tab) = self.tabs.get_mut(&id) {
-                            tab.view.scroll(&tab.document, rows);
+                            tab.view.scroll_by(&tab.document, &tab.blocks, &settings, &mut self.fonts, rows);
                         }
                     }
                 }
