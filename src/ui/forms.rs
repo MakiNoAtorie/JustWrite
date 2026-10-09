@@ -1755,7 +1755,7 @@ impl App {
         self.renderer.fill(Rect { x: rect.x + 1, y: footer_top, width: rect.width - 2, height: 1 }, p.border);
         if !form.note.is_empty() {
             let note = Rect { x: rect.x + pad, y: footer_top + self.s(4.), width: inner_width, height: self.su(20.) };
-            let tint = if form.note.starts_with("Saved") || form.note.starts_with("Deleted") { p.muted } else { 0xd0605e };
+            let tint = if form.note.starts_with("Saved") || form.note.starts_with("Deleted") { p.muted } else { p.danger_text() };
             let text = self.fit(&form.note, note.width as f32, 12.);
             self.put(&text, note, 12., tint, Face::Normal, Align::Left);
         }
@@ -1798,7 +1798,7 @@ impl App {
     }
     fn paint_area(&mut self, rect: Rect, field: &Field, caret: Option<Option<usize>>, hit: Act, p: Palette) {
         let focused = caret.is_some();
-        self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent } else { super::gui::mix(p.border, p.text, 0.12) });
+        self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent_text() } else { super::gui::mix(p.border, p.text, 0.12) });
         let inner = Rect { x: rect.x + self.s(10.), y: rect.y + self.s(6.), width: rect.width.saturating_sub(self.su(20.)), height: rect.height.saturating_sub(self.su(12.)) };
         let chars: Vec<char> = field.text.chars().collect();
         let at = caret.flatten().unwrap_or(chars.len()).min(chars.len());

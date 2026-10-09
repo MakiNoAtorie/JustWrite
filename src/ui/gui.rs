@@ -509,10 +509,10 @@ impl App {
             if enabled && (keyed == Some(position) || (keyed.is_none() && contains(line, self.mouse.x, self.mouse.y))) {
                 self.renderer.fill_round(line, self.su(5.), selected_fill(p.raised, p));
             }
-            let tint = if enabled { p.text } else { mix(p.muted, p.raised, 0.4) };
+            let tint = if enabled { p.text } else { p.faint(p.raised) };
             if self.checked(*command) {
                 let tick = Rect { x: line.x + self.s(6.), width: self.su(18.), ..line };
-                self.put("✓", tick, 12., p.accent, Face::Normal, Align::Left);
+                self.put("✓", tick, 12., p.accent_text(), Face::Normal, Align::Left);
             }
             let text = Rect {
                 x: line.x + self.s(28.),
@@ -597,7 +597,7 @@ impl App {
             // The close button doubles as the unsaved marker until the pointer is over the tab.
             let glyph = if dirty && !hover && !self.hot(close) { "●" } else { "×" };
             if active || hover || dirty {
-                self.put(glyph, close, 14., if dirty && glyph == "●" { p.accent } else { p.muted }, Face::Normal, Align::Center);
+                self.put(glyph, close, 14., if dirty && glyph == "●" { p.accent_text() } else { p.muted }, Face::Normal, Align::Center);
             }
             self.hits.push((close, Hit::Close(id)));
         }
@@ -650,7 +650,7 @@ impl App {
             if enabled {
                 self.button_face(text, Rect { x, y, width, height }, hit, look, face, Align::Center, p);
             } else {
-                self.put(text, Rect { x, y, width, height }, 13., mix(p.muted, p.surface, 0.5), face, Align::Center);
+                self.put(text, Rect { x, y, width, height }, 13., p.faint(p.surface), face, Align::Center);
             }
             x += width as i32 + self.s(2.);
         }
@@ -746,7 +746,7 @@ impl App {
                 width: editor_rect.width,
                 height: (settings.font_size * 1.65) as u32,
             };
-            self.put("Start writing…", hint, 16., mix(p.muted, p.background, 0.35), Face::Normal, Align::Left);
+            self.put("Start writing…", hint, 16., p.faint(p.background), Face::Normal, Align::Left);
         }
         if !focus {
             let scrollbar = Rect {
@@ -826,7 +826,7 @@ impl App {
         } else {
             format!("{} of {found}", selected + 1)
         };
-        self.put(&text, counter, 12., if found == 0 && !query.is_empty() { 0xd0605e } else { p.muted }, Face::Normal, Align::Right);
+        self.put(&text, counter, 12., if found == 0 && !query.is_empty() { p.danger_text() } else { p.muted }, Face::Normal, Align::Right);
         let width = (counter.x - rect.x - pad - self.s(8.)).max(80) as u32;
         let first = Rect { x: rect.x + pad, y, width, height };
         self.field(first, &query, "Find…", if secondary { None } else { caret }, focused && !secondary, Act::Field(false), p);
@@ -936,7 +936,7 @@ impl App {
             };
             if let Some((label, _)) = row.heading {
                 let head = Rect { x: line.x + self.s(6.), y: line.y + self.s(4.), width: line.width, height: line.height };
-                self.put(label, head, 10.5, mix(p.muted, p.accent, 0.3), Face::Bold, Align::Left);
+                self.put(label, head, 10.5, mix(p.muted, p.accent_text(), 0.5), Face::Bold, Align::Left);
                 let text = "+ New";
                 let width = self.measure(text, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(16.);
                 let add = Rect { x: line.x + line.width as i32 - width as i32 - self.s(2.), y: line.y + self.s(2.), width, height: line.height - self.su(4.) };
@@ -972,7 +972,7 @@ impl App {
             self.put(&title, Rect { x: text_x, width: room as u32, ..line }, 13., p.text, if row.part { Face::Bold } else { Face::Normal }, Align::Left);
             if row.open > 0 {
                 let at = Rect { x: line.x + line.width as i32 - words_width - badge, width: badge as u32, ..line };
-                self.put(&format!("●{}", row.open), at, 10.5, p.accent, Face::Normal, Align::Left);
+                self.put(&format!("●{}", row.open), at, 10.5, p.accent_text(), Face::Normal, Align::Left);
             }
             let at = Rect { x: line.x, width: line.width - self.su(6.), ..line };
             self.put(&words, at, 11., p.muted, Face::Normal, Align::Right);
@@ -1076,7 +1076,7 @@ impl App {
             } else if self.hot(row) {
                 self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
             }
-            self.put(&format!("Scene {}", n + 1), Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(20.) }, 11., if n == current { p.accent } else { p.muted }, Face::Bold, Align::Left);
+            self.put(&format!("Scene {}", n + 1), Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(20.) }, 11., if n == current { p.accent_text() } else { p.muted }, Face::Bold, Align::Left);
             let snippet = self.fit(if snippets[n].is_empty() { "(empty)" } else { &snippets[n] }, row.width as f32 - self.s(20.) as f32, 12.5);
             self.put(&snippet, Rect { x: row.x + self.s(10.), y: row.y + self.s(22.), width: row.width - self.su(20.), height: self.su(22.) }, 12.5, p.text, Face::Normal, Align::Left);
             self.hits.push((row, Hit::Scene(*line)));
@@ -1153,7 +1153,7 @@ impl App {
             let meta = self.fit(&meta, inner_w as f32, 10.5);
             self.put(&meta, Rect { x: inner_x, y: card.y + self.s(88.), width: inner_w, height: self.su(18.) }, 10.5, p.muted, Face::Normal, Align::Left);
             if c.orphaned {
-                self.put("The commented text was deleted", Rect { x: inner_x, y: card.y + self.s(104.), width: inner_w, height: self.su(18.) }, 10.5, 0xd08a50, Face::Normal, Align::Left);
+                self.put("The commented text was deleted", Rect { x: inner_x, y: card.y + self.s(104.), width: inner_w, height: self.su(18.) }, 10.5, p.warning_text(), Face::Normal, Align::Left);
             } else if let Some(reply) = c.replies.last() {
                 let text = self.fit(&format!("↳ {} repl{}: {}", c.replies.len(), if c.replies.len() == 1 { "y" } else { "ies" }, reply.body.replace('\n', " ")), inner_w as f32, 10.5);
                 self.put(&text, Rect { x: inner_x, y: card.y + self.s(104.), width: inner_w, height: self.su(18.) }, 10.5, p.muted, Face::Normal, Align::Left);
@@ -1185,6 +1185,10 @@ impl App {
             ("Chapters", Command::ToggleTree, self.show_tree),
         ];
         for (text, command, on) in buttons {
+            // Without a project there is no tree, panel or split to toggle.
+            if self.project.is_none() && matches!(command, Command::ToggleTree | Command::TogglePanel | Command::SplitRight) {
+                continue;
+            }
             let width = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
             x -= width as i32;
             self.button(text, Rect { x, y, width, height }, Hit::Command(command), if on { Look::Active } else { Look::Plain }, p);
@@ -1253,7 +1257,16 @@ impl App {
             self.button(text, Rect { x: bx, y, width: w, height }, Hit::Command(command), look, p);
             bx += w as i32 + self.s(10.);
         }
-        y += self.s(66.);
+        y += self.s(52.);
+        let shortcuts = [Command::NewProject, Command::OpenProject, Command::Palette]
+            .iter()
+            .filter_map(|c| menu::info(*c))
+            .map(|info| format!("{} {}", self.shortcut_of(info), info.name.trim_end_matches('…').to_lowercase()))
+            .collect::<Vec<_>>()
+            .join("   ·   ");
+        let shortcuts = self.fit(&shortcuts, width as f32, 12.);
+        self.put(&shortcuts, Rect { x, y, width, height: self.su(22.) }, 12., p.muted, Face::Normal, Align::Left);
+        y += self.s(40.);
         let recent: Vec<PathBuf> = self.recent.iter().filter(|r| r.is_file()).take(6).cloned().collect();
         if !recent.is_empty() {
             self.section("RECENT PROJECTS", x, y, width, p);
@@ -1298,7 +1311,7 @@ impl App {
         rect
     }
     pub(super) fn field(&mut self, rect: Rect, text: &str, placeholder: &str, caret: Option<usize>, focused: bool, hit: Act, p: Palette) {
-        self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent } else { mix(p.border, p.text, 0.12) });
+        self.renderer.framed(rect, self.su(6.), p.background, if focused { p.accent_text() } else { mix(p.border, p.text, 0.12) });
         let inner = Rect { x: rect.x + self.s(12.), width: rect.width.saturating_sub(self.su(24.)), ..rect };
         if text.is_empty() && !(focused && caret.is_some()) {
             if focused {
@@ -1569,8 +1582,9 @@ impl App {
         let inner = Rect { x: rect.x + pad, y, width: rect.width - pad as u32 * 2, height: self.su(30.) };
         self.put(&title, inner, 15., p.text, Face::Bold, Align::Left);
         y += self.s(40.);
-        for line in message.lines() {
-            self.put(line, Rect { y, height: self.su(22.), ..inner }, 12.5, p.muted, Face::Normal, Align::Left);
+        for (n, line) in message.lines().enumerate() {
+            // The question is the point of the dialog; what follows from it is secondary.
+            self.put(line, Rect { y, height: self.su(22.), ..inner }, 12.5, if n == 0 { p.text } else { p.muted }, Face::Normal, Align::Left);
             y += self.s(22.);
         }
         y += self.s(10.);
@@ -1582,18 +1596,18 @@ impl App {
         if kind_is_shortcut(&kind) {
             let shown = if query.is_empty() { "No shortcut".to_owned() } else { query.replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }) };
             let cap = Rect { x: inner.x, y, width: inner.width, height: self.su(48.) };
-            self.renderer.framed(cap, self.su(7.), p.background, p.accent);
+            self.renderer.framed(cap, self.su(7.), p.background, p.accent_text());
             self.put(&shown, cap, 18., p.text, Face::Bold, Align::Center);
             y += self.s(56.);
         }
         if !note.is_empty() {
-            self.put(&note, Rect { y, height: self.su(22.), ..inner }, 12., 0xd0605e, Face::Normal, Align::Left);
+            self.put(&note, Rect { y, height: self.su(22.), ..inner }, 12., p.danger_text(), Face::Normal, Align::Left);
         }
         self.dialog_buttons(rect, &buttons, p);
     }
     pub(super) fn section(&mut self, text: &str, x: i32, y: i32, width: u32, p: Palette) {
         let area = Rect { x, y, width, height: self.su(22.) };
-        self.put(text, area, 10.5, mix(p.muted, p.accent, 0.35), Face::Bold, Align::Left);
+        self.put(text, area, 10.5, mix(p.muted, p.accent_text(), 0.5), Face::Bold, Align::Left);
     }
     /// Two or more options in one rounded track; the chosen one is highlighted.
     pub(super) fn segmented(&mut self, rect: Rect, options: &[(&str, bool, Act)], p: Palette) {

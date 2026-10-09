@@ -628,12 +628,12 @@ impl App {
             self.put(&sub, Rect { x: row.x + self.s(12.), y: row.y + self.s(30.), width: row.width - self.su(24.), height: self.su(20.) }, 11.5, p.muted, Face::Normal, Align::Left);
             let badge = if marked { "marked".to_owned() } else { kind_name(meta.kind).to_owned() };
             let tint = match meta.kind {
-                SnapshotKind::Manual => p.accent,
+                SnapshotKind::Manual => p.accent_text(),
                 SnapshotKind::Auto => p.muted,
-                SnapshotKind::Safety => 0xd08a50,
-                SnapshotKind::Restore => 0x6aa6d6,
+                SnapshotKind::Safety => p.warning_text(),
+                SnapshotKind::Restore => if p.light { 0x2b6aa0 } else { 0x6aa6d6 },
             };
-            self.put(&badge, Rect { x: row.x, y: row.y + self.s(4.), width: row.width - self.su(12.), height: self.su(24.) }, 11., if marked { p.accent } else { tint }, Face::Bold, Align::Right);
+            self.put(&badge, Rect { x: row.x, y: row.y + self.s(4.), width: row.width - self.su(12.), height: self.su(24.) }, 11., if marked { p.accent_text() } else { tint }, Face::Bold, Align::Right);
             self.hits.push((row, Hit::Do(Act::Screen(ScreenAct::Select(n)))));
         }
         // Details
@@ -879,7 +879,7 @@ impl App {
                 Some(error) => format!("The preview could not be made: {error}"),
                 None => "Typesetting the book…".to_owned(),
             };
-            self.put(&message, Rect { x: body.x + self.s(24.), y: body.y + self.s(24.), width: body.width - self.su(48.), height: self.su(30.) }, 13., if v.error.is_some() { 0xd0605e } else { p.muted }, Face::Normal, Align::Left);
+            self.put(&message, Rect { x: body.x + self.s(24.), y: body.y + self.s(24.), width: body.width - self.su(48.), height: self.su(30.) }, 13., if v.error.is_some() { p.danger_text() } else { p.muted }, Face::Normal, Align::Left);
             return;
         };
         let pages = typeset.pages();
