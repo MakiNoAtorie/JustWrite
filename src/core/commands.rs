@@ -74,6 +74,7 @@ pub enum Command {
     HideNotes,
     PreviewNotes,
     Focus,
+    HideInterface,
     Settings,
     Keymap,
 }
@@ -152,7 +153,8 @@ commands![
     (Command::PreviewView, "preview_view", "Preview view: text as exported", ""),
     (Command::HideNotes, "hide_notes", "Hide notes", "Ctrl+Shift+Y"),
     (Command::PreviewNotes, "preview_notes", "Show notes in the preview", ""),
-    (Command::Focus, "focus", "Focus mode", "F11"),
+    (Command::Focus, "focus", "Full screen", "F11"),
+    (Command::HideInterface, "hide_interface", "Hide or show all panels", "Tab"),
     (Command::Settings, "settings", "Settings…", "Ctrl+,"),
     (Command::Keymap, "keymap", "Keyboard shortcuts…", ""),
 ];

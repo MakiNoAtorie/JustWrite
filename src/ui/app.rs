@@ -206,6 +206,8 @@ pub struct App {
     tree_reveal: bool,
     outline_top: usize,
     show_tree: bool,
+    /// Tab hides the menu, tabs, panels and footer, as painting programs do.
+    hide_interface: bool,
     show_outline: bool,
     tree_width: f32,
     outline_width: f32,
@@ -366,6 +368,7 @@ impl App {
             tree_reveal: false,
             outline_top: 0,
             show_tree: true,
+            hide_interface: false,
             show_outline: true,
             tree_width: 232.,
             outline_width: 260.,
@@ -1900,7 +1903,6 @@ impl App {
             Command::Focus => {
                 if let Some(window) = &self.window {
                     let focus = window.fullscreen().is_none();
-                    window.set_decorations(!focus);
                     window.set_fullscreen(if focus {
                         Some(Fullscreen::Borderless(None))
                     } else {
@@ -1908,6 +1910,7 @@ impl App {
                     });
                 }
             }
+            Command::HideInterface => self.hide_interface = !self.hide_interface,
             Command::Quit => {
                 if !self.tabs.values().any(|t| t.document.dirty()) {
                     self.persist_session(true);
@@ -2039,7 +2042,10 @@ impl App {
         }
         if matches!(key, Key::Named(NamedKey::Escape)) {
             self.preedit.clear();
-            if self
+            if self.hide_interface {
+                self.hide_interface = false;
+                self.redraw();
+            } else if self
                 .window
                 .as_ref()
                 .is_some_and(|w| w.fullscreen().is_some())
@@ -2383,7 +2389,7 @@ impl App {
             height: size.height,
         };
         self.renderer.fill(full, palette.background);
-        let focus = window.fullscreen().is_some();
+        let focus = self.hide_interface;
         let menubar = if focus { 0 } else { self.su(30.) };
         let footer = if focus { 0 } else { self.su(28.) };
         let body = size.height.saturating_sub(footer + menubar);
@@ -2451,7 +2457,7 @@ impl App {
                 width: self.su(220.),
                 height: self.su(22.),
             };
-            self.put("Esc exits focus mode", hint, 11., palette.muted, gui::Face::Normal, gui::Align::Right);
+            self.put("Tab shows the panels", hint, 11., palette.muted, gui::Face::Normal, gui::Align::Right);
         }
         if !focus {
             self.paint_dividers(palette);

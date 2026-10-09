@@ -1265,7 +1265,7 @@ impl App {
         let mut x = rect.x + rect.width as i32 - self.s(6.);
         let buttons = [
             ("Settings", Command::Settings, false),
-            ("Focus", Command::Focus, false),
+            ("Full screen", Command::Focus, false),
             ("Split", Command::SplitRight, false),
             // Lit only while the panel is on screen: a narrow window hides both.
             ("Panel", Command::TogglePanel, self.outline_rect.is_some()),

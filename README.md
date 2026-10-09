@@ -94,7 +94,8 @@ Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on 
 | Rename · move up · move down | F2 · Alt+↑ · Alt+↓ |
 | Split right · down | Ctrl+\ · Ctrl+Shift+\ |
 | Hide notes · show marks | Ctrl+Shift+Y · Ctrl+M |
-| Focus mode | F11 |
+| Full screen | F11 |
+| Hide or show all panels | Tab |
 | Command palette | Ctrl+Shift+P |
 
 ## Building
