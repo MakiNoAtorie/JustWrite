@@ -268,6 +268,9 @@ pub struct Options<'a> {
     pub scene_symbol: &'a str,
     /// First-line indent of the chunk, in en spaces; 0 for none. Only the preview view sets it.
     pub indent: u8,
+    /// Caret position in the same character coordinates as `start`. On the line being edited,
+    /// `*` markers show only on the emphasis that holds it; `None` shows them all.
+    pub caret: Option<usize>,
 }
 
 /// State a chunk starts in, carried over from the lines and chunks before it.
@@ -366,6 +369,35 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         for r in parsed.delimiters.iter().chain(&parsed.escapes) {
             conceal[r.clone()].fill(true);
         }
+        // Delimiters are shown only for emphasis that holds the caret (edges included).
+        let mut reveal = vec![options.show_markers || (raw && options.caret.is_none()); prose.len()];
+        if raw && options.caret.is_some() {
+            for r in &parsed.escapes {
+                reveal[r.clone()].fill(true);
+            }
+        }
+        let line_chars = line.chars().count();
+        if let (true, Some(caret)) = (raw, options.caret.filter(|c| (char_offset..=char_offset + line_chars).contains(c))) {
+            let mut at = 0usize;
+            let mut caret_byte = None;
+            for (k, (byte, character)) in line.char_indices().enumerate() {
+                if char_offset + k >= caret {
+                    caret_byte = Some(at);
+                    break;
+                }
+                if class[byte] == Class::Prose {
+                    at += character.len_utf8();
+                }
+            }
+            let caret_byte = caret_byte.unwrap_or(at);
+            for (range, e) in &parsed.spans {
+                let n = if e.bold { 2 } else { 1 };
+                if (range.start - n..=range.end + n).contains(&caret_byte) {
+                    reveal[range.start - n..range.start].fill(true);
+                    reveal[range.end..range.end + n].fill(true);
+                }
+            }
+        }
         let mut prose_index = 0usize; // byte index into `prose`
         let hide_notes_here = options.hide_notes && !raw;
         let mut collapsing = false;
@@ -378,7 +410,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
                     style.bold = e.bold;
                     style.italic = e.italic;
                     if conceal[prose_index] {
-                        visible = raw;
+                        visible = reveal[prose_index];
                         style.dim = true;
                     }
                     prose_index += character.len_utf8();
@@ -584,7 +616,7 @@ pub fn format_at(line: &str, col: usize, marker: &Marker) -> Format {
 mod tests {
     use super::*;
     fn options(marker: &Marker) -> Options<'_> {
-        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0 }
+        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None }
     }
 
     #[test]
@@ -642,6 +674,16 @@ mod tests {
             assert!(visible.chars().all(|c| text.contains(c)), "{text:?} -> {visible:?}");
             let _ = parse_emphasis(&text).per_byte(text.len());
         }
+    }
+
+    #[test]
+    fn markers_show_only_on_the_emphasis_holding_the_caret() {
+        let marker = Marker::default();
+        let at = |caret: usize| present("a *b* **c** d\n", 0, Some(0), Initial::default(), Options { caret: Some(caret), ..options(&marker) }).text;
+        assert_eq!(at(0), "a b c d\n");
+        assert_eq!(at(3), "a *b* c d\n");
+        assert_eq!(at(9), "a b **c** d\n");
+        assert_eq!(at(usize::MAX), "a b c d\n");
     }
 
     #[test]

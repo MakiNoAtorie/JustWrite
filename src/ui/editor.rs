@@ -29,6 +29,7 @@ pub struct Tile {
     pub buffer: Buffer,
     source: String,
     raw: bool,
+    caret: Option<usize>,
     initial: Initial,
     hide: bool,
     width: f32,
@@ -331,6 +332,11 @@ impl EditorView {
         let inside = end < line_end;
         // The preview shows the finished text: no markers, even on the line being edited.
         let raw = !settings.preview && (settings.show_markers || line == cursor_line);
+        // Off the caret's own emphasis the `*` markers stay hidden, so the caret moves the cache key.
+        let caret = (raw && !settings.show_markers).then(|| {
+            let at = doc.cursor.wrapping_sub(start);
+            if doc.cursor >= start && doc.cursor <= end { at } else { usize::MAX }
+        });
         let (indent, justify) = if settings.preview {
             (self.indent_for(doc, line, start == line_start, settings), settings.preview_justify)
         } else {
@@ -346,6 +352,7 @@ impl EditorView {
             tile.chunk == chunk
                 && tile.inside == inside
                 && tile.raw == raw
+                && tile.caret == caret
                 && tile.initial == initial
                 && tile.hide == hide
                 && tile.width == width
@@ -362,6 +369,7 @@ impl EditorView {
                 hide_notes: hide,
                 scene_symbol: &self.scene_symbol,
                 indent,
+                caret,
             };
             let build = |source: String, cut: bool, fonts: &mut FontSystem| {
                 let preview = prose::present(&source, 0, if raw { Some(0) } else { None }, initial, options);
@@ -379,7 +387,7 @@ impl EditorView {
                 }
                 // A hidden note takes no room.
                 let height = if preview.hidden { 0. } else { height };
-                Tile { start, y: 0., height, end: preview.end, preview, buffer, source, raw, initial, hide, width, size: settings.font_size, indent, justify, line_bytes, tail: 0., chunk: String::new(), inside, cut }
+                Tile { start, y: 0., height, end: preview.end, preview, buffer, source, raw, caret, initial, hide, width, size: settings.font_size, indent, justify, line_bytes, tail: 0., chunk: String::new(), inside, cut }
             };
             let mut tile = build(chunk.clone(), false, fonts);
             // Inside a paragraph the last row is only partly filled: shape the chunk again without
@@ -681,9 +689,10 @@ mod tests {
     #[test]
     fn markers_hide_off_the_cursor_line_and_notes_follow_the_settings() {
         let text = "A *bold* start\nSecond $$ aside $$ line\n#\n$$ whole note\nEnd\n";
-        let (v, _) = view(text, 0, 800, |_| {});
+        let (v, _) = view(text, 5, 800, |_| {});
         let s = shown(&v);
-        assert!(s.contains("A *bold* start"), "cursor line shows its markers: {s}");
+        assert!(s.contains("A *bold* start"), "emphasis holding the caret shows its markers: {s}");
+        assert!(shown(&view(text, 0, 800, |_| {}).0).contains("A bold start"), "other emphasis stays hidden");
         assert!(s.contains("Second aside line") && s.contains("* * *") && s.contains("whole note"), "{s}");
         let (v, _) = view(text, 0, 800, |s| s.hide_notes = true);
         let s = shown(&v);
@@ -732,7 +741,7 @@ mod tests {
         assert!(x > flush + 10., "caret after the indent: {x} vs {flush}; three letters in: {inside}; {:?}", v.tiles[1].buffer.layout_runs().next().map(|r| r.glyphs.iter().map(|g| (g.start, g.end, g.x, g.w)).collect::<Vec<_>>()));
         assert_eq!(v.hit(x + 1., v.caret_at(second).unwrap().1 + 3.), Some(second));
         // Raw view is untouched by the preview settings.
-        let (raw, _) = view(text, 0, 800, |s| s.preview_indent = 4);
+        let (raw, _) = view(text, 8, 800, |s| s.preview_indent = 4);
         assert_eq!(raw.tiles[1].preview.text, "Second\n");
         assert_eq!(raw.tiles[0].preview.text, "First *one*\n");
         let _ = doc;
@@ -772,7 +781,7 @@ mod tests {
         assert!(v.tiles.len() > 3, "the paragraph spans several chunks");
         let settings = Settings::default();
         let marker = Marker::default();
-        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0 };
+        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None };
         let whole = prose::present(&text, 0, Some(0), Initial { in_block: false, in_line_note: false }, options);
         let expected: Vec<usize> = FONTS.with(|fonts| {
             shape(&whole, Wrap::WordOrGlyph, 600., false, &settings, &mut fonts.borrow_mut())
