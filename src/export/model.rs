@@ -266,7 +266,7 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
             // A blank line, or a line that held only a note.
             continue;
         }
-        // A scene's name (`# The storm` under its break) is for the editor only.
+        // A scene's name (`## The storm ##` under its break) is for the editor only.
         if matches!(blocks.last(), None | Some(Block::SceneBreak)) && crate::core::prose::scene_name(&prose_text).is_some() {
             continue;
         }

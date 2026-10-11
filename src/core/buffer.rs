@@ -136,8 +136,22 @@ impl Document {
         };
         check(range.start) || (end > range.start && check(end))
     }
+    /// Whether typing `inserted` over `range` turns its line into a scene name (`## x ##`).
+    fn creates_scene_name(&self, range: &Range<usize>, inserted: &Rope) -> bool {
+        let text: String = inserted.to_string();
+        if !text.contains('#') || text.contains('\n') {
+            return false;
+        }
+        let start = range.start.min(self.text.len_chars());
+        let line = self.text.char_to_line(start);
+        let prefix: String = self.text.slice(self.text.line_to_char(line)..start).into();
+        let end = range.end.min(self.text.len_chars());
+        let tail: String = self.text.slice(end..self.text.line_to_char((self.text.char_to_line(end) + 1).min(self.text.len_lines())).max(end)).into();
+        let tail = tail.split(['\r', '\n']).next().unwrap_or("");
+        super::prose::scene_name(&format!("{prefix}{text}{tail}")).is_some()
+    }
     pub fn replace_rope(&mut self, range: Range<usize>, inserted: Rope) {
-        if self.protect_names && self.touches_scene_name(&range) {
+        if self.protect_names && (self.touches_scene_name(&range) || self.creates_scene_name(&range, &inserted)) {
             self.name_blocked = true;
             return;
         }
@@ -511,7 +525,7 @@ b");
         let text = "para
 
 #
-# The storm
+## The storm ##
 
 next";
         let mut doc = Document::new(Rope::from_str(text));
@@ -525,6 +539,12 @@ next";
         doc.select(break_line + 1, false);
         doc.delete(true);
         assert_eq!(doc.text.to_string(), text);
+        // Typing a name by hand is refused too: only the Scenes panel makes names.
+        let mut plain = Document::new(Rope::new());
+        for c in "## x ##".chars() {
+            plain.type_text(&c.to_string(), None);
+        }
+        assert_eq!(plain.text.to_string(), "## x #");
         assert!(doc.name_blocked);
         // Text around them still edits, and a selection covering both lines goes whole.
         doc.select(0, false);
@@ -546,7 +566,7 @@ next");
         doc.protect_names = false;
         doc.select(doc.text.to_string().find("storm").unwrap() + 5, false);
         doc.type_text("y", None);
-        assert!(doc.text.to_string().contains("# The stormy"));
+        assert!(doc.text.to_string().contains("## The stormy ##"));
     }
     #[test]
     fn edits_keep_unicode_and_original_endings() {

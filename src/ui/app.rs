@@ -2700,7 +2700,7 @@ impl App {
         self.overlay = Some(overlay);
         self.redraw();
     }
-    /// Writes (or replaces, or removes) the `# name` line of the scene whose break is on `line`;
+    /// Writes (or replaces, or removes) the `## name ##` line of the scene whose break is on `line`;
     /// line 0 without a break is the first scene.
     fn set_scene_name(&mut self, line: usize, name: &str) {
         let protect = !self.settings.edit_scene_names;
@@ -2728,14 +2728,14 @@ impl App {
         doc.protect_names = false;
         match (has_name, name.is_empty()) {
             (false, true) => {}
-            (false, false) if first => doc.replace(0..0, &format!("# {name}{le}")),
+            (false, false) if first => doc.replace(0..0, &format!("## {name} ##{le}")),
             (false, false) => {
                 let pos = end(doc, line);
-                doc.replace(pos..pos, &format!("{le}# {name}"));
+                doc.replace(pos..pos, &format!("{le}## {name} ##"));
             }
             (true, false) => {
                 let (a, b) = (doc.text.line_to_char(at), end(doc, at));
-                doc.replace(a..b, &format!("# {name}"));
+                doc.replace(a..b, &format!("## {name} ##"));
             }
             (true, true) => {
                 // The whole line goes, with its line ending.

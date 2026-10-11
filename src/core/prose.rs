@@ -31,19 +31,22 @@ pub fn is_scene_break(line: &str) -> bool {
     }
 }
 
-/// The name of a scene: a line `# The storm` right under its break. Returns the byte offset where
-/// the name starts. A lone `#` is a break, not a name.
-pub fn scene_name_at(line: &str) -> Option<usize> {
+/// The name of a scene: a line `## The storm ##` right under its break. Returns where the name
+/// is in the line. A single `#` is a break or plain text, never a name.
+pub fn scene_name_at(line: &str) -> Option<std::ops::Range<usize>> {
     let body = line.trim_end_matches(['\r', '\n']);
-    let lead = body.len() - body.trim_start().len();
-    let rest = body[lead..].strip_prefix("# ")?;
-    let skipped = rest.len() - rest.trim_start().len();
-    let name = rest.trim();
-    (!name.is_empty() && !is_scene_break(body)).then_some(lead + 2 + skipped)
+    let trimmed = body.trim();
+    let inner = trimmed.strip_prefix("## ")?.strip_suffix(" ##")?;
+    let name = inner.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let at = name.as_ptr() as usize - body.as_ptr() as usize;
+    Some(at..at + name.len())
 }
 /// The text of a scene name line, if it is one.
 pub fn scene_name(line: &str) -> Option<&str> {
-    scene_name_at(line).map(|at| line[at..].trim_end())
+    scene_name_at(line).map(|r| &line[r])
 }
 
 // ---- emphasis -------------------------------------------------------------------------------
@@ -359,11 +362,11 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
 
         name_line |= !scan.has_notes() && !started_in_block && scene_name_at(&line[..body_end]).is_some();
-        // A scene's name: bold and centred, without its `# `.
+        // A scene's name: bold and centred, without its `##` marks.
         if !raw && !scan.has_notes() && !started_in_block && !initial.in_line_note {
-            if let Some(at) = scene_name_at(&line[..body_end]) {
-                let lead = line[..at].chars().count();
-                for (k, c) in line[at..body_end].trim_end().chars().enumerate() {
+            if let Some(span) = scene_name_at(&line[..body_end]) {
+                let lead = line[..span.start].chars().count();
+                for (k, c) in line[span].chars().enumerate() {
                     let position = out.text.len();
                     out.source.push((position, char_offset + lead + k));
                     out.text.push(c);
@@ -497,7 +500,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
     }
     out.hidden = hid_something && out.text.trim().is_empty();
-    // A scene's name stays centred while its `# ` shows for editing.
+    // A scene's name stays centred while its `##` marks show for editing.
     if name_line && !out.hidden {
         out.center = true;
     }
@@ -667,16 +670,14 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_name_is_a_hash_line_with_words() {
-        assert_eq!(scene_name("# The storm
-"), Some("The storm"));
+    fn a_scene_name_is_wrapped_in_double_hashes() {
+        assert_eq!(scene_name("## The storm ##\n"), Some("The storm"));
+        assert_eq!(scene_name("# The storm"), None);
         assert_eq!(scene_name("#"), None);
-        assert_eq!(scene_name("# #"), None);
-        assert_eq!(scene_name("Chapter # 3"), None);
-        let p = present("# The storm
-", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None });
-        assert_eq!(p.text, "The storm
-");
+        assert_eq!(scene_name("## ##"), None);
+        assert_eq!(scene_name("Chapter ## 3 ##"), None);
+        let p = present("## The storm ##\n", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None });
+        assert_eq!(p.text, "The storm\n");
         assert!(p.center && p.spans[0].style.bold);
     }
     #[test]

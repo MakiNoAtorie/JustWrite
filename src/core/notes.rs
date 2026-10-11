@@ -485,8 +485,8 @@ pub fn word_count(neutral: &str) -> usize {
             BLOCK_OPEN => block = true,
             BLOCK_CLOSE => block = false,
             _ if block => {}
-            // A scene's name (`# The storm`) is not prose.
-            '#' if at_start && chars.peek() == Some(&' ') => line_note = true,
+            // A scene's name (`## The storm ##`) is not prose.
+            '#' if at_start && chars.clone().take(2).eq(['#', ' ']) => line_note = true,
             '\n' => {
                 line_note = false;
                 inline = false;
@@ -667,7 +667,8 @@ mod tests {
 
     #[test]
     fn scene_name_lines_are_not_counted_as_words() {
-        assert_eq!(word_count("one two\n# The storm\nthree"), 3);
+        assert_eq!(word_count("one two\n## The storm ##\nthree"), 3);
+        assert_eq!(word_count("one\n# not a name\n"), 4);
         assert_eq!(word_count("a # b"), 2);
     }
     #[test]
