@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 
 /// The open project and the chapter in the editor.
@@ -14,6 +15,23 @@ final class ProjectModel: ObservableObject {
     @Published var busy = false
     private var saved = ""
     private var loaded = false
+    private var watch: Set<AnyCancellable> = []
+
+    init() {
+        // The model watches the app, not a view: a view under the editor does not see the change.
+        let center = NotificationCenter.default
+        center.publisher(for: UIApplication.didEnterBackgroundNotification).sink { [weak self] _ in
+            // iOS gives about 30 s. What does not go up now goes at the next sync.
+            let task = UIApplication.shared.beginBackgroundTask()
+            Task {
+                await self?.sync()
+                UIApplication.shared.endBackgroundTask(task)
+            }
+        }.store(in: &watch)
+        center.publisher(for: UIApplication.didBecomeActiveNotification).sink { [weak self] _ in
+            Task { await self?.sync() }
+        }.store(in: &watch)
+    }
 
     private func run(_ work: () async throws -> Void) async {
         do { try await work() } catch { notice = error.localizedDescription }
@@ -77,6 +95,7 @@ final class ProjectModel: ObservableObject {
                     let stored = try await Core.read(id)
                     text = stored
                     saved = stored
+                    words = items.first { $0.id == id }?.words ?? words
                 }
             }
         }
@@ -101,7 +120,6 @@ struct Notice: View {
 struct ChaptersView: View {
     let name: String
     @StateObject private var model = ProjectModel()
-    @Environment(\.scenePhase) private var phase
     @State private var title = ""
     @State private var adding = false
     @State private var renaming: Item?
@@ -156,18 +174,6 @@ struct ChaptersView: View {
         }
         .task { await model.load(name) }
         .refreshable { await model.sync() }
-        .onChange(of: phase) { _, now in
-            if now == .background {
-                // iOS gives about 30 s. What does not go up now goes at the next sync.
-                let task = UIApplication.shared.beginBackgroundTask()
-                Task {
-                    await model.sync()
-                    UIApplication.shared.endBackgroundTask(task)
-                }
-            } else if now == .active {
-                Task { await model.sync() }
-            }
-        }
     }
 }
 

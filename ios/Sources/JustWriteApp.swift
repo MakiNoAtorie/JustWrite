@@ -6,7 +6,10 @@ struct JustWriteApp: App {
 
     init() {
         // The library names cloud lines and conflict files in local time and reads the zone here.
-        setenv("TZ", TimeZone.current.identifier, 1)
+        // It finds no zone data on iOS, so the zone goes as an offset, west of Greenwich positive.
+        // ponytail: a change to or from summer time is seen at the next launch.
+        let west = -TimeZone.current.secondsFromGMT()
+        setenv("TZ", String(format: "LCL%@%d:%02d", west < 0 ? "-" : "", abs(west) / 3600, abs(west) % 3600 / 60), 1)
     }
 
     var body: some Scene {
