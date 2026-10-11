@@ -228,6 +228,9 @@ static AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
         .http_status_as_error(false)
         .allow_non_standard_methods(true)
         .timeout_global(Some(Duration::from_secs(600)))
+        // A dead network must answer soon: on the phone the editor waits for the sync.
+        .timeout_resolve(Some(Duration::from_secs(15)))
+        .timeout_connect(Some(Duration::from_secs(15)))
         .user_agent(format!("JustWrite ({})", platform::machine_name()))
         .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build())
         .build()

@@ -17,9 +17,20 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev
       - run: cargo test --lib
-      - name: iOS library
-        if: runner.os == 'macOS'
-        run: rustup target add aarch64-apple-ios && cargo check --lib --target aarch64-apple-ios
       - run: cargo build --release
       - name: Performance gate
         run: cargo run --release --bin performance-check
+  # The iPhone app, built for the device and not signed: proves that the library and the shell
+  # compile and link.
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install xcodegen
+      - run: xcodegen
+        working-directory: ios
+      - run: xcodebuild -project ios/JustWrite.xcodeproj -scheme JustWrite -sdk iphoneos -configuration Release CODE_SIGNING_ALLOWED=NO build

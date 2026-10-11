@@ -16,6 +16,8 @@ use std::{
 
 /// Rounds in one sync: a merge needs a second one to go up, and the cloud can change in between.
 const ROUNDS: usize = 3;
+/// Where the device keeps its `.jw` files, inside the data folder.
+const PROJECTS: &str = "projects";
 
 pub struct Session {
     data: PathBuf,
@@ -46,6 +48,21 @@ fn load(data: &Path, jw: &Path) -> Result<(Project, History), String> {
     Ok((opened.project, history))
 }
 
+/// The projects of the cloud folder and those already on this device. With no network, the
+/// second ones alone, so the author can go on writing.
+pub fn projects(data: &Path) -> Result<Vec<String>, String> {
+    let here = fs::read_dir(data.join(PROJECTS)).into_iter().flatten().flatten().filter_map(|entry| entry.file_name().into_string().ok()).filter(|name| name.ends_with(".jw"));
+    let mut names: Vec<String> = here.collect();
+    match cloud::list(data, &Ids::default()) {
+        Ok(cloud) => names.extend(cloud),
+        Err(error) if names.is_empty() => return Err(error),
+        Err(_) => {}
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 impl Session {
     /// Opens the project `name` of the cloud folder; the first time, it comes down.
     pub fn open(data: &Path, name: &str) -> Result<Session, String> {
@@ -53,9 +70,12 @@ impl Session {
         if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
             return Err("Cloud: that is not a file name".into());
         }
-        let folder = data.join("projects");
+        let folder = data.join(PROJECTS);
         let jw = folder.join(name);
-        if !jw.exists() {
+        if jw.exists() {
+            // A new connection drops every link. Linked again, the first sync merges the two.
+            let _ = cloud::link(data, &jw);
+        } else {
             fs::create_dir_all(&folder).map_err(text)?;
             cloud::fetch(data, &Ids::default(), name, &jw)?;
         }
@@ -196,7 +216,7 @@ pub unsafe extern "C" fn jw_connect(data: *const c_char, server: *const c_char, 
 /// `data` is a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn jw_projects(data: *const c_char) -> *mut c_char {
-    reply((|| unsafe { Ok(json!(cloud::list(Path::new(&string(data)?), &Ids::default())?)) })())
+    reply((|| unsafe { Ok(json!(projects(Path::new(&string(data)?))?)) })())
 }
 /// Opens a project and returns its chapters; the project that was open is closed.
 /// # Safety
@@ -301,7 +321,7 @@ mod tests {
         assert_eq!(cloud::sync(desk_data.path(), &Ids::default(), &jw).unwrap(), Synced::Uploaded);
 
         // The phone opens it and writes in the first paragraph.
-        assert_eq!(cloud::list(phone_data.path(), &Ids::default()).unwrap(), ["Novel.jw"]);
+        assert_eq!(projects(phone_data.path()).unwrap(), ["Novel.jw"]);
         assert!(Session::open(phone_data.path(), "../Novel.jw").is_err());
         let mut phone = Session::open(phone_data.path(), "Novel.jw").unwrap();
         assert_eq!(phone.tree()[0]["id"], chapter.as_str());
@@ -343,7 +363,21 @@ mod tests {
         assert_eq!(phone.read(&second).unwrap(), "Text $$ a note $$ here.\n");
         assert_eq!(phone.tree()[1], json!({ "id": second, "title": "The second", "section": "manuscript", "part": null, "words": 2 }));
         phone.close().unwrap();
+        // With no network the phone still lists what it holds.
+        cloud::tests::sign_in_to("http://127.0.0.1:9", phone_data.path());
+        assert_eq!(projects(phone_data.path()).unwrap(), ["Novel.jw"]);
+        // Connected again, the project it holds is linked again and writing goes on.
+        cloud::tests::sign_in_to(&base, phone_data.path());
+        let mut phone = Session::open(phone_data.path(), "Novel.jw").unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        phone.write(&second, "After the new connection.
+").unwrap();
+        assert_eq!(phone.sync().unwrap().message, "");
+        phone.close().unwrap();
         assert_eq!(desktop_sync(desk_data.path(), &mut desk, &mut desk_history), Synced::Downloaded);
+        desk.abandon();
+        assert_eq!(load(desk_data.path(), &jw).unwrap().0.read_text(&second).unwrap(), "After the new connection.
+");
     }
 
     /// The phone's path against a real Nextcloud server, with an app password from its web
