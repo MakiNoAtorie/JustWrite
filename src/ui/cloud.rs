@@ -55,6 +55,57 @@ impl App {
         ];
         self.open_form(Form::new(FormKind::Cloud, "Connect to cloud", fields).submit("Connect").width(560.));
     }
+    /// Whether the service can be signed in to: OneDrive and Google Drive need the ids of an app
+    /// registration.
+    pub(super) fn cloud_registered(&self, service: usize) -> bool {
+        let ids = self.cloud_ids();
+        match service {
+            1 => !ids.onedrive.is_empty(),
+            2 => !ids.google.is_empty() && !ids.google_secret.is_empty(),
+            _ => true,
+        }
+    }
+    /// The steps to register the app with the service, with a button for each web page and the
+    /// fields for the ids. Done once; after it the sign-in is the browser alone.
+    pub(super) fn cloud_setup_form(&mut self, service: usize) {
+        let s = &self.settings;
+        let step = |text: &str| Field::info(text);
+        let page = |label: &str, address: &str| Field::button(address, label, "Open in browser");
+        let (title, fields) = if service == 1 {
+            (
+                "Set up OneDrive",
+                vec![
+                    step("Microsoft lets an app sign in only when it is registered. This is free, takes about five minutes and is done once."),
+                    page("1. Open App registrations", "https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade"),
+                    step("2. New registration. Name: JustWrite (it becomes the folder Apps/JustWrite in your OneDrive)."),
+                    step("3. Supported account types: “Accounts in any organizational directory and personal Microsoft accounts”."),
+                    step("4. Redirect URI: platform “Public client/native (mobile & desktop)”, address http://localhost. Press Register."),
+                    step("5. Open Authentication, set “Allow public client flows” to Yes, and save."),
+                    step("6. Open Overview, copy the “Application (client) ID” and paste it here."),
+                    Field::text("onedrive_client_id", "Application (client) ID", &s.onedrive_client_id),
+                    page("Microsoft's guide", "https://learn.microsoft.com/en-us/entra/identity-platform/quickstart-register-app"),
+                ],
+            )
+        } else {
+            (
+                "Set up Google Drive",
+                vec![
+                    step("Google lets an app sign in only when it is registered. This is free, takes about ten minutes and is done once."),
+                    page("1. Make a project, such as JustWrite", "https://console.cloud.google.com/projectcreate"),
+                    page("2. Enable the Google Drive API", "https://console.cloud.google.com/apis/library/drive.googleapis.com"),
+                    page("3. Fill in the consent screen", "https://console.cloud.google.com/auth/overview"),
+                    step("In step 3: audience External, your e-mail address, and under Data access the scope “…/auth/drive.file”. Add your own address as a test user, or publish the app: while it is in testing the sign-in ends after 7 days."),
+                    page("4. Create an OAuth client", "https://console.cloud.google.com/auth/clients"),
+                    step("In step 4: application type “Desktop app”. Copy the client ID and the client secret and paste them here."),
+                    Field::text("google_client_id", "Client ID", &s.google_client_id),
+                    Field::text("google_client_secret", "Client secret", &s.google_client_secret),
+                    step("At the sign-in Google may say it has not verified the app: choose Advanced, then “Go to JustWrite”."),
+                    page("Google's guide", "https://developers.google.com/workspace/drive/api/quickstart/python#set-up-environment"),
+                ],
+            )
+        };
+        self.open_form(Form::new(FormKind::CloudSetup(service), title, fields).submit("Connect").width(640.));
+    }
     pub(super) fn cloud_connect(&mut self, service: usize, server: String) {
         let provider = Provider::ALL[service.min(2)];
         self.cloud_command("Cloud: finish the sign-in in your browser within 3 minutes…", move |data, ids| CloudDone::Note(cloud::connect(data, provider, &server, ids)));

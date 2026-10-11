@@ -37,6 +37,8 @@ pub enum FormKind {
     Locked(PathBuf),
     Overwrite,
     Cloud,
+    /// How to register the app with OneDrive (1) or Google Drive (2), and where the ids go.
+    CloudSetup(usize),
 }
 
 #[derive(Clone)]
@@ -1277,6 +1279,11 @@ impl App {
                 self.form = None;
                 self.show(Kind::Keymap);
             }
+            link if link.starts_with("https://") => {
+                if !platform::open_url(link) {
+                    self.form_note("The browser could not be opened.");
+                }
+            }
             "cover" => self.choose(Choose::Cover),
             "save_preset" => self.save_export_preset(),
             "delete_preset" => self.delete_export_preset(),
@@ -1462,9 +1469,28 @@ impl App {
                 let (service, server) = (form.choice("service"), form.text("server"));
                 if service == 0 && server.is_empty() {
                     self.form_note("Type the address of your Nextcloud server.");
+                } else if !self.cloud_registered(service) {
+                    self.cloud_setup_form(service);
                 } else {
                     self.close_form();
                     self.cloud_connect(service, server);
+                }
+            }
+            FormKind::CloudSetup(service) => {
+                let mut s = self.settings.clone();
+                if service == 1 {
+                    s.onedrive_client_id = form.text("onedrive_client_id");
+                } else {
+                    s.google_client_id = form.text("google_client_id");
+                    s.google_client_secret = form.text("google_client_secret");
+                }
+                self.adopt(s);
+                self.save_settings();
+                if self.cloud_registered(service) {
+                    self.close_form();
+                    self.cloud_connect(service, String::new());
+                } else {
+                    self.form_note("Paste what the last step gave you, then press Connect.");
                 }
             }
         }

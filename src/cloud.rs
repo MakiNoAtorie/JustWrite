@@ -1059,75 +1059,105 @@ mod tests {
                 client.account.folder = client.google_folder().unwrap();
                 assert_eq!(client.google_folder().unwrap(), "folder1");
             }
-            let (data, here, there, my_data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-            let cloud_name = "Ann's novel.jw";
-            let jw = here.path().join(cloud_name);
-            let incoming = here.path().join("incoming.jw");
-            let work = project(data.path(), &jw, "first draft");
-            let mut link = Link { name: cloud_name.into(), tag: None, stamp: None };
             assert_eq!(client.list().unwrap(), [""; 0], "{provider:?}");
+            scenario(&client, "Ann's novel.jw");
+        }
+    }
 
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded, "{provider:?}");
-            let first = link.tag.clone().unwrap();
-            assert_eq!(client.stat(cloud_name).unwrap(), Some(first.clone()));
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
-            assert_eq!(client.list().unwrap(), [cloud_name]);
+    /// The sync rules against one service. Leaves `cloud_name` and the conflict copy it returns
+    /// in the cloud folder.
+    fn scenario(client: &Client, cloud_name: &str) -> String {
+        let provider = client.account.provider;
+        let (data, here, there, my_data) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let jw = here.path().join(cloud_name);
+        let incoming = here.path().join("incoming.jw");
+        let work = project(data.path(), &jw, "first draft");
+        let mut link = Link { name: cloud_name.into(), tag: None, stamp: None };
 
-            // A local edit goes up.
-            std::thread::sleep(Duration::from_millis(15));
-            work.write("chapters/one.txt", b"second draft").unwrap();
-            work.pack(&jw, false).unwrap();
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded);
-            assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded, "{provider:?}");
+        let first = link.tag.clone().unwrap();
+        assert_eq!(client.stat(cloud_name).unwrap(), Some(first.clone()));
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
+        assert!(client.list().unwrap().iter().any(|name| name == cloud_name));
 
-            // An upload that names an old version, or no version, is refused.
-            assert_eq!(client.upload(cloud_name, b"x", Some(&first)).unwrap(), None, "{provider:?}");
-            assert_eq!(client.upload(cloud_name, b"x", None).unwrap(), None, "{provider:?}");
-            assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
+        // A local edit goes up.
+        std::thread::sleep(Duration::from_millis(15));
+        work.write("chapters/one.txt", b"second draft").unwrap();
+        work.pack(&jw, false).unwrap();
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded);
+        assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
 
-            // Another computer uploads; with no local change its version comes down.
-            let (theirs, their_data) = (there.path().join("theirs.jw"), tempfile::tempdir().unwrap());
-            let their_work = project(their_data.path(), &theirs, "edited elsewhere");
-            let their_bytes = fs::read(&theirs).unwrap();
-            assert!(client.upload(cloud_name, &their_bytes, link.tag.as_deref()).unwrap().is_some());
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Downloaded, "{provider:?}");
-            assert_eq!(fs::read(&jw).unwrap(), their_bytes);
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
+        // An upload that names an old version, or no version, is refused.
+        assert_eq!(client.upload(cloud_name, b"x", Some(&first)).unwrap(), None, "{provider:?}");
+        assert_eq!(client.upload(cloud_name, b"x", None).unwrap(), None, "{provider:?}");
+        assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
 
-            // Both sides change the same project: the cloud version is handed over for a merge,
-            // and what the merge made goes up only when that version was accepted.
-            std::thread::sleep(Duration::from_millis(15));
-            their_work.write("chapters/one.txt", b"my edit of it").unwrap();
-            their_work.pack(&jw, true).unwrap();
-            their_work.write("chapters/one.txt", b"edited again elsewhere").unwrap();
-            their_work.pack(&theirs, true).unwrap();
-            let newer = fs::read(&theirs).unwrap();
-            let seen = link.clone();
-            assert!(client.upload(cloud_name, &newer, link.tag.as_deref()).unwrap().is_some());
-            let Synced::Incoming(file, tag) = sync_link(&client, &mut link, &jw, &incoming).unwrap() else { panic!("{provider:?}: a merge expected") };
-            assert_eq!((fs::read(&file).unwrap(), Some(&tag), &link), (newer.clone(), client.stat(cloud_name).unwrap().as_ref(), &seen));
-            assert_eq!(client.download(cloud_name).unwrap(), newer);
-            link.tag = Some(tag);
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded);
-            assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
+        // Another computer uploads; with no local change its version comes down.
+        let (theirs, their_data) = (there.path().join("theirs.jw"), tempfile::tempdir().unwrap());
+        let their_work = project(their_data.path(), &theirs, "edited elsewhere");
+        let their_bytes = fs::read(&theirs).unwrap();
+        assert!(client.upload(cloud_name, &their_bytes, link.tag.as_deref()).unwrap().is_some());
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Downloaded, "{provider:?}");
+        assert_eq!(fs::read(&jw).unwrap(), their_bytes);
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
 
-            // The name holds another project: that one stays, the local one goes up under a new name.
-            assert!(client.upload(cloud_name, &their_bytes, link.tag.as_deref()).unwrap().is_some());
-            let mine = project(my_data.path(), &there.path().join("mine.jw"), "my edit");
-            std::thread::sleep(Duration::from_millis(15));
-            mine.pack(&jw, true).unwrap();
-            let Synced::Conflict(name) = sync_link(&client, &mut link, &jw, &incoming).unwrap() else { panic!("conflict expected") };
-            assert!(name.starts_with("Ann's novel (conflict, ") && link.name == name);
-            assert_eq!(client.download(cloud_name).unwrap(), their_bytes);
-            assert_eq!(client.download(&name).unwrap(), fs::read(&jw).unwrap());
-            assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
-            assert_eq!(client.list().unwrap().len(), 2);
+        // Both sides change the same project: the cloud version is handed over for a merge,
+        // and what the merge made goes up only when that version was accepted.
+        std::thread::sleep(Duration::from_millis(15));
+        their_work.write("chapters/one.txt", b"my edit of it").unwrap();
+        their_work.pack(&jw, true).unwrap();
+        their_work.write("chapters/one.txt", b"edited again elsewhere").unwrap();
+        their_work.pack(&theirs, true).unwrap();
+        let newer = fs::read(&theirs).unwrap();
+        let seen = link.clone();
+        assert!(client.upload(cloud_name, &newer, link.tag.as_deref()).unwrap().is_some());
+        let Synced::Incoming(file, tag) = sync_link(&client, &mut link, &jw, &incoming).unwrap() else { panic!("{provider:?}: a merge expected") };
+        assert_eq!((fs::read(&file).unwrap(), Some(&tag), &link), (newer.clone(), client.stat(cloud_name).unwrap().as_ref(), &seen));
+        assert_eq!(client.download(cloud_name).unwrap(), newer);
+        link.tag = Some(tag);
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Uploaded);
+        assert_eq!(client.download(cloud_name).unwrap(), fs::read(&jw).unwrap());
 
-            // A download that is not a project is refused and the local file is kept.
-            assert!(client.upload(&name, b"not a zip", link.tag.as_deref()).unwrap().is_some());
-            let before = fs::read(&jw).unwrap();
-            assert!(sync_link(&client, &mut link, &jw, &incoming).is_err());
-            assert_eq!(fs::read(&jw).unwrap(), before);
+        // The name holds another project: that one stays, the local one goes up under a new name.
+        assert!(client.upload(cloud_name, &their_bytes, link.tag.as_deref()).unwrap().is_some());
+        let mine = project(my_data.path(), &there.path().join("mine.jw"), "my edit");
+        std::thread::sleep(Duration::from_millis(15));
+        mine.pack(&jw, true).unwrap();
+        let Synced::Conflict(name) = sync_link(&client, &mut link, &jw, &incoming).unwrap() else { panic!("conflict expected") };
+        assert!(name.starts_with(&format!("{} (conflict, ", cloud_name.trim_end_matches(".jw"))) && link.name == name);
+        assert_eq!(client.download(cloud_name).unwrap(), their_bytes);
+        assert_eq!(client.download(&name).unwrap(), fs::read(&jw).unwrap());
+        assert_eq!(sync_link(&client, &mut link, &jw, &incoming).unwrap(), Synced::Nothing);
+        assert!(client.list().unwrap().contains(&name));
+
+        // A download that is not a project is refused and the local file is kept.
+        assert!(client.upload(&name, b"not a zip", link.tag.as_deref()).unwrap().is_some());
+        let before = fs::read(&jw).unwrap();
+        assert!(sync_link(&client, &mut link, &jw, &incoming).is_err());
+        assert_eq!(fs::read(&jw).unwrap(), before);
+        name
+    }
+
+    /// The same rules against a real Nextcloud server. The browser opens for the sign-in; the
+    /// test removes its files and the sign-in afterwards.
+    /// `JUSTWRITE_TEST_NEXTCLOUD=https://… cargo test --lib a_real_nextcloud -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn a_real_nextcloud_follows_the_rules() {
+        let server = std::env::var("JUSTWRITE_TEST_NEXTCLOUD").expect("JUSTWRITE_TEST_NEXTCLOUD holds the server address");
+        let data = tempfile::tempdir().unwrap();
+        println!("{}", connect(data.path(), Provider::Nextcloud, &server, &Ids::default()).unwrap());
+        let (_, client) = connected(data.path(), &Ids::default()).unwrap();
+        println!("signed in as {} (user id {}) at {}", client.account.login, client.account.user, client.account.server);
+        let stem = format!("JustWrite test {}", random(4));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| scenario(&client, &format!("{stem}.jw"))));
+        for name in client.list().unwrap().iter().filter(|name| name.starts_with(&stem)) {
+            println!("removing {name}: HTTP {}", client.call("DELETE", &client.dav(name), &[], None).unwrap().status);
+        }
+        println!("{}", disconnect(data.path()));
+        assert!(stored_secret().is_err());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
         }
     }
 }
