@@ -1070,6 +1070,11 @@ pub(crate) mod tests {
     pub(crate) fn no_secret_store() {
         TEST_SECRET.set(Some(String::new()));
     }
+    /// Removes a file from the cloud folder of a real Nextcloud; gives the HTTP status.
+    pub(crate) fn remove(data: &Path, name: &str) -> u16 {
+        let (_, client) = connected(data, &Ids::default()).unwrap();
+        client.call("DELETE", &client.dav(name), &[], None).unwrap().status
+    }
     /// Signs this thread in to the Nextcloud of the test server, with `data` as the data folder.
     pub(crate) fn sign_in_to(base: &str, data: &Path) {
         TEST_SECRET.set(Some("test".into()));

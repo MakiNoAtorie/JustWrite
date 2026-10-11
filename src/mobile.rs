@@ -384,8 +384,10 @@ mod tests {
     }
 
     /// The phone's path against a real Nextcloud server, with an app password from its web
-    /// settings. Opens the named project of the cloud folder and reads it; changes nothing.
-    /// `JUSTWRITE_TEST_NEXTCLOUD=https://… JUSTWRITE_TEST_USER=… JUSTWRITE_TEST_PASSWORD=… JUSTWRITE_TEST_PROJECT=Novel.jw cargo test --lib a_real_nextcloud_takes_the_phone -- --ignored --nocapture`
+    /// settings. With `JUSTWRITE_TEST_PROJECT` it opens that project of the cloud folder and reads
+    /// it; nothing changes. Without it, a small test project goes up, the phone writes in it, the
+    /// desktop side takes the result, and the test project is removed from the server.
+    /// `tools\nextcloud-phone-check.ps1` asks for the password and runs this.
     #[test]
     #[ignore]
     fn a_real_nextcloud_takes_the_phone() {
@@ -393,14 +395,54 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         cloud::tests::no_secret_store();
         println!("{}", cloud::connect_with_password(data.path(), &var("JUSTWRITE_TEST_NEXTCLOUD"), &var("JUSTWRITE_TEST_USER"), &var("JUSTWRITE_TEST_PASSWORD")).unwrap());
-        println!("{:?}", cloud::list(data.path(), &Ids::default()).unwrap());
-        let mut phone = Session::open(data.path(), &var("JUSTWRITE_TEST_PROJECT")).unwrap();
-        let tree = phone.tree();
-        println!("{tree:#}");
-        let text = phone.read(tree[0]["id"].as_str().unwrap()).unwrap();
-        println!("{} characters in the first chapter", text.chars().count());
-        assert_eq!(phone.sync().unwrap(), Round::default());
-        phone.close().unwrap();
+        println!("in the cloud folder: {:?}", projects(data.path()).unwrap());
+        if let Ok(name) = std::env::var("JUSTWRITE_TEST_PROJECT") {
+            let mut phone = Session::open(data.path(), &name).unwrap();
+            let tree = phone.tree();
+            println!("{tree:#}");
+            let text = phone.read(tree[0]["id"].as_str().unwrap()).unwrap();
+            println!("{} characters in the first chapter", text.chars().count());
+            assert_eq!(phone.sync().unwrap(), Round::default());
+            return phone.close().unwrap();
+        }
+
+        // The desktop side has the same connection in a data folder of its own.
+        let (desk_data, folder) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        fs::copy(data.path().join("cloud.json"), desk_data.path().join("cloud.json")).unwrap();
+        let name = format!("JustWrite phone test {}.jw", jw::new_id());
+        let jw = folder.path().join(&name);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut desk = Project::create(desk_data.path(), &jw, "Phone test").unwrap();
+            let chapter = desk.manifest.tree.manuscript[0].id().to_owned();
+            desk.write_text(&chapter, "From the desktop.\n").unwrap();
+            let mut desk_history = History::load(&desk.work);
+            desk_history.capture(&desk, Kind::Manual, "Start", jw::time::now()).unwrap();
+            desk.pack(false).unwrap();
+            cloud::link(desk_data.path(), &jw).unwrap();
+            assert_eq!(cloud::sync(desk_data.path(), &Ids::default(), &jw).unwrap(), Synced::Uploaded);
+            println!("uploaded {name}");
+
+            assert!(projects(data.path()).unwrap().contains(&name));
+            let mut phone = Session::open(data.path(), &name).unwrap();
+            assert_eq!(phone.read(&chapter).unwrap(), "From the desktop.\n");
+            std::thread::sleep(Duration::from_millis(15));
+            let written = "From the desktop.\n\nFrom the phone, with a $$ note $$.\n";
+            assert_eq!(phone.write(&chapter, written).unwrap(), 8);
+            assert_eq!(phone.sync().unwrap(), Round::default());
+            phone.close().unwrap();
+            println!("the phone wrote and synced");
+
+            assert_eq!(desktop_sync(desk_data.path(), &mut desk, &mut desk_history), Synced::Downloaded);
+            desk.abandon();
+            let (desk, _) = load(desk_data.path(), &jw).unwrap();
+            assert_eq!(notes::to_display(&desk.read_text(&chapter).unwrap(), &Marker::default()).0, written);
+            desk.abandon();
+            println!("the desktop side has the phone's text");
+        }));
+        println!("removing {name}: HTTP {}", cloud::tests::remove(data.path(), &name));
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     // tool: phone timings (open, read, write, sync, merge) on a generated project, CSV | run: cargo test --profile fast --lib phone_timings -- --ignored --nocapture
