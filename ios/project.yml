@@ -8,7 +8,11 @@ targets:
   JustWrite:
     type: application
     platform: iOS
-    sources: [Sources]
+    sources:
+      - Sources
+      - path: ../assets/fonts
+        includes: ["LibertinusSerif-*.otf", "OFL.txt"]
+        buildPhase: resources
     preBuildScripts:
       - name: Rust library
         script: sh "$SRCROOT/build-rust.sh"
@@ -24,6 +28,8 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         # An iPad app that can share the screen must turn all four ways.
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        # The owner's personal team; another person puts in their own.
+        DEVELOPMENT_TEAM: BMG9N685QN
         MARKETING_VERSION: 0.1.0
         CURRENT_PROJECT_VERSION: 1
         TARGETED_DEVICE_FAMILY: "1,2"

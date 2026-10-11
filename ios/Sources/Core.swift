@@ -60,7 +60,7 @@ enum Core {
     static func projects() async throws -> [String] {
         try await value { jw_projects(data) }
     }
-    /// Opens a project and gives its chapters. The project that was open is closed.
+    /// Opens a project as it is on the device and gives its chapters. Another project that was open is closed.
     static func open(_ name: String) async throws -> [Item] {
         try await value { jw_open(data, name) }
     }

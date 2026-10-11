@@ -64,8 +64,15 @@ pub fn projects(data: &Path) -> Result<Vec<String>, String> {
 }
 
 impl Session {
-    /// Opens the project `name` of the cloud folder; the first time, it comes down.
+    /// Opens the project `name` of the cloud folder and brings it in line with the cloud.
     pub fn open(data: &Path, name: &str) -> Result<Session, String> {
+        let mut session = Session::load(data, name)?;
+        // No network: the project opens as it is, and the next sync brings it in line.
+        let _ = session.sync();
+        Ok(session)
+    }
+    /// Opens the project as it is on the device; the first time, it comes down.
+    pub fn load(data: &Path, name: &str) -> Result<Session, String> {
         // The name comes from the server; it must stay inside the folder.
         if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name) {
             return Err("Cloud: that is not a file name".into());
@@ -80,10 +87,7 @@ impl Session {
             cloud::fetch(data, &Ids::default(), name, &jw)?;
         }
         let (project, history) = load(data, &jw)?;
-        let mut session = Session { data: data.to_owned(), project, history };
-        // No network: the project opens as it is, and the next sync brings it in line.
-        let _ = session.sync();
-        Ok(session)
+        Ok(Session { data: data.to_owned(), project, history })
     }
 
     /// Chapters and pages in reading order: id, title, section, part, words.
@@ -229,10 +233,14 @@ pub unsafe extern "C" fn jw_open(data: *const c_char, name: *const c_char) -> *m
     reply((|| {
         let (data, name) = unsafe { (string(data)?, string(name)?) };
         let mut slot = SESSION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(open) = slot.take() {
+        // The list shows at once: the project that is open stays open, and the shell syncs after.
+        if let Some(open) = slot.take_if(|open| open.project.path != Path::new(&data).join(PROJECTS).join(&name)) {
             let _ = open.close();
         }
-        let session = slot.insert(Session::open(Path::new(&data), &name)?);
+        let session = match &mut *slot {
+            Some(session) => session,
+            empty => empty.insert(Session::load(Path::new(&data), &name)?),
+        };
         Ok(session.tree())
     })())
 }
