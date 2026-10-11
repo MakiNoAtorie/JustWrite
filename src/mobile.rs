@@ -3,7 +3,7 @@
 use crate::{
     cloud::{self, Ids, Synced},
     core::notes::{self, Marker},
-    history::{History, merge},
+    history::{History, merge, prune},
     jw::{self, Node, Project, Section, project::OpenError},
 };
 use serde_json::{Value, json};
@@ -127,7 +127,10 @@ impl Session {
     pub fn sync(&mut self) -> Result<Round, String> {
         let now = jw::time::now();
         // Keeps the newest snapshot that both devices have recent; a merge compares against it.
-        self.history.capture_auto(&self.project, "Written on the phone", now).map_err(text)?;
+        if self.history.capture_auto(&self.project, "Written on the phone", now).map_err(text)?.is_some() {
+            // The project's own rule for old snapshots, as on the desktop: the file goes up whole.
+            let _ = prune::prune(&mut self.history, &self.project, now);
+        }
         let mut round = Round::default();
         for _ in 0..ROUNDS {
             if self.project.is_dirty() {
@@ -398,6 +401,137 @@ mod tests {
         println!("{} characters in the first chapter", text.chars().count());
         assert_eq!(phone.sync().unwrap(), Round::default());
         phone.close().unwrap();
+    }
+
+    // tool: phone timings (open, read, write, sync, merge) on a generated project, CSV | run: cargo test --profile fast --lib phone_timings -- --ignored --nocapture
+    /// The cloud is the local test server, so the times are the work on the device without the
+    /// network. `JUSTWRITE_BENCH` names the project; the default is `bench_data/bench_100k.jw`
+    /// from `tools/gen_bench_jw.py`. Rows also go to `bench_data/phone-timings.csv`.
+    #[test]
+    #[ignore]
+    fn phone_timings() {
+        use std::{io::Write, time::Instant};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = std::env::var("JUSTWRITE_BENCH").map(PathBuf::from).unwrap_or_else(|_| root.join("bench_data/bench_100k.jw"));
+        let base = cloud::tests::server();
+        let (desk_data, folder) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        cloud::tests::sign_in_to(&base, desk_data.path());
+        let jw = folder.path().join("Bench.jw");
+        fs::copy(&source, &jw).unwrap();
+        let (mut desk, mut desk_history) = load(desk_data.path(), &jw).unwrap();
+        desk_history.capture(&desk, Kind::Manual, "Start", jw::time::now()).unwrap();
+        desk.pack(false).unwrap();
+        cloud::link(desk_data.path(), &jw).unwrap();
+        assert_eq!(cloud::sync(desk_data.path(), &Ids::default(), &jw).unwrap(), Synced::Uploaded);
+        let size_start = fs::metadata(&jw).unwrap().len();
+
+        let pause = || std::thread::sleep(Duration::from_millis(15));
+        let ms = |from: Instant| from.elapsed().as_secs_f64() * 1000.;
+        let mut rows: Vec<(&str, Vec<f64>)> = Vec::new();
+
+        let mut first = Vec::new();
+        for _ in 0..5 {
+            let data = tempfile::tempdir().unwrap();
+            cloud::tests::sign_in_to(&base, data.path());
+            let from = Instant::now();
+            let phone = Session::open(data.path(), "Bench.jw").unwrap();
+            first.push(ms(from));
+            phone.close().unwrap();
+        }
+        rows.push(("open_first", first));
+
+        let phone_data = tempfile::tempdir().unwrap();
+        cloud::tests::sign_in_to(&base, phone_data.path());
+        Session::open(phone_data.path(), "Bench.jw").unwrap().close().unwrap();
+        let mut again = Vec::new();
+        for _ in 0..10 {
+            let from = Instant::now();
+            let phone = Session::open(phone_data.path(), "Bench.jw").unwrap();
+            again.push(ms(from));
+            phone.close().unwrap();
+        }
+        rows.push(("open_again", again));
+
+        let mut phone = Session::open(phone_data.path(), "Bench.jw").unwrap();
+        let tree = phone.tree();
+        let mut chapters: Vec<(u64, String)> = tree.as_array().unwrap().iter().filter(|item| item["section"] == "manuscript").map(|item| (item["words"].as_u64().unwrap(), item["id"].as_str().unwrap().to_owned())).collect();
+        chapters.sort();
+        let (words, mine) = chapters.pop().unwrap();
+        let (_, theirs) = chapters.pop().unwrap();
+        let total: u64 = words + chapters.iter().map(|c| c.0).sum::<u64>();
+
+        let (mut read, mut write, mut idle, mut edited, mut merged) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut text = String::new();
+        for round in 0..20 {
+            let from = Instant::now();
+            text = phone.read(&mine).unwrap();
+            read.push(ms(from));
+            text.push_str(&format!("
+
+Round {round} of the timing."));
+            let from = Instant::now();
+            assert!(phone.write(&mine, &text).unwrap() as u64 > words);
+            write.push(ms(from));
+        }
+        for round in 0..10 {
+            pause();
+            phone.write(&mine, &format!("{text}
+
+Sync {round}.")).unwrap();
+            let from = Instant::now();
+            assert_eq!(phone.sync().unwrap(), Round::default());
+            edited.push(ms(from));
+            let from = Instant::now();
+            assert_eq!(phone.sync().unwrap(), Round::default());
+            idle.push(ms(from));
+        }
+        assert_eq!(desktop_sync(desk_data.path(), &mut desk, &mut desk_history), Synced::Downloaded);
+        desk.abandon();
+        (desk, desk_history) = load(desk_data.path(), &jw).unwrap();
+        for round in 0..5 {
+            pause();
+            let their_text = desk.read_text(&theirs).unwrap();
+            desk.write_text(&theirs, &format!("{their_text}
+
+Desk {round}.")).unwrap();
+            assert_eq!(desktop_sync(desk_data.path(), &mut desk, &mut desk_history), Synced::Uploaded);
+            phone.write(&mine, &format!("{text}
+
+Merge {round}.")).unwrap();
+            let from = Instant::now();
+            assert!(phone.sync().unwrap().changed);
+            merged.push(ms(from));
+            pause();
+            assert_eq!(desktop_sync(desk_data.path(), &mut desk, &mut desk_history), Synced::Downloaded);
+            desk.abandon();
+            (desk, desk_history) = load(desk_data.path(), &jw).unwrap();
+        }
+        assert!(desk.read_text(&mine).unwrap().ends_with("Merge 4.") && desk.read_text(&theirs).unwrap().ends_with("Desk 4."));
+        rows.extend([("read", read), ("write", write), ("sync_idle", idle), ("sync_after_edit", edited), ("sync_merge", merged)]);
+        let size_end = fs::metadata(&jw).unwrap().len();
+
+        let commit = std::process::Command::new("git").args(["rev-parse", "--short", "HEAD"]).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default();
+        let lead = format!("{},{},{}", jw::time::now(), commit.trim(), if cfg!(debug_assertions) { "debug" } else { "optimized" });
+        let params = format!("{} {total}w chapter {words}w", source.file_name().unwrap().to_string_lossy());
+        let mut out = String::new();
+        for (name, mut times) in rows {
+            times.sort_by(f64::total_cmp);
+            let at = |q: f64| times[((times.len() as f64 * q).ceil() as usize).clamp(1, times.len()) - 1];
+            out.push_str(&format!("{lead},{name},{params},{},ms,{:.1},{:.1},{:.1},{:.1},{:.1}
+", times.len(), at(0.5), at(0.95), at(0.99), times[0], times[times.len() - 1]));
+        }
+        for (name, bytes) in [("jw_size_start", size_start), ("jw_size_after_15_syncs", size_end)] {
+            out.push_str(&format!("{lead},{name},{params},1,bytes,{bytes},{bytes},{bytes},{bytes},{bytes}
+"));
+        }
+        let header = "run_id,commit,build,name,params,n,unit,median,p95,p99,min,max
+";
+        print!("{header}{out}");
+        let log = root.join("bench_data/phone-timings.csv");
+        let fresh = !log.exists();
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(log) {
+            let _ = file.write_all(format!("{}{out}", if fresh { header } else { "" }).as_bytes());
+        }
     }
 
     #[test]
