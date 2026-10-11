@@ -439,7 +439,7 @@ impl EditorView {
             let above = if named { line - 2 } else { line - 1 };
             prose::is_scene_break(text(above).trim_end())
         };
-        let flush = settings.preview_flush && (line == 0 || after_break());
+        let flush = settings.preview_flush && (line == 0 || after_break() || (line == 1 && prose::scene_name(&doc.text.line(0).to_string()).is_some()));
         if flush { 0 } else { settings.preview_indent }
     }
     /// Whether the line starting at `line_start` has already opened a note that runs to its end

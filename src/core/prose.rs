@@ -311,6 +311,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
     let mut char_offset = start;
     let mut in_block = initial.in_block;
     let mut hid_something = false;
+    let mut name_line = false;
     for (line_i, line) in source.split_inclusive('\n').enumerate() {
         let raw = options.show_markers || cursor_line == Some(line_i);
         let body_end = line.trim_end_matches(['\r', '\n']).len();
@@ -357,6 +358,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
             }
         }
 
+        name_line |= !scan.has_notes() && !started_in_block && scene_name_at(&line[..body_end]).is_some();
         // A scene's name: bold and centred, without its `# `.
         if !raw && !scan.has_notes() && !started_in_block && !initial.in_line_note {
             if let Some(at) = scene_name_at(&line[..body_end]) {
@@ -365,7 +367,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
                     let position = out.text.len();
                     out.source.push((position, char_offset + lead + k));
                     out.text.push(c);
-                    let style = Style { bold: true, ..Default::default() };
+                    let style = Style { bold: true, scene: true, ..Default::default() };
                     match out.spans.last_mut() {
                         Some(span) if span.style == style && span.bytes.end == position => span.bytes.end = out.text.len(),
                         _ => out.spans.push(Span { bytes: position..out.text.len(), style }),
@@ -495,6 +497,10 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
     }
     out.hidden = hid_something && out.text.trim().is_empty();
+    // A scene's name stays centred while its `# ` shows for editing.
+    if name_line && !out.hidden {
+        out.center = true;
+    }
     // A chunk that is all note (a note line, or a line inside a block note) is centred.
     if !out.center && !out.hidden {
         let mut note = false;

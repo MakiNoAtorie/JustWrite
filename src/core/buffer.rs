@@ -116,7 +116,7 @@ impl Document {
         }
         let get = |i: usize| -> String { self.text.line(i).chars().take(64).collect() };
         let line = get(l);
-        (l > 0 && super::prose::scene_name(&line).is_some() && super::prose::is_scene_break(get(l - 1).trim()))
+        (super::prose::scene_name(&line).is_some() && (l == 0 || super::prose::is_scene_break(get(l - 1).trim())))
             || (l + 1 < lines && super::prose::is_scene_break(line.trim()) && super::prose::scene_name(&get(l + 1)).is_some())
     }
     /// Whether `range` changes part of a name line or of its break. Covering the whole line is fine.

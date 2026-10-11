@@ -2684,12 +2684,14 @@ impl App {
     fn rename_scene(&mut self, line: usize) {
         let Some(tab) = self.active_id().and_then(|id| self.tabs.get(&id)) else { return };
         let text = &tab.document.text;
-        if line >= text.len_lines() || !prose::is_scene_break(text.line(line).to_string().trim()) {
-            self.status = "The first scene has no break to carry a name.".into();
+        let is_break = line < text.len_lines() && prose::is_scene_break(text.line(line).to_string().trim());
+        // The first scene has no break: its name is the first line of the chapter.
+        if !is_break && line != 0 {
             return;
         }
-        let name = (line + 1 < text.len_lines())
-            .then(|| prose::scene_name(&text.line(line + 1).to_string()).map(str::to_owned))
+        let at = if is_break { line + 1 } else { 0 };
+        let name = (at < text.len_lines())
+            .then(|| prose::scene_name(&text.line(at).to_string()).map(str::to_owned))
             .flatten()
             .unwrap_or_default();
         let mut overlay = Overlay::new(Kind::RenameScene(line));
@@ -2698,17 +2700,21 @@ impl App {
         self.overlay = Some(overlay);
         self.redraw();
     }
-    /// Writes (or replaces, or removes) the name note on the line under the break at `line`.
+    /// Writes (or replaces, or removes) the `# name` line of the scene whose break is on `line`;
+    /// line 0 without a break is the first scene.
     fn set_scene_name(&mut self, line: usize, name: &str) {
         let protect = !self.settings.edit_scene_names;
         let Some(id) = self.active_id() else { return };
         let Some(tab) = self.tabs.get_mut(&id) else { return };
         let doc = &mut tab.document;
-        if line >= doc.text.len_lines() || !prose::is_scene_break(doc.text.line(line).to_string().trim()) {
+        let is_break = line < doc.text.len_lines() && prose::is_scene_break(doc.text.line(line).to_string().trim());
+        if !is_break && line != 0 {
             return;
         }
-        doc.protect_names = false;
         let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let first = !is_break;
+        let at = if first { 0 } else { line + 1 };
+        let len = |doc: &crate::core::buffer::Document| doc.text.len_chars();
         let end = |doc: &crate::core::buffer::Document, l: usize| {
             let mut e = doc.text.line_to_char(l) + doc.text.line(l).len_chars();
             while e > doc.text.line_to_char(l) && matches!(doc.text.char(e - 1), '\n' | '\r') {
@@ -2716,29 +2722,36 @@ impl App {
             }
             e
         };
-        let has_name = line + 1 < doc.text.len_lines() && prose::scene_name(&doc.text.line(line + 1).to_string()).is_some();
+        let has_name = at < doc.text.len_lines() && prose::scene_name(&doc.text.line(at).to_string()).is_some();
         let le = doc.line_ending;
-        let (caret, length) = (doc.cursor, doc.text.len_chars());
+        let (caret, length) = (doc.cursor, len(doc));
+        doc.protect_names = false;
         match (has_name, name.is_empty()) {
-            (false, true) => return,
+            (false, true) => {}
+            (false, false) if first => doc.replace(0..0, &format!("# {name}{le}")),
             (false, false) => {
-                let at = end(doc, line);
-                doc.replace(at..at, &format!("{le}# {name}"));
+                let pos = end(doc, line);
+                doc.replace(pos..pos, &format!("{le}# {name}"));
             }
             (true, false) => {
-                let (a, b) = (doc.text.line_to_char(line + 1), end(doc, line + 1));
+                let (a, b) = (doc.text.line_to_char(at), end(doc, at));
                 doc.replace(a..b, &format!("# {name}"));
             }
             (true, true) => {
                 // The whole line goes, with its line ending.
-                let (a, b) = (end(doc, line), end(doc, line + 1));
+                let (a, b) = if first {
+                    (0, if at + 1 < doc.text.len_lines() { doc.text.line_to_char(at + 1) } else { len(doc) })
+                } else {
+                    (end(doc, line), end(doc, at))
+                };
                 doc.replace(a..b, "");
             }
         }
         // The caret stays on its text, not on the name line.
-        let shift = doc.text.len_chars() as isize - length as isize;
-        let caret = if caret > doc.text.line_to_char(line.min(doc.text.len_lines() - 1)) + 1 { (caret as isize + shift).max(0) as usize } else { caret };
-        doc.select(caret.min(doc.text.len_chars()), false);
+        let from = if first { 0 } else { doc.text.line_to_char(line.min(doc.text.len_lines() - 1)) + 1 };
+        let shift = len(doc) as isize - length as isize;
+        let caret = if caret >= from { (caret as isize + shift).max(0) as usize } else { caret };
+        doc.select(caret.min(len(doc)), false);
         doc.protect_names = protect;
         self.edited(id);
         self.redraw();

@@ -267,7 +267,7 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
             continue;
         }
         // A scene's name (`# The storm` under its break) is for the editor only.
-        if matches!(blocks.last(), Some(Block::SceneBreak)) && crate::core::prose::scene_name(&prose_text).is_some() {
+        if matches!(blocks.last(), None | Some(Block::SceneBreak)) && crate::core::prose::scene_name(&prose_text).is_some() {
             continue;
         }
         if !prose_text.is_empty() && is_scene_break(&prose_text) {

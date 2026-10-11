@@ -819,10 +819,8 @@ impl App {
             height: rect.height.saturating_sub(top + padding * 2).max(1),
         };
         if let Some(title) = title {
-            let language = self.project.as_ref().map(|s| s.core.manifest.settings.language).unwrap_or_default();
-            let plain = crate::export::model::number_of_chapter_title(&title, language);
             let size = self.settings.font_size * 2.;
-            let colour = if plain { p.muted } else { p.text };
+            let colour = p.muted;
             let area = Rect { x: editor_rect.x, y: rect.y + (header + toolbar + find_height + padding / 2) as i32, width: editor_rect.width, height: band };
             let shown = self.fit(&title, area.width.saturating_sub(self.su(20.)) as f32, size);
             self.put(&shown, area, size, colour, Face::Bold, Align::Center);
@@ -1223,8 +1221,9 @@ impl App {
             .enumerate()
             .map(|(n, line)| {
                 let next = *line + 1;
-                (n > 0 && next < text.len_lines())
-                    .then(|| prose::scene_name(&text.line(next).to_string()).map(str::to_owned))
+                let at = if n == 0 { 0 } else { next };
+                (at < text.len_lines())
+                    .then(|| prose::scene_name(&text.line(at).to_string()).map(str::to_owned))
                     .flatten()
             })
             .collect();

@@ -477,11 +477,16 @@ pub fn word_count(neutral: &str) -> usize {
     let mut inline = false;
     let mut line_note = false;
     let mut block = false;
-    for c in neutral.chars() {
+    let mut line_start = true;
+    let mut chars = neutral.chars().peekable();
+    while let Some(c) = chars.next() {
+        let at_start = std::mem::replace(&mut line_start, c == '\n');
         match c {
             BLOCK_OPEN => block = true,
             BLOCK_CLOSE => block = false,
             _ if block => {}
+            // A scene's name (`# The storm`) is not prose.
+            '#' if at_start && chars.peek() == Some(&' ') => line_note = true,
             '\n' => {
                 line_note = false;
                 inline = false;
@@ -660,6 +665,11 @@ mod tests {
         Marker::default()
     }
 
+    #[test]
+    fn scene_name_lines_are_not_counted_as_words() {
+        assert_eq!(word_count("one two\n# The storm\nthree"), 3);
+        assert_eq!(word_count("a # b"), 2);
+    }
     #[test]
     fn markers_are_validated() {
         assert!(Marker::new("$$").is_ok() && Marker::new("%%").is_ok() && Marker::new("//").is_ok());
