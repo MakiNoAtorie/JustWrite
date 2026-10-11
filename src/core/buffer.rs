@@ -116,7 +116,8 @@ impl Document {
         }
         let get = |i: usize| -> String { self.text.line(i).chars().take(64).collect() };
         let line = get(l);
-        (super::prose::scene_name(&line).is_some() && (l == 0 || super::prose::is_scene_break(get(l - 1).trim())))
+        super::prose::is_hash_break(&line)
+            || (super::prose::scene_name(&line).is_some() && (l == 0 || super::prose::is_scene_break(get(l - 1).trim())))
             || (l + 1 < lines && super::prose::is_scene_break(line.trim()) && super::prose::scene_name(&get(l + 1)).is_some())
     }
     /// Whether `range` changes part of a name line or of its break. Covering the whole line is fine.
@@ -148,7 +149,8 @@ impl Document {
         let end = range.end.min(self.text.len_chars());
         let tail: String = self.text.slice(end..self.text.line_to_char((self.text.char_to_line(end) + 1).min(self.text.len_lines())).max(end)).into();
         let tail = tail.split(['\r', '\n']).next().unwrap_or("");
-        super::prose::scene_name(&format!("{prefix}{text}{tail}")).is_some()
+        let merged = format!("{prefix}{text}{tail}");
+        super::prose::scene_name(&merged).is_some() || super::prose::is_hash_break(&merged)
     }
     pub fn replace_rope(&mut self, range: Range<usize>, inserted: Rope) {
         if self.protect_names && (self.touches_scene_name(&range) || self.creates_scene_name(&range, &inserted)) {
@@ -220,8 +222,36 @@ impl Document {
             self.undo.push(edit);
         }
     }
+    /// The lines of the separator group at `line` (a hash break with its name, or a name with its
+    /// break), as a char range including line endings.
+    fn separator_group(&self, line: usize) -> Option<Range<usize>> {
+        if !self.name_pair_line(line) {
+            return None;
+        }
+        let text = |l: usize| -> String { self.text.line(l).chars().take(64).collect() };
+        let is_name = |l: usize| super::prose::scene_name(&text(l)).is_some();
+        let (mut first, mut last) = (line, line);
+        if is_name(line) && line > 0 && super::prose::is_scene_break(text(line - 1).trim()) {
+            first = line - 1;
+        } else if line + 1 < self.text.len_lines() && is_name(line + 1) {
+            last = line + 1;
+        }
+        let end = if last + 1 < self.text.len_lines() { self.text.line_to_char(last + 1) } else { self.text.len_chars() };
+        Some(self.text.line_to_char(first)..end)
+    }
     pub fn delete(&mut self, backwards: bool) {
         let mut range = self.selection();
+        if range.is_empty() && self.protect_names {
+            // The caret is on a separator shown as a symbol: Delete removes the whole separator.
+            let line = self.text.char_to_line(self.cursor.min(self.text.len_chars()));
+            if let Some(group) = self.separator_group(line) {
+                self.protect_names = false;
+                self.replace(group, "");
+                self.protect_names = true;
+                self.typing = false;
+                return;
+            }
+        }
         if range.is_empty() {
             if backwards {
                 range.start = range.start.saturating_sub(1);
@@ -341,12 +371,13 @@ impl Document {
         self.typing = true;
         self.last_edit = Some(std::time::Instant::now());
     }
-    /// Puts a scene break (`#`) with a blank line on each side at the caret, as one undo step.
+    /// Puts a scene break (`###newscene###`) with a blank line on each side at the caret, as one undo step.
     /// The paragraph is split at the caret; the caret ends on the line after the break. Returns
     /// false, changing nothing, when the caret is already on a break line.
     pub fn insert_scene_break(&mut self) -> bool {
         self.typing = false;
         let le = self.line_ending;
+        let mark = super::prose::SCENE_BREAK;
         let line = self.text.char_to_line(self.cursor.min(self.text.len_chars()));
         let start = self.text.line_to_char(line);
         let content: String = self.text.line(line).to_string().trim_end_matches(['\r', '\n']).to_owned();
@@ -359,13 +390,13 @@ impl Document {
         let (pre, post) = (content[..split].trim_end(), content[split..].trim_start());
         let prev_blank = line == 0 || self.text.line(line - 1).to_string().trim().is_empty();
         let (insert, back) = if content.trim().is_empty() {
-            let text = if prev_blank { format!("#{le}") } else { format!("{le}#{le}") };
+            let text = if prev_blank { format!("{mark}{le}") } else { format!("{le}{mark}{le}") };
             (text, 0)
         } else {
             let head = match (pre.is_empty(), prev_blank) {
-                (false, _) => format!("{pre}{le}{le}#"),
-                (true, true) => "#".to_owned(),
-                (true, false) => format!("{le}#"),
+                (false, _) => format!("{pre}{le}{le}{mark}"),
+                (true, true) => mark.to_owned(),
+                (true, false) => format!("{le}{mark}"),
             };
             let back = post.chars().count();
             (format!("{head}{le}{le}{post}"), back)
@@ -476,97 +507,72 @@ mod tests {
 
     #[test]
     fn scene_break_splits_a_paragraph_and_undoes_in_one_step() {
-        let mut doc = Document::new(Rope::from_str("one two
-next"));
+        let mut doc = Document::new(Rope::from_str("one two\nnext"));
         doc.select(4, false);
         assert!(doc.insert_scene_break());
-        assert_eq!(doc.text.to_string(), "one
-
-#
-
-two
-next");
+        assert_eq!(doc.text.to_string(), "one\n\n###newscene###\n\ntwo\nnext");
         assert_eq!(doc.text.char_to_line(doc.cursor), 4);
         doc.select(doc.text.line_to_char(2), false);
         assert!(!doc.insert_scene_break());
-        assert_eq!(doc.text.to_string(), "one
-
-#
-
-two
-next");
         doc.undo();
-        assert_eq!(doc.text.to_string(), "one two
-next");
+        assert_eq!(doc.text.to_string(), "one two\nnext");
     }
     #[test]
     fn scene_break_at_line_end_and_on_empty_line() {
         let mut doc = Document::new(Rope::from_str("end"));
         doc.select(3, false);
         doc.insert_scene_break();
-        assert_eq!(doc.text.to_string(), "end
-
-#
-
-");
-        let mut doc = Document::new(Rope::from_str("a
-
-b"));
+        assert_eq!(doc.text.to_string(), "end\n\n###newscene###\n\n");
+        let mut doc = Document::new(Rope::from_str("a\n\nb"));
         doc.select(2, false);
         doc.insert_scene_break();
-        assert_eq!(doc.text.to_string(), "a
-
-#
-
-b");
+        assert_eq!(doc.text.to_string(), "a\n\n###newscene###\n\nb");
     }
     #[test]
-    fn a_scene_name_and_its_break_resist_edits_unless_unprotected() {
-        let text = "para
-
-#
-## The storm ##
-
-next";
+    fn separators_and_names_resist_edits_unless_unprotected() {
+        let text = "para\n\n###newscene###\n## The storm ##\n\nnext";
         let mut doc = Document::new(Rope::from_str(text));
-        // Typing in the name, at its end, and deleting a part of the break are all refused.
         let name_end = text.find("storm").unwrap() + 5;
         doc.select(name_end, false);
         doc.type_text("x", None);
-        doc.delete(true);
-        let break_line = text.find("#
-#").unwrap();
-        doc.select(break_line + 1, false);
-        doc.delete(true);
+        let mark = text.find("###newscene").unwrap();
+        doc.select(mark + 3, false);
+        doc.type_text("q", None);
         assert_eq!(doc.text.to_string(), text);
-        // Typing a name by hand is refused too: only the Scenes panel makes names.
-        let mut plain = Document::new(Rope::new());
-        for c in "## x ##".chars() {
-            plain.type_text(&c.to_string(), None);
-        }
-        assert_eq!(plain.text.to_string(), "## x #");
         assert!(doc.name_blocked);
         // Text around them still edits, and a selection covering both lines goes whole.
         doc.select(0, false);
         doc.type_text("A", None);
         assert!(doc.text.to_string().starts_with("Apara"));
-        let from = doc.text.to_string().find("#
-#").unwrap();
-        let to = doc.text.to_string().find("
-
-next").unwrap() + 1;
-        doc.anchor = from;
-        doc.cursor = to;
+        let now = doc.text.to_string();
+        doc.anchor = now.find("###newscene").unwrap();
+        doc.cursor = now.find("\n\nnext").unwrap() + 1;
         doc.delete(false);
-        assert_eq!(doc.text.to_string(), "Apara
-
-
-next");
+        assert_eq!(doc.text.to_string(), "Apara\n\n\nnext");
         doc.undo();
+        // Delete on the separator's own line removes the separator with its name.
+        doc.select(doc.text.to_string().find("###newscene").unwrap() + 2, false);
+        doc.delete(false);
+        assert_eq!(doc.text.to_string(), "Apara\n\n\nnext");
+        doc.undo();
+        // Typing a separator or a name by hand is refused.
+        let mut plain = Document::new(Rope::new());
+        for c in "###".chars() {
+            plain.type_text(&c.to_string(), None);
+        }
+        assert_eq!(plain.text.to_string(), "");
+        // Unprotected, the name edits like text.
         doc.protect_names = false;
         doc.select(doc.text.to_string().find("storm").unwrap() + 5, false);
         doc.type_text("y", None);
         assert!(doc.text.to_string().contains("## The stormy ##"));
+    }
+    #[test]
+    fn a_half_typed_break_has_a_ghost() {
+        assert_eq!(super::super::prose::scene_ghost("###"), Some("newscene###"));
+        assert_eq!(super::super::prose::scene_ghost("###new"), Some("scene###"));
+        assert_eq!(super::super::prose::scene_ghost("##"), None);
+        assert_eq!(super::super::prose::scene_ghost("###newscene###"), None);
     }
     #[test]
     fn edits_keep_unicode_and_original_endings() {

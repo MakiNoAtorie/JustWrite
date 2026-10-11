@@ -2187,7 +2187,22 @@ impl App {
                 edited = true;
             }
             Key::Named(NamedKey::Enter) => {
-                tab.document.enter();
+                let doc = &mut tab.document;
+                // `###` at the end of a line offers the rest of the break and a name to fill in.
+                let line = doc.text.char_to_line(doc.cursor);
+                let text = doc.text.line(line).to_string();
+                let end = doc.text.line_to_char(line) + text.trim_end_matches(['\r', '\n']).chars().count();
+                let ghost = (self.settings.edit_scene_names && doc.selection().is_empty() && doc.cursor == end).then(|| prose::scene_ghost(&text)).flatten();
+                match ghost {
+                    Some(rest) => {
+                        let name = prose::SCENE_NAME_PLACEHOLDER;
+                        let le = doc.line_ending;
+                        doc.insert(&format!("{rest}{le}## {name} ##"));
+                        doc.cursor -= 3;
+                        doc.anchor = doc.cursor - name.chars().count();
+                    }
+                    None => doc.enter(),
+                }
                 edited = true;
             }
             Key::Character(_) | Key::Named(NamedKey::Space)

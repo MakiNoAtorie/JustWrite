@@ -10,9 +10,28 @@ use std::ops::Range;
 
 // ---- scene breaks ---------------------------------------------------------------------------
 
+/// The canonical scene break, as it is written in the text.
+pub const SCENE_BREAK: &str = "###newscene###";
+/// What the autocomplete puts under a new break: the name to replace.
+pub const SCENE_NAME_PLACEHOLDER: &str = "Scene Name";
+
+/// A break written with hashes (`#` to `###`, or the canonical one): the forms the editor locks.
+pub fn is_hash_break(line: &str) -> bool {
+    let t = line.trim();
+    t.eq_ignore_ascii_case(SCENE_BREAK) || ((1..=3).contains(&t.len()) && t.chars().all(|c| c == '#'))
+}
+/// What would complete a half-typed canonical break: `###` or `###new` give the rest of it.
+pub fn scene_ghost(line: &str) -> Option<&'static str> {
+    let t = line.trim();
+    (t.len() >= 3 && t.len() < SCENE_BREAK.len() && SCENE_BREAK.starts_with(&t.to_ascii_lowercase()[..])).then(|| &SCENE_BREAK[t.len()..])
+}
+
 /// A line holding only `#`, `***`, `* * *`, `---` or similar.
 pub fn is_scene_break(line: &str) -> bool {
     let t = line.trim();
+    if t.eq_ignore_ascii_case(SCENE_BREAK) {
+        return true;
+    }
     if t.is_empty() || t.len() > 16 {
         return false;
     }
@@ -289,6 +308,8 @@ pub struct Options<'a> {
     /// Caret position in the same character coordinates as `start`. On the line being edited,
     /// `*` markers show only on the emphasis that holds it; `None` shows them all.
     pub caret: Option<usize>,
+    /// Hash separators and scene names always show as shown, even on the caret's line.
+    pub lock_scenes: bool,
 }
 
 /// State a chunk starts in, carried over from the lines and chunks before it.
@@ -316,8 +337,9 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
     let mut hid_something = false;
     let mut name_line = false;
     for (line_i, line) in source.split_inclusive('\n').enumerate() {
-        let raw = options.show_markers || cursor_line == Some(line_i);
         let body_end = line.trim_end_matches(['\r', '\n']).len();
+        let locked = options.lock_scenes && (is_hash_break(&line[..body_end]) || scene_name_at(&line[..body_end]).is_some());
+        let raw = (options.show_markers || cursor_line == Some(line_i)) && !locked;
         let mut scan = notes::scan_line(line, options.marker, in_block);
         if line_i == 0 && initial.in_line_note {
             scan.segs = vec![notes::Seg { range: 0..body_end, kind: Kind::Note }];
@@ -666,7 +688,7 @@ pub fn format_at(line: &str, col: usize, marker: &Marker) -> Format {
 mod tests {
     use super::*;
     fn options(marker: &Marker) -> Options<'_> {
-        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None }
+        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false }
     }
 
     #[test]
@@ -676,7 +698,7 @@ mod tests {
         assert_eq!(scene_name("#"), None);
         assert_eq!(scene_name("## ##"), None);
         assert_eq!(scene_name("Chapter ## 3 ##"), None);
-        let p = present("## The storm ##\n", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None });
+        let p = present("## The storm ##\n", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None, lock_scenes: false });
         assert_eq!(p.text, "The storm\n");
         assert!(p.center && p.spans[0].style.bold);
     }

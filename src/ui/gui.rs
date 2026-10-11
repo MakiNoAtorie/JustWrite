@@ -870,6 +870,28 @@ impl App {
         let empty = tab.document.text.len_chars() == 0 && !tab.loading && !vacant;
         let (len_chars, len_lines, top_char) =
             (tab.document.text.len_chars(), tab.document.text.len_lines(), tab.view.top);
+        // The rest of a half-typed `###newscene###`, in grey after the caret.
+        let ghost = (self.settings.edit_scene_names && !vacant && pane_id == self.active_pane && tab.document.selection().is_empty())
+            .then(|| {
+                let doc = &tab.document;
+                let line = doc.text.char_to_line(doc.cursor.min(doc.text.len_chars()));
+                let text = doc.text.line(line).to_string();
+                let end = doc.text.line_to_char(line) + text.trim_end_matches(['\r', '\n']).chars().count();
+                let rest = if doc.cursor == end { prose::scene_ghost(&text) } else { None }?;
+                let (x, y) = tab.view.caret_at(doc.cursor)?;
+                Some((rest, x, y))
+            })
+            .flatten();
+        if let Some((rest, x, y)) = ghost {
+            let height = (settings.font_size * settings.line_height) as u32;
+            let size = self.settings.font_size;
+            let faint = p.faint(p.background);
+            let at = Rect { x: editor_rect.x + x as i32, y: editor_rect.y + y as i32, width: editor_rect.width, height };
+            self.put(rest, at, size, faint, Face::Normal, Align::Left);
+            let below = format!("↵  ## {} ##", prose::SCENE_NAME_PLACEHOLDER);
+            let at = Rect { x: editor_rect.x, y: editor_rect.y + y as i32 + height as i32, width: editor_rect.width, height };
+            self.put(&below, at, size, faint, Face::Normal, Align::Center);
+        }
         if empty && !focus {
             let hint = Rect {
                 x: editor_rect.x + self.s(10.),

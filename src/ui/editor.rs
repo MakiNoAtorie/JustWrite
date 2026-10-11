@@ -117,6 +117,8 @@ pub struct EditorView {
     pub marker: Marker,
     /// Shown for scene-break lines.
     pub scene_symbol: String,
+    /// Separators and scene names are not edited in the text.
+    pub lock_scenes: bool,
     /// Scroll so the caret shows at the next layout.
     pub reveal: bool,
 }
@@ -171,7 +173,9 @@ fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, settings
 impl EditorView {
     pub fn configure(&mut self, settings: &Settings, scene_symbol: &str) {
         let marker = settings.marker();
-        if marker != self.marker || scene_symbol != self.scene_symbol {
+        let lock = !settings.edit_scene_names;
+        if marker != self.marker || scene_symbol != self.scene_symbol || lock != self.lock_scenes {
+            self.lock_scenes = lock;
             self.marker = marker;
             self.scene_symbol = scene_symbol.to_owned();
             self.clear_cache();
@@ -370,6 +374,7 @@ impl EditorView {
                 scene_symbol: &self.scene_symbol,
                 indent,
                 caret,
+                lock_scenes: self.lock_scenes,
             };
             let build = |source: String, cut: bool, fonts: &mut FontSystem| {
                 let preview = prose::present(&source, 0, if raw { Some(0) } else { None }, initial, options);
@@ -705,8 +710,14 @@ mod tests {
             s.preview_notes = true;
         });
         assert!(shown(&v).contains("aside") && shown(&v).contains("whole note"), "{}", shown(&v));
-        let (v, _) = view(text, 0, 800, |s| s.show_markers = true);
+        let (v, _) = view(text, 0, 800, |s| {
+            s.show_markers = true;
+            s.edit_scene_names = true;
+        });
         assert!(shown(&v).contains("$$ whole note") && shown(&v).contains("#"));
+        // With scene names locked a hash separator stays a symbol, markers or not.
+        let (v, _) = view(text, 0, 800, |s| s.show_markers = true);
+        assert!(shown(&v).contains("* * *") && !shown(&v).contains("#"), "{}", shown(&v));
     }
 
     #[test]
@@ -780,7 +791,7 @@ mod tests {
         assert!(v.tiles.len() > 3, "the paragraph spans several chunks");
         let settings = Settings::default();
         let marker = Marker::default();
-        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None };
+        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false };
         let whole = prose::present(&text, 0, Some(0), Initial { in_block: false, in_line_note: false }, options);
         let expected: Vec<usize> = FONTS.with(|fonts| {
             shape(&whole, Wrap::WordOrGlyph, 600., false, &settings, &mut fonts.borrow_mut())
