@@ -250,6 +250,11 @@ pub fn read_markdown(text: &str) -> Raw {
             flush(&mut current, &mut raw.paras);
             continue;
         }
+        // `## Name ##` right after a scene break is that scene's name, not a heading.
+        if current.is_empty() && crate::core::prose::scene_name(trimmed).is_some() && raw.paras.last().is_some_and(|p| p.kind == Kind::SceneBreak) {
+            raw.paras.push(RawPara { text: trimmed.to_owned(), kind: Kind::Body, page_break_before: false });
+            continue;
+        }
         // ATX heading.
         let hashes = trimmed.chars().take_while(|c| *c == '#').count();
         if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with([' ', '\t']) {
@@ -362,6 +367,8 @@ mod tests {
         assert_eq!(t[6], "not a list");
         assert_eq!(t[7], "quoted");
         assert!(t[8].contains(notes::OPEN) && t[8].contains("remember this") && t[8].ends_with("End \\* star."), "{:?}", t[8]);
+        // A closed heading is a scene name only right after a break.
+        assert_eq!(texts(&read_markdown("a\n\n***\n\n## The storm ##\n\nb\n\n## Two ##\n")), ["a", "#", "## The storm ##", "b", "H2:Two"]);
     }
 
     #[test]

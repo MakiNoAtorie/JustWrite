@@ -694,13 +694,17 @@ impl App {
             Tool::Button("New Scene", Face::Normal, command(Command::NewScene)),
         ];
         let edge = rect.x + rect.width as i32 - self.s(8.);
+        // A divider is drawn only when a tool follows it, so a narrow bar does not end with one.
+        let mut gap = None;
+        let divider =|this: &mut Self, gap: &mut Option<i32>| {
+            if let Some(at) = gap.take() {
+                this.renderer.fill(Rect { x: at + this.s(4.), y: y + this.s(5.), width: 1, height: height.saturating_sub(this.su(10.)) }, p.border);
+            }
+        };
         for tool in tools {
             let (text, face, hit) = match tool {
                 Tool::Gap => {
-                    self.renderer.fill(
-                        Rect { x: x + self.s(4.), y: y + self.s(5.), width: 1, height: height.saturating_sub(self.su(10.)) },
-                        p.border,
-                    );
+                    gap = Some(x);
                     x += self.s(10.);
                     continue;
                 }
@@ -709,6 +713,7 @@ impl App {
                     if x + width as i32 > edge {
                         break;
                     }
+                    divider(self, &mut gap);
                     self.put(&text, Rect { x, y, width, height }, 13., p.text, Face::Normal, Align::Center);
                     x += width as i32 + self.s(2.);
                     continue;
@@ -719,6 +724,7 @@ impl App {
             if x + width as i32 > edge {
                 break;
             }
+            divider(self, &mut gap);
             let on = match &hit {
                 Hit::Command(Command::Bold) => format.bold,
                 Hit::Command(Command::Italic) => format.italic,
