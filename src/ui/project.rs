@@ -340,8 +340,8 @@ impl App {
                 (Section::Notes, tree.notes.len(), Node::page(&title))
             }
             _ => {
-                let count = tree.leaves(Section::Manuscript).len() + 1;
-                (Section::Manuscript, tree.manuscript.len(), Node::chapter(&format!("Chapter {count}")))
+                let title = tree.next_chapter_title();
+                (Section::Manuscript, tree.manuscript.len(), Node::chapter(&title))
             }
         };
         let id = node.id().to_owned();
@@ -355,7 +355,8 @@ impl App {
             Err(error) => self.status = error,
         }
         self.redraw();
-    }    /// "Note 1", "Note 2", …: the first number no note in the tree already uses.
+    }
+    /// "Note 1", "Note 2", …: the first number no note in the tree already uses.
     pub(super) fn next_note_title(tree: &manifest::Tree) -> String {
         let used: Vec<String> = tree.leaves(Section::Notes).iter().map(|(n, _)| n.title().to_owned()).collect();
         (tree.leaves(Section::Notes).len() + 1..).map(|n| format!("Note {n}")).find(|t| !used.contains(t)).unwrap()

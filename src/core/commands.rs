@@ -262,6 +262,19 @@ pub fn resolve(
     })
 }
 
+/// The defaults of every platform before a Mac got its own.
+const BEFORE_MAC: &[(&str, &str)] = &[("quit", "Alt+F4"), ("redo", "Ctrl+Y"), ("focus", "F11")];
+/// Leaves only the shortcuts a person changed. A settings file once listed every default, and so
+/// kept the old one when a default changed.
+pub fn prune_defaults(keymap: &mut BTreeMap<String, String>) {
+    let listed = keymap.len();
+    keymap.retain(|key, value| COMMANDS.iter().all(|c| c.key != key || c.shortcut != value));
+    // Only a file that listed defaults has the old ones; in any other file they are a choice.
+    if cfg!(target_os = "macos") && keymap.len() < listed {
+        keymap.retain(|key, value| !BEFORE_MAC.contains(&(key.as_str(), value.as_str())));
+    }
+}
+
 /// A stored shortcut as shown to people: Cmd and Option on a Mac, arrows as arrows.
 pub fn display_shortcut(raw: &str) -> String {
     let mac = cfg!(target_os = "macos");
@@ -277,6 +290,20 @@ pub fn display_shortcut(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_listed_default_does_not_hide_a_new_default() {
+        let mut keymap: BTreeMap<String, String> =
+            [("bold", "Ctrl+B"), ("italic", "Ctrl+Alt+I"), ("quit", "Alt+F4"), ("undo", "")].map(|(k, v)| (k.into(), v.into())).into();
+        prune_defaults(&mut keymap);
+        assert_eq!(keymap.get("italic").map(String::as_str), Some("Ctrl+Alt+I"));
+        assert_eq!(keymap.get("undo").map(String::as_str), Some(""));
+        assert!(!keymap.contains_key("bold"));
+        assert_eq!(keymap.contains_key("quit"), !cfg!(target_os = "macos"));
+        // With no default listed, the same shortcut is a choice and stays.
+        let mut chosen: BTreeMap<String, String> = [("quit".to_owned(), "Alt+F4".to_owned())].into();
+        prune_defaults(&mut chosen);
+        assert_eq!(chosen.len(), if cfg!(windows) { 0 } else { 1 });
+    }
     #[test]
     fn shortcuts_are_shown_with_arrows() {
         assert_eq!(display_shortcut("Alt+ArrowUp"), if cfg!(target_os = "macos") { "Option+↑" } else { "Alt+↑" });

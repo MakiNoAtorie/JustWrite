@@ -7,3 +7,4 @@
 
 # Generated benchmark projects (tools/gen_bench_jw.py)
 /bench_data/
+.DS_Store

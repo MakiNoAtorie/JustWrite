@@ -111,13 +111,10 @@ impl Session {
         self.project.write_text(id, &notes::to_neutral(display, &Marker::default()).0).map_err(text)
     }
 
-    /// Adds a chapter at the end of the manuscript; returns its id.
+    /// Adds a chapter at the end of the manuscript; returns its id. With no title it is numbered.
     pub fn add_chapter(&mut self, title: &str) -> Result<String, String> {
-        let title = title.trim();
-        if title.is_empty() {
-            return Err("A title cannot be empty".into());
-        }
-        let node = Node::chapter(title);
+        let numbered = self.project.manifest.tree.next_chapter_title();
+        let node = Node::chapter(if title.trim().is_empty() { &numbered } else { title.trim() });
         let id = node.id().to_owned();
         let end = self.project.manifest.tree.manuscript.len();
         self.project.add(Section::Manuscript, &[], end, node)?;

@@ -103,7 +103,7 @@ impl Default for Settings {
 }
 impl Settings {
     pub fn parse(text: &str) -> Result<Self, String> {
-        let settings: Self = toml::from_str(text).map_err(|e| e.to_string())?;
+        let mut settings: Self = toml::from_str(text).map_err(|e| e.to_string())?;
         if !["light", "dark", "system"].contains(&settings.theme.as_str()) {
             return Err("Theme must be light, dark or system".into());
         }
@@ -139,6 +139,7 @@ impl Settings {
         for shortcut in settings.keymap.values() {
             super::commands::parse_shortcut(shortcut)?;
         }
+        super::commands::prune_defaults(&mut settings.keymap);
         Ok(settings)
     }
     pub fn serialize(&self) -> String {

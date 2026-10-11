@@ -2742,11 +2742,7 @@ impl App {
                     let settings = match read_complete(&*storage, Path::new("settings.toml")) {
                         Ok(text) => Settings::parse(&text.to_string()),
                         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                            let mut settings = Settings::default();
-                            settings.keymap = COMMANDS
-                                .iter()
-                                .map(|c| (c.key.into(), c.shortcut.into()))
-                                .collect();
+                            let settings = Settings::default();
                             storage
                                 .write(
                                     Path::new("settings.toml"),

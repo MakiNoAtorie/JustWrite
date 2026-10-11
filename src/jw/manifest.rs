@@ -121,6 +121,12 @@ pub struct Tree {
     pub notes: Vec<Node>,
 }
 impl Tree {
+    /// "Chapter 1", "Chapter 2", …: one more than the highest number a chapter already has, so a
+    /// prologue or an epilogue does not count.
+    pub fn next_chapter_title(&self) -> String {
+        let numbers = self.leaves(Section::Manuscript).into_iter().filter_map(|(n, _)| n.title().trim().to_lowercase().strip_prefix("chapter")?.trim().parse::<usize>().ok());
+        format!("Chapter {}", numbers.max().unwrap_or(0) + 1)
+    }
     pub fn section(&self, section: Section) -> &Vec<Node> {
         match section {
             Section::Manuscript => &self.manuscript,
@@ -407,6 +413,14 @@ impl Manifest {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_new_chapter_follows_the_highest_number() {
+        let next = |titles: &[&str]| Tree { manuscript: titles.iter().map(|t| Node::chapter(t)).collect(), notes: vec![] }.next_chapter_title();
+        assert_eq!(next(&[]), "Chapter 1");
+        assert_eq!(next(&["Prologue"]), "Chapter 1");
+        assert_eq!(next(&["Prologue", "Chapter 1"]), "Chapter 2");
+        assert_eq!(next(&["chapter 4", "Chapter 2", "Epilogue"]), "Chapter 5");
+    }
     #[test]
     fn ids_are_unique_and_short() {
         let ids: std::collections::HashSet<String> = (0..2000).map(|_| new_id()).collect();
