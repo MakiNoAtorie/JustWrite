@@ -31,6 +31,8 @@ pub struct Settings {
     pub note_color: String,
     pub note_italic: bool,
     pub hide_notes: bool,
+    /// Short movement effects, such as the glide to a scene.
+    pub animations: bool,
     /// Let the text edit scene names. Off: names change only in the Scenes panel.
     pub edit_scene_names: bool,
     /// Keep notes in the preview view. Off by default: the preview shows the text as exported.
@@ -81,6 +83,7 @@ impl Default for Settings {
             spellcheck: true,
             default_preset: String::new(),
             keymap: BTreeMap::new(),
+            animations: true,
             system_light: false,
             justify: false,
             preview: false,

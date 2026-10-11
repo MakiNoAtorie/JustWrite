@@ -79,4 +79,30 @@ mod tests {
         }
         assert!(export(&src, &Scope::Chapters(vec![]), &builtins()[0]).is_err());
     }
+
+    #[test]
+    fn epigraphs_and_extracts_export_in_every_format() {
+        let mut src = source();
+        let text = "> Dreams *are* made.\n— W. S., *The Tempest* <\n\nShe read the letter.\n>\nDear Anna,\n\n= come - home + soon #1\n— J.\n<\nThen she slept.\n";
+        for stored in src.texts.values_mut() {
+            *stored = text.to_owned();
+        }
+        for preset in builtins() {
+            let (_, out) = export(&src, &Scope::Whole, &preset).unwrap_or_else(|e| panic!("{}: {e}", preset.name));
+            let written = String::from_utf8(out.bytes);
+            match preset.format {
+                Format::Markdown => assert!(
+                    written.unwrap().contains("> Dreams *are* made.  \n> — W. S., *The Tempest*\n\nShe read the letter.\n\n> Dear Anna,  \n> = come - home + soon #1  \n> — J.\n\nThen she slept."),
+                    "{}",
+                    preset.name
+                ),
+                Format::PlainText => assert!(written.unwrap().contains("    Dreams are made.\n    — W. S., The Tempest\n\nShe read"), "{}", preset.name),
+                _ => {}
+            }
+        }
+        // What Markdown export writes, Markdown import reads back.
+        let raw = crate::import::text::read_markdown("> Dreams *are* made.  \n> — W. S.\n\nShe read.\n");
+        let lines: Vec<&str> = raw.paras.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(lines, ["> Dreams *are* made.", "— W. S. <", "She read."]);
+    }
 }

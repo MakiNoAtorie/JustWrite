@@ -468,8 +468,8 @@ fn strip_line(body: &str, mut in_block: bool) -> (String, bool, bool) {
     (kept, noted, in_block)
 }
 
-/// Words outside notes: whitespace-separated runs containing a letter or digit. Scene-break lines
-/// and bare punctuation do not count.
+/// Words outside notes: whitespace-separated runs containing a letter or digit. Scene-break lines,
+/// epigraphs and bare punctuation do not count.
 pub fn word_count(neutral: &str) -> usize {
     let mut count = 0;
     let mut in_word = false;
@@ -480,6 +480,13 @@ pub fn word_count(neutral: &str) -> usize {
     // Only blanks so far on this line, which starts at byte `line_at`.
     let mut lead = true;
     let mut line_at = 0;
+    // Only set-off blocks and blank lines since the start of the chapter or a scene's name: a
+    // block that opens here is an epigraph. `mark` is the count to go back to when it closes.
+    // ponytail: only hash breaks end an open block here; the export also ends it at `***`.
+    let mut head = true;
+    let mut content = false;
+    let mut mark: Option<usize> = None;
+    let mut last = ' ';
     for (i, c) in neutral.char_indices() {
         let at_lead = lead;
         lead = c == '\n' || (lead && c.is_whitespace());
@@ -496,7 +503,15 @@ pub fn word_count(neutral: &str) -> usize {
                 super::prose::scene_name(line).is_some() || super::prose::is_hash_break(line)
             } =>
             {
-                line_note = true
+                line_note = true;
+                mark = None;
+                head = super::prose::scene_name(neutral[line_at..].lines().next().unwrap_or("")).is_some();
+            }
+            '>' if i == line_at => {
+                // An earlier block that was never closed is prose.
+                head &= mark.take().is_none();
+                mark = head.then_some(count);
+                in_word = true;
             }
             '\n' => {
                 line_note = false;
@@ -506,6 +521,12 @@ pub fn word_count(neutral: &str) -> usize {
                 }
                 in_word = false;
                 alnum = false;
+                match mark {
+                    Some(before) if last == '<' => (count, mark) = (before, None),
+                    None => head &= !content,
+                    _ => {}
+                }
+                (content, last) = (false, ' ');
             }
             _ if line_note => {}
             LINE => {
@@ -535,6 +556,7 @@ pub fn word_count(neutral: &str) -> usize {
             }
             c => {
                 in_word = true;
+                (content, last) = (true, c);
                 alnum |= c.is_alphanumeric();
             }
         }
@@ -542,7 +564,10 @@ pub fn word_count(neutral: &str) -> usize {
     if in_word && alnum {
         count += 1;
     }
-    count
+    match mark {
+        Some(before) if last == '<' => before,
+        _ => count,
+    }
 }
 
 /// Result of [`toggle`]: replace `range` (display char offsets) with `text`, then select `select`.
@@ -674,6 +699,36 @@ mod tests {
     use super::*;
     fn m() -> Marker {
         Marker::default()
+    }
+
+    #[test]
+    fn epigraphs_are_not_counted_as_words_but_extracts_are() {
+        assert_eq!(word_count("> Dreams are made.\n— W. S. <\n\nOne two.\n> a letter <\n"), 4);
+        assert_eq!(word_count("###newscene###\n## Two ##\n> Quoted here. <\nOne.\n###newscene###\n> A sign. <\n"), 3);
+        assert_eq!(word_count("> never closed\nOne.\n> a b <\n"), 5, "an open block is prose, and so is what follows it");
+        assert_eq!(word_count("> a b <"), 0);
+    }
+
+    #[test]
+    fn the_count_leaves_out_the_blocks_the_export_sets_as_epigraphs() {
+        let pieces = ["> a b", "c d", "e <", "> f g <", "", "###newscene###", "## n ##", ">", "<"];
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut pick = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for round in 0..500 {
+            let lines: Vec<&str> = (0..10).map(|_| pieces[pick(pieces.len())]).collect();
+            let export = super::super::prose::quote_lines(&lines);
+            let expected: usize = lines
+                .iter()
+                .zip(&export)
+                .filter(|(line, quote)| !line.starts_with('#') && !quote.is_some_and(|q| q.epigraph))
+                .map(|(line, _)| line.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count())
+                .sum();
+            let ending = if round % 2 == 0 { "\n" } else { "" };
+            assert_eq!(word_count(&(lines.join("\n") + ending)), expected, "round {round}: {lines:?}");
+        }
     }
 
     #[test]

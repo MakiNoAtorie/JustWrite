@@ -54,6 +54,15 @@ fn css(preset: &Preset) -> String {
     let hyphens = if preset.hyphenate && preset.epub_theme != EpubTheme::Modern { "auto" } else { "manual" };
     let scene = esc(&preset.scene_break);
     let _ = scene;
+    // The initial spans `drop_cap` lines of 1.45em; 0.7 is a usual cap height.
+    let initial = match preset.drop_cap {
+        0 => String::new(),
+        1 => "p.opening::first-letter { font-size: 1.9em; line-height: 1; }\n".to_owned(),
+        n => format!(
+            "p.opening::first-letter {{ float: left; font-size: {:.2}em; line-height: 0.8; margin: 0.04em 0.08em 0 0; }}\n",
+            (f32::from(n - 1) * 1.45 + 0.7) / 0.7
+        ),
+    };
     format!(
         "@charset \"utf-8\";\n\
 html {{ font-size: 100%; }}\n\
@@ -64,7 +73,9 @@ h1.chapter-title .chapter-number {{ display: block; font-size: 0.75em; font-weig
 h1.part-title {{ text-align: center; font-size: 1.8em; margin: 30% 0 1em 0; }}\n\
 h2.matter-title {{ text-align: center; font-size: 1.3em; margin: 2em 0 1.2em 0; }}\n\
 p {{ margin: 0 0 {spacing} 0; text-indent: {indent}; orphans: 2; widows: 2; }}\n\
-p.first, h1 + p, h2 + p, p.scene + p {{ text-indent: 0; }}\n\
+p.first, p.opening, h1 + p, h2 + p, p.scene + p {{ text-indent: 0; }}\n\
+p.ornament {{ text-align: center; text-indent: 0; margin: -1em 0 1.4em 0; }}\n\
+{initial}\
 p.scene {{ text-align: center; text-indent: 0; margin: 1.2em 0; page-break-after: avoid; }}\n\
 p.matter, p.center {{ text-align: center; text-indent: 0; margin-bottom: 0.8em; }}\n\
 p.contents {{ text-indent: 0; text-align: left; margin: 0.4em 0; }}\n\
@@ -75,9 +86,15 @@ section.titlepage p {{ text-indent: 0; text-align: center; }}\n\
 section.cover {{ text-align: center; }}\n\
 section.cover img {{ max-width: 100%; max-height: 100%; }}\n\
 blockquote {{ margin: 0.6em 0 0.2em 1.4em; font-style: italic; }}\n\
+blockquote.epigraph, blockquote.extract {{ font-style: normal; margin: 1.4em 1.4em; }}\n\
+blockquote.epigraph {{ margin: 1.4em {inset}%; font-size: {scale}em; }}\n\
+blockquote p {{ text-indent: 0; }}\n\
+blockquote p.attribution {{ text-align: right; }}\n\
 .copyright p {{ text-indent: 0; text-align: left; font-size: 0.85em; margin-bottom: 0.3em; }}\n\
 nav ol {{ list-style-type: none; padding-left: 0; }}\n\
-nav ol ol {{ padding-left: 1.2em; }}\n"
+nav ol ol {{ padding-left: 1.2em; }}\n",
+        inset = crate::core::prose::EPIGRAPH_INSET * 100.,
+        scale = crate::core::prose::EPIGRAPH_SCALE,
     )
 }
 
@@ -370,7 +387,11 @@ fn chapter_page(chapter: &Chapter, preset: &Preset, language: Language) -> (Stri
         }
         body.push_str("</h1>\n");
     }
+    if !preset.chapter_ornament.is_empty() {
+        body.push_str(&format!("<p class=\"ornament\">{}</p>\n", esc(&preset.chapter_ornament)));
+    }
     let mut after_break = true;
+    let mut opening = preset.drop_cap > 0;
     for block in &chapter.blocks {
         match block {
             Block::SceneBreak => {
@@ -378,9 +399,25 @@ fn chapter_page(chapter: &Chapter, preset: &Preset, language: Language) -> (Stri
                 after_break = true;
             }
             Block::Paragraph(inlines) => {
-                let class = if after_break && preset.flush_after_break { " class=\"first\"" } else { "" };
+                let class = if opening {
+                    " class=\"opening\""
+                } else if after_break && preset.flush_after_break {
+                    " class=\"first\""
+                } else {
+                    ""
+                };
                 body.push_str(&format!("<p{class}>{}</p>\n", inline_html(inlines)));
-                after_break = false;
+                (after_break, opening) = (false, false);
+            }
+            Block::Quote(inlines, quote) => {
+                if quote.first {
+                    body.push_str(if quote.epigraph { "<blockquote class=\"epigraph\">\n" } else { "<blockquote class=\"extract\">\n" });
+                }
+                let text = inline_html(&super::model::quote_inlines(inlines, *quote));
+                body.push_str(&format!("<p{}>{}</p>\n", if quote.attribution { " class=\"attribution\"" } else { "" }, text));
+                if quote.last {
+                    body.push_str("</blockquote>\n");
+                }
             }
         }
     }
@@ -518,7 +555,8 @@ pub(crate) mod tests {
         assert!(ch.contains("<span class=\"chapter-number\">Chapter 1</span>") || ch.contains("Prologue"));
         let two = &parts["OEBPS/text/ch002.xhtml"];
         assert!(two.contains("&quot;Run,&quot; she said.") || two.contains("\"Run,\" she said."));
-        assert!(two.contains("<p class=\"first\">"));
+        assert!(two.contains("<p class=\"opening\">") && two.contains("<p class=\"ornament\">❦</p>"));
+        assert!(parts["OEBPS/styles.css"].contains("p.opening::first-letter { float: left; font-size: 5.14em;"));
         assert!(parts["OEBPS/text/part001.xhtml"].contains("Part 1: The Sea"));
         assert!(parts["OEBPS/styles.css"].contains("hyphens: auto") && parts["OEBPS/styles.css"].contains("text-align: justify"));
         assert!(parts["OEBPS/text/dedication.xhtml"].contains("For <em>Anna</em>."));

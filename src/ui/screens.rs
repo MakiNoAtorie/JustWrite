@@ -340,12 +340,13 @@ impl App {
             self.status = "Open a project first.".into();
             return;
         }
-        self.export_form();
+        self.export_form(crate::export::preset::PRINT_BOOK);
         if self.form.is_some() {
             self.form_extra("preview");
         }
     }
-    /// The paged preview of the chapter in the active tab, with the project's default preset.
+    /// The paged preview of the chapter in the active tab, as a book: the default preset when it
+    /// is a PDF one other than the manuscript, else the print book.
     pub(super) fn preview_chapter(&mut self) {
         let Some(item) = self.active_item() else {
             self.status = "Open a chapter to preview it.".into();
@@ -357,7 +358,17 @@ impl App {
             self.status = "Only manuscript chapters have a paged preview.".into();
             return;
         }
-        let preset = state.presets.get(&self.settings.default_preset).unwrap_or_default();
+        let manifest_default = &state.core.manifest.settings.default_preset;
+        let wanted = if manifest_default.is_empty() { &self.settings.default_preset } else { manifest_default };
+        let mut preset = state
+            .presets
+            .get(wanted)
+            .filter(|p| p.format == crate::export::preset::Format::Pdf && p.id != crate::export::preset::MANUSCRIPT_PDF)
+            .or_else(|| state.presets.get(crate::export::preset::PRINT_BOOK))
+            .unwrap_or_default();
+        // Only the chapter: no cover, contents page or front and back matter.
+        (preset.title_page, preset.toc, preset.copyright_page, preset.dedication) = (false, false, false, false);
+        (preset.epigraph, preset.acknowledgments, preset.about_author) = (false, false, false);
         match crate::export::model::Source::from_project(&state.core, jw::time::now()) {
             Ok(source) => self.open_preview_for(ExportRequest { source: Arc::new(source), scope: crate::export::model::Scope::Chapters(vec![item]), preset }),
             Err(error) => self.status = error.to_string(),

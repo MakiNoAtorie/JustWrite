@@ -7,7 +7,7 @@ use crate::{
     core::{
         comments::{Comment, CommentSet, Status},
         notes::{BLOCK_CLOSE, BLOCK_OPEN, CLOSE, LINE, OPEN, word_count},
-        prose::{Emphasis, char_emphasis, is_scene_break},
+        prose::{Emphasis, QuoteLine, char_emphasis, is_scene_break, quote_lines},
         typography::Language,
     },
     history::State,
@@ -36,12 +36,14 @@ pub enum Inline {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
     Paragraph(Vec<Inline>),
+    /// One line of a set-off block: an epigraph or an extract.
+    Quote(Vec<Inline>, QuoteLine),
     SceneBreak,
 }
 impl Block {
     pub fn text(&self) -> String {
         match self {
-            Block::Paragraph(inlines) => inlines
+            Block::Paragraph(inlines) | Block::Quote(inlines, _) => inlines
                 .iter()
                 .filter_map(|i| match i {
                     Inline::Run(r) => Some(r.text.as_str()),
@@ -189,6 +191,24 @@ struct Ch {
     note: bool,
 }
 
+/// The characters of a line with their note status. `in_block` carries a block note over lines.
+fn read_line(body: &str, offset: usize, in_block: &mut bool) -> Vec<Ch> {
+    let mut chars: Vec<Ch> = Vec::new();
+    let mut inline = false;
+    let mut line_note = false;
+    for (i, c) in body.chars().enumerate() {
+        match c {
+            BLOCK_OPEN => *in_block = true,
+            BLOCK_CLOSE => *in_block = false,
+            LINE => line_note = true,
+            OPEN => inline = true,
+            CLOSE => inline = false,
+            c => chars.push(Ch { c, offset: offset + i, note: *in_block || line_note || inline }),
+        }
+    }
+    chars
+}
+
 /// Splits neutral text into blocks. `marks` are comment ranges in chars of `text`.
 pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)]) -> Vec<Block> {
     #[derive(Clone, Copy, PartialEq)]
@@ -201,24 +221,19 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
     let mut blocks = Vec::new();
     let mut offset = 0usize;
     let mut in_block = false;
-    for line in text.split_inclusive('\n') {
+    // What each line is in a set-off block, from its prose alone.
+    let quotes = {
+        let mut in_block = false;
+        let prose: Vec<String> = text
+            .split_inclusive('\n')
+            .map(|line| read_line(line.trim_end_matches(['\r', '\n']), 0, &mut in_block).iter().filter(|c| !c.note).map(|c| c.c).collect::<String>().trim().to_owned())
+            .collect();
+        quote_lines(&prose)
+    };
+    for (n, line) in text.split_inclusive('\n').enumerate() {
         let body = line.trim_end_matches(['\r', '\n']);
         let line_end = offset + body.chars().count();
-        // Read the line into characters with their note status.
-        let mut chars: Vec<Ch> = Vec::new();
-        let mut inline = false;
-        let mut line_note = false;
-        for (i, c) in body.chars().enumerate() {
-            let at = offset + i;
-            match c {
-                BLOCK_OPEN => in_block = true,
-                BLOCK_CLOSE => in_block = false,
-                LINE => line_note = true,
-                OPEN => inline = true,
-                CLOSE => inline = false,
-                c => chars.push(Ch { c, offset: at, note: in_block || line_note || inline }),
-            }
-        }
+        let chars = read_line(body, offset, &mut in_block);
         // Block notes continue over following lines; a line inside one has no prose.
         let line_start = offset;
         offset += line.chars().count();
@@ -284,6 +299,24 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
             blocks.push(Block::Paragraph(vec![Inline::Run(run)]));
             continue;
         }
+        // A line of a set-off block loses the block's marks; a line of marks alone is dropped.
+        let quote = quotes[n];
+        if quote.is_some() {
+            if visible.first().is_some_and(|v| !v.note && v.c == '>') {
+                visible.remove(0);
+            }
+            if visible.last().is_some_and(|v| !v.note && v.c == '<') {
+                visible.pop();
+            }
+            while visible.last().is_some_and(|v| v.c.is_whitespace()) {
+                visible.pop();
+            }
+            let lead = visible.iter().take_while(|v| v.c.is_whitespace()).count();
+            visible.drain(..lead);
+            if visible.is_empty() {
+                continue;
+            }
+        }
         // Group into runs, placing comment markers.
         let mut inlines: Vec<Inline> = Vec::new();
         let mut current: Option<Run> = None;
@@ -321,12 +354,15 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
                 state[k] = State::Done;
             }
         }
-        blocks.push(Block::Paragraph(inlines));
+        blocks.push(match quote {
+            Some(quote) => Block::Quote(inlines, quote),
+            None => Block::Paragraph(inlines),
+        });
     }
     // A range that ran to the very end of the text is closed with the last paragraph.
     for (k, (id, _)) in marks.iter().enumerate() {
         if state[k] == State::Open {
-            if let Some(Block::Paragraph(inlines)) = blocks.iter_mut().rev().find(|b| matches!(b, Block::Paragraph(_))) {
+            if let Some(Block::Paragraph(inlines) | Block::Quote(inlines, _)) = blocks.iter_mut().rev().find(|b| !matches!(b, Block::SceneBreak)) {
                 inlines.push(Inline::CommentEnd(*id));
             }
         }
@@ -334,10 +370,22 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
     blocks
 }
 
+/// The runs of a set-off line as they are set: an epigraph is italic, so its emphasis is upright.
+pub fn quote_inlines(inlines: &[Inline], quote: QuoteLine) -> Vec<Inline> {
+    let slanted = quote.epigraph && !quote.attribution;
+    inlines
+        .iter()
+        .map(|i| match i {
+            Inline::Run(r) if !r.note => Inline::Run(Run { italic: r.italic != slanted, ..r.clone() }),
+            other => other.clone(),
+        })
+        .collect()
+}
+
 /// Runs of spaces and tabs inside a paragraph become one space, also across style changes.
 pub fn collapse_spaces(blocks: &mut [Block]) {
     for block in blocks {
-        let Block::Paragraph(inlines) = block else { continue };
+        let (Block::Paragraph(inlines) | Block::Quote(inlines, _)) = block else { continue };
         let mut after_space = false;
         for inline in inlines {
             let Inline::Run(run) = inline else { continue };
@@ -360,7 +408,7 @@ pub fn parse_matter(text: &str) -> Vec<Vec<Inline>> {
     parse_text(text, false, &[])
         .into_iter()
         .filter_map(|b| match b {
-            Block::Paragraph(i) => Some(i),
+            Block::Paragraph(i) | Block::Quote(i, _) => Some(i),
             Block::SceneBreak => None,
         })
         .collect()
@@ -595,6 +643,28 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn set_off_blocks_become_epigraphs_and_extracts() {
+        let text = format!("## One ##\n{LINE} a note\n> Dreams *are* made.\n— W. S. <\n\nProse.\n>\nDear Anna,\n\nYours. <\n###newscene###\n> A sign. <\n> open\nEnd.\n");
+        let blocks = parse_text(&text, false, &[]);
+        let quotes: Vec<(String, QuoteLine)> = blocks.iter().filter_map(|b| if let Block::Quote(_, q) = b { Some((b.text(), *q)) } else { None }).collect();
+        let q = |epigraph, attribution, first, last| QuoteLine { epigraph, attribution, first, last };
+        assert_eq!(
+            quotes,
+            [
+                ("Dreams are made.".to_owned(), q(true, false, true, false)),
+                ("— W. S.".to_owned(), q(true, true, false, true)),
+                ("Dear Anna,".to_owned(), q(false, false, true, false)),
+                ("Yours.".to_owned(), q(false, false, false, true)),
+                ("A sign.".to_owned(), q(false, false, true, true)),
+            ]
+        );
+        assert!(blocks.contains(&Block::Paragraph(vec![Inline::Run(Run { text: "> open".into(), italic: false, bold: false, note: false })])), "a block that is not closed is prose");
+        let Block::Quote(inlines, quote) = &blocks[0] else { panic!() };
+        let italic: Vec<bool> = quote_inlines(inlines, *quote).iter().filter_map(|i| if let Inline::Run(r) = i { Some(r.italic) } else { None }).collect();
+        assert_eq!(italic, [true, false, true]);
+    }
+
     use super::testing::source;
     use super::*;
     use crate::export::preset::builtins;

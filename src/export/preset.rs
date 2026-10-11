@@ -422,8 +422,8 @@ fn print_book() -> Preset {
         chapter_size: 20.0,
         chapter_caps: Caps::SmallCaps,
         chapter_bold: false,
-        chapter_ornament: String::new(),
-        drop_cap: 0,
+        chapter_ornament: "❦".into(),
+        drop_cap: 3,
         recto_start: true,
         ..Preset::default()
     }
@@ -444,6 +444,17 @@ fn epub() -> Preset {
         scene_break: "* * *".into(),
         justify: true,
         hyphenate: true,
+        // The page values only shape the in-app preview.
+        page_width: 5.5,
+        page_height: 8.5,
+        margin_top: 0.75,
+        margin_bottom: 0.85,
+        margin_inside: 0.7,
+        margin_outside: 0.7,
+        chapter_caps: Caps::SmallCaps,
+        chapter_bold: false,
+        chapter_ornament: "❦".into(),
+        drop_cap: 3,
         epub_theme: EpubTheme::Classic,
         epub_cover: true,
         ..Preset::default()
@@ -494,6 +505,12 @@ impl Presets {
         let file: File = serde_json::from_slice(bytes).unwrap_or(File { version: 1, presets: Vec::new() });
         let mut custom = file.presets;
         for p in &mut custom {
+            // Version 1 had no ornament or dropped initial in the book presets its copies came from.
+            let book = p.format == Format::Epub || (p.format == Format::Pdf && p.justify);
+            if file.version < 2 && book && p.drop_cap == 0 && p.chapter_ornament.is_empty() {
+                p.drop_cap = 3;
+                p.chapter_ornament = "❦".into();
+            }
             p.builtin = false;
             p.sanitize();
             if p.id.is_empty() || p.id.starts_with("builtin-") {
@@ -503,7 +520,7 @@ impl Presets {
         Self { custom }
     }
     pub fn to_json(&self) -> String {
-        let file = File { version: 1, presets: self.custom.clone() };
+        let file = File { version: 2, presets: self.custom.clone() };
         serde_json::to_string_pretty(&file).expect("serialize presets")
     }
     pub fn all(&self) -> Vec<Preset> {
@@ -675,6 +692,18 @@ mod tests {
         assert_eq!(parsed.get(EPUB).unwrap().format, Format::Epub);
         assert!(!parsed.custom[0].id.starts_with("builtin-"));
         assert!(Presets::parse(b"nonsense").custom.is_empty());
+    }
+
+    #[test]
+    fn book_presets_saved_before_version_2_gain_the_initial_once() {
+        let mut presets = Presets::default();
+        let plain = |id: &str| Preset { drop_cap: 0, chapter_ornament: String::new(), name: id.into(), ..builtins().into_iter().find(|p| p.id == id).unwrap() };
+        let (book, manuscript) = (presets.save(plain(PRINT_BOOK)), presets.save(plain(MANUSCRIPT_PDF)));
+        let old = presets.to_json().replace("\"version\": 2", "\"version\": 1");
+        let loaded = Presets::parse(old.as_bytes());
+        assert_eq!((loaded.get(&book).unwrap().drop_cap, loaded.get(&manuscript).unwrap().drop_cap), (3, 0));
+        // Saved again, a choice of no initial stays.
+        assert_eq!(Presets::parse(presets.to_json().as_bytes()).get(&book).unwrap().drop_cap, 0);
     }
 
     #[test]

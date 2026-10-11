@@ -36,6 +36,10 @@ pub struct Tile {
     size: f32,
     indent: u8,
     justify: bool,
+    /// How the chunk's line is set off, and whether the chunk holds the block's `>` and its `<`.
+    quote: Option<(prose::QuoteLine, bool, bool)>,
+    /// Distance from the left edge of the text to this tile's own left edge.
+    inset: f32,
     line_bytes: Vec<usize>,
     /// Distance from `y` to the row the next tile starts on.
     tail: f32,
@@ -66,7 +70,7 @@ impl Tile {
     pub fn caret(&self, source: usize) -> Option<(f32, f32)> {
         self.buffer
             .cursor_position(&self.display_cursor(source))
-            .map(|(x, y)| (x, self.y + y))
+            .map(|(x, y)| (x + self.inset, self.y + y))
     }
     /// After a closing newline the caret sits on the next row. Another tile owns that row, except
     /// at the end of the text, where this is the only place to find it.
@@ -147,24 +151,24 @@ fn attrs<'a>(style: Style, size: f32, settings: &'a Settings) -> Attrs<'a> {
         .metadata(usize::from(style.misspelled))
         .metrics(Metrics::new(size, size * settings.line_height))
 }
-fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
-    let mut buffer = Buffer::new_empty(Metrics::new(settings.font_size, settings.font_size * settings.line_height));
+fn shape(preview: &Presentation, wrap: Wrap, width: f32, justify: bool, size: f32, settings: &Settings, fonts: &mut FontSystem) -> Buffer {
+    let mut buffer = Buffer::new_empty(Metrics::new(size, size * settings.line_height));
     buffer.set_size(Some(width), None);
     buffer.set_wrap(wrap);
     buffer.set_rich_text(
         preview.spans.iter().map(|span| {
             (
                 &preview.text[span.bytes.clone()],
-                attrs(span.style, settings.font_size, settings),
+                attrs(span.style, size, settings),
             )
         }),
-        &attrs(Style::default(), settings.font_size, settings),
+        &attrs(Style::default(), size, settings),
         Shaping::Advanced,
         None,
     );
-    if preview.center || justify {
+    if preview.center || preview.right || justify {
         for line in &mut buffer.lines {
-            line.set_align(Some(if preview.center { Align::Center } else { Align::Justified }));
+            line.set_align(Some(if preview.center { Align::Center } else if preview.right { Align::Right } else { Align::Justified }));
         }
     }
     buffer.shape_until_scroll(fonts, false);
@@ -350,6 +354,18 @@ impl EditorView {
             in_block: blocks.in_block(line),
             in_line_note: start > line_start && self.line_note_before(doc, line_start, start),
         };
+        let quote = if initial.in_block { None } else { self.quote_for(doc, blocks, line) }.map(|(q, open, close)| (q, open && start == line_start, close && !inside));
+        let indent = if quote.is_some() { 0 } else { indent };
+        // A set-off block is set in from both sides. An epigraph is set like the text, further
+        // in and a little smaller.
+        let epigraph = quote.is_some_and(|(q, ..)| q.epigraph);
+        let side = match quote {
+            Some(_) if epigraph => (width * prose::EPIGRAPH_INSET).floor(),
+            Some(_) => (settings.font_size * 2.).min(width * 0.1).floor(),
+            None => 0.,
+        };
+        let (inset, measure) = (side, width - side * 2.);
+        let size = settings.font_size * if epigraph { prose::EPIGRAPH_SCALE } else { 1. };
         // The preview shows the text as exported, which has no notes, unless the setting keeps them.
         let hide = settings.hide_notes || (settings.preview && !settings.preview_notes);
         let cached = self.cache.iter().position(|tile| {
@@ -363,6 +379,7 @@ impl EditorView {
                 && tile.size == settings.font_size
                 && tile.indent == indent
                 && tile.justify == justify
+                && tile.quote == quote
         });
         let mut tile = if let Some(index) = cached {
             self.cache.remove(index).unwrap()
@@ -375,10 +392,13 @@ impl EditorView {
                 indent,
                 caret,
                 lock_scenes: self.lock_scenes,
+                quote: quote.map(|(q, ..)| q),
+                quote_open: quote.is_some_and(|(_, open, _)| open),
+                quote_close: quote.is_some_and(|(.., close)| close),
             };
             let build = |source: String, cut: bool, fonts: &mut FontSystem| {
                 let preview = prose::present(&source, 0, if raw { Some(0) } else { None }, initial, options);
-                let buffer = shape(&preview, Wrap::WordOrGlyph, width, justify, settings, fonts);
+                let buffer = shape(&preview, Wrap::WordOrGlyph, measure, justify, size, settings, fonts);
                 let height = buffer
                     .layout_runs()
                     .map(|run| run.line_top + run.line_height)
@@ -392,7 +412,7 @@ impl EditorView {
                 }
                 // A hidden note takes no room.
                 let height = if preview.hidden { 0. } else { height };
-                Tile { start, y: 0., height, end: preview.end, preview, buffer, source, raw, caret, initial, hide, width, size: settings.font_size, indent, justify, line_bytes, tail: 0., chunk: String::new(), inside, cut }
+                Tile { start, y: 0., height, end: preview.end, preview, buffer, source, raw, caret, initial, hide, width, size: settings.font_size, indent, justify, quote, inset, line_bytes, tail: 0., chunk: String::new(), inside, cut }
             };
             let mut tile = build(chunk.clone(), false, fonts);
             // Inside a paragraph the last row is only partly filled: shape the chunk again without
@@ -446,6 +466,45 @@ impl EditorView {
         };
         let flush = settings.preview_flush && (line == 0 || after_break() || (line == 1 && prose::scene_name(&doc.text.line(0).to_string()).is_some()));
         if flush { 0 } else { settings.preview_indent }
+    }
+    /// How `line` is set if it is in a closed set-off block (`> … <`), and whether it holds the
+    /// block's `>` and its `<`.
+    fn quote_for(&self, doc: &Document, blocks: &BlockIndex, line: usize) -> Option<(prose::QuoteLine, bool, bool)> {
+        let (open, close) = blocks.quote_span(line)?;
+        // A line that is only a note is passed over, as the export does.
+        let text = |l: usize| {
+            let text: String = doc.text.line(l).chars().take(200).collect();
+            let note = blocks.in_block(l) || {
+                let scan = notes::scan_line(&text, &self.marker, false);
+                scan.has_notes() && !scan.segs.iter().any(|s| s.kind == NoteKind::Prose && !text[s.range.clone()].trim().is_empty())
+            };
+            if note { String::new() } else { text }
+        };
+        let has_text = |l: &usize| !prose::quote_text(&text(*l), *l == open, *l == close).is_empty();
+        let (first, last) = ((open..=close).find(has_text), (open..=close).rev().find(has_text));
+        // Only set-off blocks and blank lines lie between an epigraph and the start of its chapter or scene.
+        let (mut above, mut steps) = (open, 0);
+        let epigraph = loop {
+            if above == 0 {
+                break true;
+            }
+            // ponytail: looks 64 steps up; a head with more before it is an extract in the editor.
+            steps += 1;
+            if steps > 64 {
+                break false;
+            }
+            above -= 1;
+            if let Some((start, _)) = blocks.quote_span(above) {
+                above = start;
+                continue;
+            }
+            let t = text(above);
+            if !t.trim().is_empty() {
+                break prose::scene_name(&t).is_some();
+            }
+        };
+        let attribution = Some(line) == last && first != last && prose::is_attribution(prose::quote_text(&text(line), line == open, line == close));
+        Some((prose::QuoteLine { epigraph, attribution, first: Some(line) == first, last: Some(line) == last }, line == open, line == close))
     }
     /// Whether the line starting at `line_start` has already opened a note that runs to its end
     /// by `at`; only the first 512 characters of the line are inspected.
@@ -508,7 +567,7 @@ impl EditorView {
                     if let Some(color) = color {
                         renderer.fill(
                             Rect {
-                                x: rect.x + glyph.x as i32,
+                                x: rect.x + (tile.inset + glyph.x) as i32,
                                 y,
                                 width: glyph.w.ceil() as u32 + 1,
                                 height: run.line_height.ceil() as u32,
@@ -527,7 +586,7 @@ impl EditorView {
                         let mut dx = 0;
                         while (dx as f32) < glyph.w {
                             renderer.fill(
-                                Rect { x: rect.x + glyph.x as i32 + dx, y: base + (dx / 2 % 2), width: 1, height: 1 }.intersect(rect),
+                                Rect { x: rect.x + (tile.inset + glyph.x) as i32 + dx, y: base + (dx / 2 % 2), width: 1, height: 1 }.intersect(rect),
                                 0xd0605e,
                             );
                             dx += 2;
@@ -536,7 +595,7 @@ impl EditorView {
                 }
             }
             let _ = orphan_tint;
-            renderer.text(fonts, &mut tile.buffer, rect.x, rect.y + tile.y as i32, rect);
+            renderer.text(fonts, &mut tile.buffer, rect.x + tile.inset as i32, rect.y + tile.y as i32, rect);
         }
         if let Some((x, y)) = self.caret_at(doc.cursor) {
             let y = rect.y + y as i32;
@@ -555,7 +614,7 @@ impl EditorView {
             .find(|tile| local_y < tile.y + tile.height)
             .or_else(|| self.tiles.last())?;
         tile.buffer
-            .hit(x - rect.x as f32, local_y - tile.y)
+            .hit(x - rect.x as f32 - tile.inset, local_y - tile.y)
             .map(|cursor| tile.source_cursor(cursor))
     }
     pub fn motion(
@@ -648,6 +707,39 @@ impl EditorView {
             left -= take;
         }
     }
+    /// Shows `position` a quarter of the way down the view, so the text above it stays in sight.
+    /// With `glide`, the view starts a few rows short of that place; the returned tops, taken from
+    /// the end, bring it there.
+    pub fn show_below_top(&mut self, doc: &Document, blocks: &BlockIndex, settings: &Settings, fonts: &mut FontSystem, position: usize, glide: bool) -> Vec<usize> {
+        const STEP: usize = 3;
+        const STEPS: usize = 4;
+        let old = self.top;
+        let quarter = (self.page(settings) + 2) / 4;
+        self.history.clear();
+        self.top = position;
+        self.scroll_by(doc, blocks, settings, fonts, -quarter);
+        let target = self.top;
+        if !glide || target == old {
+            return Vec::new();
+        }
+        let mut frames = vec![target];
+        if target > old {
+            for _ in 0..STEPS {
+                self.scroll_by(doc, blocks, settings, fonts, -(STEP as i32));
+                if self.top <= old {
+                    break;
+                }
+                frames.push(self.top);
+            }
+        } else {
+            let last = doc.text.len_lines().min(doc.text.char_to_line(target) + STEP * STEPS + 1);
+            let end = if last < doc.text.len_lines() { doc.text.line_to_char(last) } else { doc.text.len_chars() };
+            let below = self.rows_between(doc, blocks, settings, fonts, target, end);
+            frames.extend(below.into_iter().filter(|row| *row > target && *row < old).step_by(STEP).skip(1).take(STEPS));
+        }
+        self.top = frames.pop().unwrap_or(target);
+        frames
+    }
     /// The text of every tile on screen with where it starts and whether it opens inside a block
     /// note: what the spell checker needs.
     pub fn spell_chunks(&self) -> Vec<(usize, String, bool)> {
@@ -721,6 +813,47 @@ mod tests {
     }
 
     #[test]
+    fn set_off_blocks_hide_their_marks_and_are_set_in() {
+        let text = "> Dreams are made.\n— W. S. <\n\nProse here.\n> A letter. <\nMore.\n";
+        let (v, _) = view(text, 30, 800, |_| {});
+        assert!(shown(&v).starts_with("Dreams are made.\n— W. S.\n") && shown(&v).contains("\nA letter.\n"), "{}", shown(&v));
+        let x = |at: usize| v.caret_at(at).unwrap().0;
+        assert!(x(2) == 96. && x(2) > x(44) && x(44) > x(30) && x(30) == 0., "epigraph {}, extract {}, prose {}", x(2), x(44), x(30));
+        assert!(x(19) > 600. && x(19) < 704., "the attribution is set to the right of the block: {}", x(19));
+        let rows = |v: &EditorView, n: usize| v.tiles[n].buffer.layout_runs().next().unwrap().line_height;
+        assert!(rows(&v, 0) < rows(&v, 3), "an epigraph is in smaller type");
+        // A click lands on the character under it, and the line being edited shows its mark.
+        let (ex, ey) = v.caret_at(4).unwrap();
+        assert_eq!(v.hit(ex + 1., ey + 2.), Some(4));
+        assert!(shown(&view(text, 3, 800, |_| {}).0).starts_with("> Dreams are made.\n— W. S.\n"));
+        assert!(shown(&view(text, 22, 800, |_| {}).0).starts_with("Dreams are made.\n— W. S. <\n"));
+        // A block that is not closed is plain text.
+        let (open, _) = view("> Not closed.\nMore.\n", 16, 800, |_| {});
+        assert!(shown(&open).starts_with("> Not closed.") && open.caret_at(0).unwrap().0 == 0.);
+    }
+
+    #[test]
+    fn the_editor_and_the_export_set_the_same_lines_off_the_same_way() {
+        let pieces = ["> a", "b", "c <", "> d <", "", "###newscene###", "## n ##", ">", "<", "— e", "— f <"];
+        let mut seed = 0xd1b54a32d192ed03u64;
+        let mut pick = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        let view = EditorView::default();
+        for round in 0..400 {
+            let lines: Vec<&str> = (0..10).map(|_| pieces[pick(pieces.len())]).collect();
+            let doc = Document::new(Rope::from_str(&(lines.join("\n") + "\n")));
+            let mut blocks = BlockIndex::default();
+            blocks.update(&doc.text, 0, &view.marker);
+            let export = prose::quote_lines(&lines);
+            for (l, line) in lines.iter().enumerate().filter(|(_, line)| !line.is_empty()) {
+                assert_eq!(view.quote_for(&doc, &blocks, l).map(|(quote, ..)| quote), export[l], "round {round}, line {l} {line:?} of {lines:?}");
+            }
+        }
+    }
+
+    #[test]
     fn preview_shows_the_finished_text_and_indents_like_the_export() {
         let text = "First *one*\nSecond\n***\nAfter break\nThird\n";
         let preview = |s: &mut Settings| {
@@ -791,10 +924,10 @@ mod tests {
         assert!(v.tiles.len() > 3, "the paragraph spans several chunks");
         let settings = Settings::default();
         let marker = Marker::default();
-        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false };
+        let options = prose::Options { marker: &marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false, quote: None, quote_open: false, quote_close: false };
         let whole = prose::present(&text, 0, Some(0), Initial { in_block: false, in_line_note: false }, options);
         let expected: Vec<usize> = FONTS.with(|fonts| {
-            shape(&whole, Wrap::WordOrGlyph, 600., false, &settings, &mut fonts.borrow_mut())
+            shape(&whole, Wrap::WordOrGlyph, 600., false, settings.font_size, &settings, &mut fonts.borrow_mut())
                 .layout_runs()
                 .map(|run| whole.source_at(run.glyphs.iter().map(|g| g.start).min().unwrap_or(0)))
                 .collect()

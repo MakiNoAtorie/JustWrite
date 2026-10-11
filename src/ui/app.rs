@@ -194,6 +194,7 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
+const GLIDE_FRAME: Duration = Duration::from_millis(16);
     renderer: CpuRenderer,
     fonts: FontSystem,
     labels: HashMap<String, Buffer>,
@@ -268,6 +269,8 @@ pub struct App {
     file_type_registered: bool,
     spell: spelling::SpellState,
     pending_session: Option<SessionSplit>,
+    /// A jump still on its way: the tab, the tops left to show (taken from the end) and when the next is due.
+    glide: Option<(u64, Vec<usize>, Instant)>,
     /// Dialogs with several fields, and the large screens (history, compare, preview).
     form: Option<Form>,
     /// The export dialog, kept while its preview is on screen.
@@ -439,6 +442,7 @@ impl App {
             pending_import: None,
             pending_jump: None,
         }
+            glide: None,
     }
     /// Reports a failure that must not be missed: unlike other messages it does not fade and
     /// typing does not clear it.
@@ -992,6 +996,7 @@ impl App {
                                 Some(part) => format!("{} · {}", part.title(), node.title()),
                                 None => node.title().to_owned(),
                             };
+                                .filter(|l| tab.blocks.quote_span(*l).is_none())
                             if let Some(score) = workspace::fuzzy(&query, &name) {
                                 rows.push((score, Row {
                                     label: node.title().to_owned(),
@@ -1139,7 +1144,10 @@ impl App {
                             .text
                             .line_to_char(line.min(tab.document.text.len_lines() - 1));
                         tab.document.select(position, false);
-                        tab.view.top = position;
+                        let mut settings = self.settings.clone();
+                        settings.font_size *= self.scale;
+                        let frames = tab.view.show_below_top(&tab.document, &tab.blocks, &settings, &mut self.fonts, position, self.settings.animations);
+                        self.glide = (!frames.is_empty()).then(|| (id, frames, Instant::now() + GLIDE_FRAME));
                     }
                 }
                 self.overlay = None;
@@ -1917,6 +1925,16 @@ impl App {
                 let mut leaves = Vec::new();
                 self.split.leaves(Rect { x: 0, y: 0, width: 1, height: 1 }, &mut leaves);
                 let from = self.active_pane;
+            Command::Epigraph => {
+                if let Some(id) = editable {
+                    let tab = self.tabs.get_mut(&id).unwrap();
+                    let added = tab.document.insert_epigraph();
+                    tab.view.ensure_cursor(&tab.document);
+                    if added {
+                        self.edited(id);
+                    }
+                }
+            }
                 if let Some(target) = leaves.iter().map(|(id, _)| *id).find(|id| *id != from) {
                     let moved = self.split.pane(from).map(|p| p.tabs.clone()).unwrap_or_default();
                     if let Some(pane) = self.split.pane_mut(from) {
@@ -1939,7 +1957,7 @@ impl App {
             }
             Command::ShowHistory => self.open_history(),
             Command::Snapshot => self.snapshot_form(),
-            Command::Export => self.export_form(),
+            Command::Export => self.export_form(""),
             Command::Preview => self.open_preview(),
             Command::PreviewChapter => self.preview_chapter(),
             Command::BookDetails => self.book_form(),
@@ -2476,6 +2494,19 @@ impl App {
         self.pane_rects.clear();
         let palette = Palette::new(self.settings.light(), self.settings.accent_color());
         let full = Rect {
+        if let Some((id, mut frames, mut due)) = self.glide.take() {
+            if due <= now {
+                if let (Some(top), Some(tab)) = (frames.pop(), self.tabs.get_mut(&id)) {
+                    tab.view.top = top.min(tab.document.text.len_chars());
+                    self.redraw();
+                }
+                due = now + GLIDE_FRAME;
+            }
+            if !frames.is_empty() && self.tabs.contains_key(&id) {
+                next = Some(next.map_or(due, |other: Instant| other.min(due)));
+                self.glide = Some((id, frames, due));
+            }
+        }
             x: 0,
             y: 0,
             width: size.width,

@@ -68,6 +68,84 @@ pub fn scene_name(line: &str) -> Option<&str> {
     scene_name_at(line).map(|r| &line[r])
 }
 
+// ---- set-off blocks -------------------------------------------------------------------------
+
+/// Whether a line opens a set-off block (an epigraph, a letter, a sign): it starts with `>`.
+pub fn opens_quote(line: &str) -> bool {
+    line.starts_with('>')
+}
+/// Whether a line closes a set-off block: it ends with `<`.
+pub fn closes_quote(line: &str) -> bool {
+    line.trim_end().ends_with('<')
+}
+/// The text of a line of a set-off block. `first` and `last` say which marks the line holds.
+pub fn quote_text(line: &str, first: bool, last: bool) -> &str {
+    let mut text = line.trim();
+    if first {
+        text = text.strip_prefix('>').unwrap_or(text);
+    }
+    if last {
+        text = text.strip_suffix('<').unwrap_or(text);
+    }
+    text.trim()
+}
+/// Whether the text of a set-off line names the source: `— Author, *Work*`.
+pub fn is_attribution(text: &str) -> bool {
+    let t = text.trim_start();
+    t.starts_with(['—', '–']) || t.starts_with("--")
+}
+/// An epigraph is set in by this part of the text's width on each side, in type this much
+/// smaller, in the editor and in every export.
+pub const EPIGRAPH_INSET: f32 = 0.12;
+pub const EPIGRAPH_SCALE: f32 = 0.9;
+/// How a line of a set-off block is set.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QuoteLine {
+    /// At the head of a chapter or of a named scene. Elsewhere the block is an extract.
+    pub epigraph: bool,
+    /// The last line of its block, and it starts with a dash: set to the right.
+    pub attribution: bool,
+    /// The first and the last line of the block that have text.
+    pub first: bool,
+    pub last: bool,
+}
+/// What each line of a chapter is in a set-off block: `>` opens one and `<` closes it. A block
+/// that is not closed before the next `>` or scene break is plain text. `lines` are trimmed and
+/// have no notes; a line that held only a note is empty.
+pub fn quote_lines<S: AsRef<str>>(lines: &[S]) -> Vec<Option<QuoteLine>> {
+    let mut out = vec![None; lines.len()];
+    let mut open: Option<usize> = None;
+    // Only set-off blocks and blank lines since the start of the chapter or a scene's name.
+    let (mut head, mut open_head) = (true, false);
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.as_ref();
+        if scene_name(t).is_some() || is_scene_break(t) {
+            (open, head) = (None, scene_name(t).is_some());
+            continue;
+        }
+        if opens_quote(t) {
+            // An earlier block that was never closed is prose.
+            head &= open.is_none();
+            (open, open_head) = (Some(i), head);
+        }
+        let Some(start) = open.filter(|_| closes_quote(t)) else {
+            head &= open.is_some() || t.is_empty();
+            continue;
+        };
+        open = None;
+        let text = |l: usize| quote_text(lines[l].as_ref(), l == start, l == i);
+        let with_text: Vec<usize> = (start..=i).filter(|l| !text(*l).is_empty()).collect();
+        for l in [start, i] {
+            out[l] = Some(QuoteLine { epigraph: open_head, ..Default::default() });
+        }
+        for (k, &l) in with_text.iter().enumerate() {
+            let last = k + 1 == with_text.len();
+            out[l] = Some(QuoteLine { epigraph: open_head, attribution: last && k > 0 && is_attribution(text(l)), first: k == 0, last });
+        }
+    }
+    out
+}
+
 // ---- emphasis -------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -278,6 +356,8 @@ pub struct Presentation {
     pub source: Vec<(usize, usize)>,
     /// The chunk is a scene break shown as a symbol: centre it.
     pub center: bool,
+    /// The chunk is the attribution of a set-off block: set it to the right.
+    pub right: bool,
     /// Every character of the chunk is a hidden note: it takes no room.
     pub hidden: bool,
     pub start: usize,
@@ -310,6 +390,11 @@ pub struct Options<'a> {
     pub caret: Option<usize>,
     /// Hash separators and scene names always show as shown, even on the caret's line.
     pub lock_scenes: bool,
+    /// The chunk is part of a line of a set-off block.
+    pub quote: Option<QuoteLine>,
+    /// The chunk starts with the block's `>` mark, or ends with its `<` mark.
+    pub quote_open: bool,
+    pub quote_close: bool,
 }
 
 /// State a chunk starts in, carried over from the lines and chunks before it.
@@ -467,6 +552,16 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
             }
         }
         let mut prose_index = 0usize; // byte index into `prose`
+        // The marks of a set-off block, with the space that parts each from the text.
+        let body = &line[..body_end];
+        let open_mark = if options.quote.is_some() && options.quote_open && opens_quote(body) { 1 + usize::from(body[1..].starts_with(' ')) } else { 0 };
+        let close_mark = if options.quote.is_some() && options.quote_close && closes_quote(body) {
+            let end = body.trim_end().len();
+            (end - 1 - usize::from(end - 1 > open_mark && body[..end - 1].ends_with(' ')))..end
+        } else {
+            0..0
+        };
+        let slanted = options.quote.is_some_and(|q| q.epigraph && !q.attribution);
         let hide_notes_here = options.hide_notes && !raw;
         let mut collapsing = false;
         for (byte, character) in line.char_indices() {
@@ -476,10 +571,15 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
                 Class::Prose => {
                     let e = emphasis[prose_index];
                     style.bold = e.bold;
-                    style.italic = e.italic;
+                    // An epigraph is italic, so emphasis in it is upright.
+                    style.italic = e.italic != slanted;
                     if conceal[prose_index] {
                         visible = reveal[prose_index];
                         style.dim = true;
+                    }
+                    if byte < open_mark || close_mark.contains(&byte) {
+                        visible = raw;
+                        style = Style { dim: true, ..Default::default() };
                     }
                     prose_index += character.len_utf8();
                 }
@@ -522,6 +622,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
     }
     out.hidden = hid_something && out.text.trim().is_empty();
+    out.right = options.quote.is_some_and(|q| q.attribution);
     // A scene's name stays centred while its `##` marks show for editing.
     if name_line && !out.hidden {
         out.center = true;
@@ -535,7 +636,7 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
         }
         out.center = note && !prose;
     }
-    if options.indent > 0 && !out.hidden && !out.center && !out.text.trim().is_empty() {
+    if options.indent > 0 && options.quote.is_none() && !out.hidden && !out.center && !out.text.trim().is_empty() {
         // The indent has no source entry: the caret at the start of the line sits after it, and a
         // click inside it lands on the first character.
         let prefix = "\u{2002}".repeat(options.indent as usize);
@@ -562,6 +663,11 @@ pub struct BlockLine {
     pub after: bool,
     /// Begins a line note that continues past the first 512 characters.
     pub scene: bool,
+    /// Opens, closes a set-off block (`>` first, `<` last).
+    pub open: bool,
+    pub close: bool,
+    /// A scene's name: like a break, it ends a set-off block that is still open.
+    pub name: bool,
     hash: u64,
 }
 /// Per-line state for the whole document: which lines sit inside block notes and where the scene
@@ -571,6 +677,10 @@ pub struct BlockLine {
 pub struct BlockIndex {
     pub lines: im::Vector<BlockLine>,
     pub scenes: im::OrdSet<usize>,
+    /// The lines that start with `>` and the lines that end with `<`.
+    openers: im::OrdSet<usize>,
+    closers: im::OrdSet<usize>,
+    names: im::OrdSet<usize>,
 }
 fn fnv(text: &str) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
@@ -591,19 +701,20 @@ impl BlockIndex {
         let structural = count != self.lines.len();
         if structural && !initial {
             let delta = count as isize - self.lines.len() as isize;
-            self.scenes = self
-                .scenes
-                .iter()
-                .filter_map(|&line| {
-                    if line < from {
-                        Some(line)
-                    } else if delta < 0 && line < from + (-delta as usize) + 1 {
-                        None
-                    } else {
-                        Some((line as isize + delta).max(0) as usize)
-                    }
-                })
-                .collect();
+            for set in [&mut self.scenes, &mut self.openers, &mut self.closers, &mut self.names] {
+                *set = set
+                    .iter()
+                    .filter_map(|&line| {
+                        if line < from {
+                            Some(line)
+                        } else if delta < 0 && line < from + (-delta as usize) + 1 {
+                            None
+                        } else {
+                            Some((line as isize + delta).max(0) as usize)
+                        }
+                    })
+                    .collect();
+            }
         }
         if self.lines.is_empty() {
             self.lines = std::iter::repeat_n(BlockLine::default(), count).collect();
@@ -627,20 +738,37 @@ impl BlockIndex {
                 state = !state;
             }
             let scene = !before && is_scene_break(&prefix);
-            let entry = BlockLine { before, after: state, scene, hash: fnv(&prefix) };
+            let open = !before && opens_quote(&prefix);
+            let close = !before && {
+                let whole = rope.line(line);
+                let tail: String = whole.slice(whole.len_chars().saturating_sub(8)..).chars().collect();
+                closes_quote(&tail)
+            };
+            let name = !before && scene_name(&prefix).is_some();
+            let entry = BlockLine { before, after: state, scene, open, close, name, hash: fnv(&prefix) };
             if !initial && line >= dirty.end && self.lines.get(line) == Some(&entry) {
                 break;
             }
-            if scene {
-                self.scenes.insert(line);
-            } else {
-                self.scenes.remove(&line);
+            for (set, on) in [(&mut self.scenes, scene), (&mut self.openers, open), (&mut self.closers, close), (&mut self.names, name)] {
+                if on {
+                    set.insert(line);
+                } else {
+                    set.remove(&line);
+                }
             }
             self.lines.set(line, entry);
         }
     }
     pub fn in_block(&self, line: usize) -> bool {
         self.lines.get(line).is_some_and(|l| l.before)
+    }
+    /// The closed set-off block that holds `line`: the lines of its `>` and of its `<`. The
+    /// nearest `>` above must reach a `<` with no other `>`, scene break or scene name on the way.
+    pub fn quote_span(&self, line: usize) -> Option<(usize, usize)> {
+        let open = *self.openers.range(..=line).next_back()?;
+        let close = *self.closers.range(open..).next()?;
+        let whole = close >= line && self.openers.range(open + 1..=close).next().is_none() && self.scenes.range(open..close).next().is_none() && self.names.range(open..close).next().is_none();
+        whole.then_some((open, close))
     }
 }
 
@@ -688,7 +816,43 @@ pub fn format_at(line: &str, col: usize, marker: &Marker) -> Format {
 mod tests {
     use super::*;
     fn options(marker: &Marker) -> Options<'_> {
-        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false }
+        Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None, lock_scenes: false, quote: None, quote_open: false, quote_close: false }
+    }
+
+    #[test]
+    fn set_off_blocks_are_epigraphs_at_a_head_and_extracts_elsewhere() {
+        let text = "## One ##\n\n> Dreams.\n— W. S., *The Tempest* <\n\nProse.\n>\nDear Anna,\n— not a signature, more text follows\n\nYours. <\n###newscene###\n> A sign. <\n> never closed\n###newscene###\nlate <\n> — Hola <\n";
+        let lines: Vec<&str> = text.lines().collect();
+        let at = quote_lines(&lines);
+        let q = |epigraph, attribution, first, last| Some(QuoteLine { epigraph, attribution, first, last });
+        assert_eq!(at[2..6], [q(true, false, true, false), q(true, true, false, true), None, None]);
+        // A mark alone on its line belongs to the block but has no text; a blank line inside is nothing.
+        assert_eq!(at[6..11], [q(false, false, false, false), q(false, false, true, false), q(false, false, false, false), None, q(false, false, false, true)]);
+        // Under a break with no name the block is an extract. A block not closed before a break is prose.
+        assert_eq!(at[12..17], [q(false, false, true, true), None, None, None, q(false, false, true, true)]);
+        assert_eq!(quote_lines(&["> a", "> b <", "c"]), [None, q(false, false, true, true), None], "the block that closes is the nearest one");
+        assert_eq!((quote_text("> a <", true, true), quote_text("> a <", false, true), quote_text("<", false, true)), ("a", "> a", ""));
+
+        let marker = Marker::default();
+        let quote = Some(QuoteLine { epigraph: true, ..Default::default() });
+        let shown = present("> Dreams *are* made <\n", 0, None, Initial::default(), Options { quote, quote_open: true, quote_close: true, ..options(&marker) });
+        assert_eq!(shown.text, "Dreams are made\n");
+        assert_eq!(shown.source_at(0), 2, "the caret skips the hidden mark");
+        let italic: Vec<bool> = shown.spans.iter().filter(|s| !shown.text[s.bytes.clone()].trim().is_empty()).map(|s| s.style.italic).collect();
+        assert_eq!(italic, [true, false, true], "an epigraph is italic and its emphasis upright");
+        let middle = present("> not marks <\n", 0, None, Initial::default(), Options { quote, ..options(&marker) });
+        assert_eq!(middle.text, "> not marks <\n", "only the block's own marks are hidden");
+        let edited = present("> Dreams <\n", 0, Some(0), Initial::default(), Options { quote, quote_open: true, quote_close: true, ..options(&marker) });
+        assert_eq!(edited.text, "> Dreams <\n", "the marks show on the line being edited");
+        let by = present("— W. S. <\n", 0, None, Initial::default(), Options { quote: Some(QuoteLine { epigraph: true, attribution: true, ..Default::default() }), quote_close: true, ..options(&marker) });
+        assert!(by.right && by.text == "— W. S.\n" && by.spans.iter().all(|s| !s.style.italic));
+
+        let mut index = BlockIndex::default();
+        let rope = Rope::from_str(text);
+        index.update(&rope, 0, &marker);
+        let spans: Vec<Option<(usize, usize)>> = (0..lines.len()).map(|l| index.quote_span(l)).collect();
+        assert_eq!(spans[2..6], [Some((2, 3)), Some((2, 3)), None, None]);
+        assert_eq!(spans[6..17], [Some((6, 10)), Some((6, 10)), Some((6, 10)), Some((6, 10)), Some((6, 10)), None, Some((12, 12)), None, None, None, Some((16, 16))]);
     }
 
     #[test]
@@ -698,7 +862,7 @@ mod tests {
         assert_eq!(scene_name("#"), None);
         assert_eq!(scene_name("## ##"), None);
         assert_eq!(scene_name("Chapter ## 3 ##"), None);
-        let p = present("## The storm ##\n", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None, lock_scenes: false });
+        let p = present("## The storm ##\n", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None, lock_scenes: false, quote: None, quote_open: false, quote_close: false });
         assert_eq!(p.text, "The storm\n");
         assert!(p.center && p.spans[0].style.bold);
     }
@@ -865,6 +1029,40 @@ mod tests {
         let long = Rope::from_str(&"x".repeat(1024 * 1024));
         index.update(&long, 0, &marker);
         assert_eq!(index.lines.len(), 1);
+    }
+
+    #[test]
+    fn set_off_blocks_in_the_index_match_the_export_through_random_edits() {
+        let marker = Marker::default();
+        let pieces = ["> a", "b", "c <", "> d <", "", "###newscene###", "## n ##", ">", "<", "$$ note"];
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut pick = |n: usize| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        for round in 0..200 {
+            let mut rope = Rope::from_str(&(0..12).map(|_| format!("{}\n", pieces[pick(pieces.len())])).collect::<String>());
+            let mut index = BlockIndex::default();
+            index.update(&rope, 0, &marker);
+            for edit in 0..6 {
+                let line = pick(rope.len_lines());
+                let (start, end) = (rope.line_to_char(line), rope.line_to_char((line + pick(3)).min(rope.len_lines())));
+                let value: String = (0..pick(3)).map(|_| format!("{}\n", pieces[pick(pieces.len())])).collect();
+                rope.remove(start..end);
+                rope.insert(start, &value);
+                index.update_range(&rope, line..rope.char_to_line(start + value.chars().count()) + 1, &marker);
+                let mut fresh = BlockIndex::default();
+                fresh.update(&rope, 0, &marker);
+                let text = rope.to_string();
+                assert_eq!((&index.lines, &index.scenes, &index.openers, &index.closers, &index.names), (&fresh.lines, &fresh.scenes, &fresh.openers, &fresh.closers, &fresh.names), "round {round}, edit {edit}: {text:?}");
+                // The editor and the export find the same blocks. A note line is nothing to the export.
+                let lines: Vec<&str> = text.lines().map(|l| if l.starts_with('$') { "" } else { l }).collect();
+                let export = quote_lines(&lines);
+                for (l, line) in lines.iter().enumerate().filter(|(_, line)| !line.is_empty()) {
+                    assert_eq!(index.quote_span(l).is_some(), export[l].is_some(), "round {round}, line {l} {line:?} of {text:?}");
+                }
+            }
+        }
     }
 
     #[test]

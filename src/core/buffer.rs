@@ -402,6 +402,45 @@ impl Document {
         }
         true
     }
+    /// Puts an empty epigraph at the head of the chapter (under the name of scene 1), as one undo
+    /// step, with its placeholder selected. Returns false, only moving the caret, when the chapter
+    /// already starts with one.
+    pub fn insert_epigraph(&mut self) -> bool {
+        self.typing = false;
+        let le = self.line_ending;
+        let lines = self.text.len_lines();
+        let text = |l: usize| self.text.line(l).to_string();
+        let line = usize::from(super::prose::scene_name(&text(0)).is_some());
+        if let Some(found) = (line..lines).find(|l| !text(*l).trim().is_empty()) {
+            let own = text(found);
+            if super::prose::opens_quote(&own) {
+                let content = super::prose::quote_text(&own, true, true);
+                let start = self.text.line_to_char(found) + own[..own.find(content).unwrap_or(0)].chars().count();
+                let end = start + content.chars().count();
+                self.select(start, false);
+                self.select(end, true);
+                return false;
+            }
+        }
+        let (quote, author) = ("Quote", "Author");
+        let body = format!("> {quote}{le}— {author} <{le}");
+        let (start, insert, lead) = if line < lines {
+            let gap = if text(line).trim().is_empty() { "" } else { le };
+            (self.text.line_to_char(line), format!("{body}{gap}"), 0)
+        } else {
+            (self.text.len_chars(), format!("{le}{body}"), le.len())
+        };
+        // A whole-line insert next to the name of scene 1 does not change the name.
+        let protect = std::mem::take(&mut self.protect_names);
+        self.replace(start..start, &insert);
+        self.protect_names = protect;
+        self.select(start + lead + 2, false);
+        self.select(start + lead + 2 + quote.len(), true);
+        if let Some(edit) = self.undo.last_mut() {
+            edit.after = (self.cursor, self.anchor);
+        }
+        true
+    }
     /// Wraps the selection in `mark` (`*` or `**`), or takes the marks off if it already has them.
     /// With nothing selected the word at the caret is used, or an empty pair is inserted.
     pub fn toggle_emphasis(&mut self, mark: &str) {
@@ -516,6 +555,27 @@ mod tests {
         for c in text.chars() {
             doc.type_text(&c.to_string(), None);
         }
+    }
+
+    #[test]
+    fn an_epigraph_goes_to_the_head_of_the_chapter_once() {
+        let mut doc = Document::new(Rope::from_str("## One ##\nProse.\n"));
+        doc.protect_names = true;
+        doc.select(12, false);
+        assert!(doc.insert_epigraph());
+        assert_eq!(doc.text.to_string(), "## One ##\n> Quote\n— Author <\n\nProse.\n");
+        assert_eq!(doc.text.slice(doc.selection()).to_string(), "Quote");
+        assert!(!doc.insert_epigraph(), "the one that is there is selected");
+        assert_eq!(doc.text.slice(doc.selection()).to_string(), "Quote");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "## One ##\nProse.\n");
+        let mut bare = Document::new(Rope::from_str("## One ##"));
+        bare.protect_names = true;
+        assert!(bare.insert_epigraph());
+        assert_eq!(bare.text.to_string(), "## One ##\n> Quote\n— Author <\n");
+        let mut empty = Document::new(Rope::from_str(""));
+        assert!(empty.insert_epigraph());
+        assert_eq!(empty.text.to_string(), "> Quote\n— Author <\n");
     }
 
     #[test]

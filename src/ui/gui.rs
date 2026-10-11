@@ -335,6 +335,7 @@ impl App {
             | Command::Replace
             | Command::JumpScene
             | Command::NewScene
+            | Command::Epigraph
             | Command::GotoLine
             | Command::WordCount => editable && project,
             Command::CloseTab => tab.is_some() && project,
@@ -693,6 +694,7 @@ impl App {
             Tool::Button("Find", Face::Normal, command(Command::Find)),
             Tool::Button("New Scene", Face::Normal, command(Command::NewScene)),
         ];
+            Tool::Button("Epigraph", Face::Normal, command(Command::Epigraph)),
         let edge = rect.x + rect.width as i32 - self.s(8.);
         // A divider is drawn only when a tool follows it, so a narrow bar does not end with one.
         let mut gap = None;
@@ -1237,6 +1239,7 @@ impl App {
                     .skip(usize::from(n > 0))
                     .take(40)
                     .map(|l| text.line(l).to_string().trim().to_owned())
+                    .filter(|l| tab.blocks.quote_span(*l).is_none())
                     .filter(|l| !l.is_empty() && !prose::is_scene_break(l) && prose::scene_name(l).is_none())
                     .map(|l| crate::core::notes::strip(&crate::core::notes::to_neutral(&l, &marker).0).replace('*', "").trim().to_owned())
                     .find(|l| !l.is_empty())

@@ -202,14 +202,19 @@ fn prelude(doc: &Doc, preset: &Preset) -> String {
 #set text(font: ({fonts}), size: {size}pt, lang: "{lang}", region: "{region}", hyphenate: {hyphenate}, top-edge: "ascender", bottom-edge: "descender")
 #set smartquote(enabled: false)
 #let is-chapter-page() = {{ query(<chapter-start>).map(m => m.location().page()).contains(here().page()) }}
+#let is-blank-page() = {{
+  let p = here().page()
+  let on(label, page) = query(label).any(m => m.location().page() == page)
+  {recto} and calc.even(p) and on(<after-break>, p + 1) and not on(<before-break>, p)
+}}
 #let running-head() = context {{
-  if {head_on_chapter} == false and is-chapter-page() {{ none }} else {{
+  if is-blank-page() or ({head_on_chapter} == false and is-chapter-page()) {{ none }} else {{
     let h = {head}
     let n = {header_number}
     if h == none {{ n }} else if n == none {{ h }} else {{ h; n }}
   }}
 }}
-#let running-foot() = context {{ {footer} }}
+#let running-foot() = context {{ if not is-blank-page() {{ {footer} }} }}
 #set page(width: {width}, height: {height}, margin: {margin}, binding: left, header: running-head(), footer: running-foot())
 #set par(justify: {justify}, leading: {leading:.3}em, spacing: {spacing}, first-line-indent: (amount: {indent}, all: {all_indent}))
 "##,
@@ -218,6 +223,7 @@ fn prelude(doc: &Doc, preset: &Preset) -> String {
         fonts = font_list(p),
         size = p.font_size,
         hyphenate = p.hyphenate,
+        recto = p.recto_start,
         width = inches(width),
         height = inches(height),
         justify = p.justify,
@@ -227,7 +233,9 @@ fn prelude(doc: &Doc, preset: &Preset) -> String {
 
 fn chapter_functions(preset: &Preset) -> String {
     let p = preset;
-    let recto = p.recto_start;
+    // The page break itself goes to a right-hand page: a test on the page number does not settle in a long book.
+    // The marks around it let the running head find the empty page it leaves.
+    let recto = if p.recto_start { "\"odd\"" } else { "none" };
     let align = if p.chapter_align == Align::Center { "center" } else { "left" };
     let text_height = p.page_height - p.margin_top - p.margin_bottom;
     let drop = text_height * p.chapter_drop;
@@ -242,8 +250,9 @@ fn chapter_functions(preset: &Preset) -> String {
     let title_line = wrap("title");
     format!(
         r##"#let chapter-start() = {{
-  pagebreak(weak: true)
-  if {recto} {{ context {{ if calc.even(here().page()) {{ page(header: none, footer: none)[] }} }} }}
+  [#metadata(none) <before-break>]
+  pagebreak(weak: true, to: {recto})
+  [#metadata(none) <after-break>]
 }}
 #let chapter(num, title, toc, first: false) = {{
   chapter-start()
@@ -373,6 +382,8 @@ pub fn markup(doc: &Doc, preset: &Preset) -> String {
     out
 }
 
+use crate::core::prose::{EPIGRAPH_INSET, EPIGRAPH_SCALE};
+
 fn chapter_markup(chapter: &Chapter, doc: &Doc, p: &Preset, out: &mut String) {
     if let (Some(part), true) = (&chapter.part, p.part_headings) {
         out.push_str(&format!("#part({})\n", lit(&part_heading(part, p, doc.language))));
@@ -392,7 +403,7 @@ fn chapter_markup(chapter: &Chapter, doc: &Doc, p: &Preset, out: &mut String) {
     let mut first = true;
     // A paragraph that follows a block (a dropped initial) would not be indented by itself.
     let mut indent_next = false;
-    for block in &chapter.blocks {
+    for (n, block) in chapter.blocks.iter().enumerate() {
         match block {
             Block::SceneBreak => {
                 out.push_str(&format!("#scene-break({})\n", lit(&p.scene_break)));
@@ -412,6 +423,38 @@ fn chapter_markup(chapter: &Chapter, doc: &Doc, p: &Preset, out: &mut String) {
                 }
                 out.push_str("\n\n");
                 first = false;
+            }
+            Block::Quote(inlines, quote) => {
+                if quote.first {
+                    // The space is on top of the leading, so a double-spaced page shows it too. An
+                    // extract is set in as far as a paragraph's first line, at least.
+                    // An epigraph is set like the text, further in and a little smaller.
+                    let (pad, set) = if quote.epigraph {
+                        (format!("x: {}%", EPIGRAPH_INSET * 100.), format!("#set par(first-line-indent: 0pt)\n#set text(size: {EPIGRAPH_SCALE}em)"))
+                    } else {
+                        (format!("x: {}", if p.indent > 0.0 { inches(p.indent) } else { "1.5em".into() }), "#set par(first-line-indent: 0pt, justify: false)".to_owned())
+                    };
+                    out.push_str(&format!(
+                        "#context block(above: par.leading + 0.9em, below: par.leading + 0.9em, width: 100%, breakable: {})[#pad({pad})[{set}\n",
+                        !quote.epigraph
+                    ));
+                }
+                let text = inlines_markup(&super::model::quote_inlines(inlines, *quote), p);
+                // The line before an attribution stays on its page, so the attribution is not alone on the next.
+                let signed = matches!(chapter.blocks.get(n + 1), Some(Block::Quote(_, next)) if next.attribution);
+                out.push_str(&if quote.attribution {
+                    format!("#align(right)[{text}]")
+                } else if signed {
+                    format!("#block(sticky: true, above: par.spacing, below: par.spacing)[{text}]")
+                } else {
+                    text
+                });
+                out.push_str("\n\n");
+                if quote.last {
+                    out.push_str("]]\n");
+                    // The text goes on after an extract; after an epigraph it starts.
+                    indent_next = !quote.epigraph;
+                }
             }
         }
     }
@@ -693,6 +736,14 @@ pub(crate) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_book_of_many_chapters_lays_out_without_warnings() {
+        let (mut doc, p) = book(preset::PRINT_BOOK, |_, _| {});
+        doc.chapters = doc.chapters.iter().cycle().take(20).cloned().collect();
+        let ts = typeset(&doc, &p).unwrap_or_else(|e| panic!("{e}"));
+        assert!(ts.warnings.is_empty(), "{:?}", ts.warnings);
     }
 
     /// Writes PDFs and page images for looking at: `JW_SAMPLES=/dir cargo test --lib typeset -- --ignored`

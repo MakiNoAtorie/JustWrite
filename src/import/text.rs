@@ -213,6 +213,8 @@ pub fn read_markdown(text: &str) -> Raw {
     let mut raw = Raw::default();
     let mut current = String::new();
     let mut in_fence = false;
+    // The paragraphs being read are the lines of a block quote.
+    let mut in_quote = false;
     let mut in_front_matter = lines.first().is_some_and(|l| l.trim() == "---") && lines.iter().skip(1).any(|l| l.trim() == "---" || l.trim() == "...");
     let flush = |current: &mut String, paras: &mut Vec<RawPara>| {
         let t = std::mem::take(current);
@@ -226,6 +228,12 @@ pub fn read_markdown(text: &str) -> Raw {
         let line = lines[i];
         let trimmed = line.trim();
         i += 1;
+        if in_quote && !trimmed.starts_with('>') {
+            in_quote = false;
+            if let Some(last) = raw.paras.last_mut() {
+                last.text.push_str(" <");
+            }
+        }
         if in_front_matter {
             // YAML front matter: pick up the title, skip the rest.
             if i > 1 && (trimmed == "---" || trimmed == "...") {
@@ -279,11 +287,18 @@ pub fn read_markdown(text: &str) -> Raw {
             raw.paras.push(RawPara { text: String::new(), kind: Kind::SceneBreak, page_break_before: false });
             continue;
         }
-        // Quotes and list markers are dropped; the text stays.
-        let mut body = trimmed;
-        while let Some(rest) = body.strip_prefix('>') {
-            body = rest.trim_start();
+        // A block quote becomes a set-off block (`> … <`), with a paragraph for each of its lines.
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            flush(&mut current, &mut raw.paras);
+            let text = inline(rest.trim_start_matches(['>', ' ']).trim_end_matches('\\').trim_end());
+            if !text.is_empty() {
+                raw.paras.push(RawPara { text: if in_quote { text } else { format!("> {text}") }, kind: Kind::Body, page_break_before: false });
+                in_quote = true;
+            }
+            continue;
         }
+        // List markers are dropped; the text stays.
+        let mut body = trimmed;
         let after_digits = body.trim_start_matches(|c: char| c.is_ascii_digit());
         let mut item = false;
         if body.starts_with(['-', '+']) && body[1..].starts_with(' ') {
@@ -310,6 +325,9 @@ pub fn read_markdown(text: &str) -> Raw {
         }
     }
     flush(&mut current, &mut raw.paras);
+    if let Some(last) = raw.paras.last_mut().filter(|_| in_quote) {
+        last.text.push_str(" <");
+    }
     raw
 }
 
@@ -365,7 +383,7 @@ mod tests {
         assert_eq!(t[4], "Next *scene* starts.");
         assert_eq!(t[5], "H1:Chapter Two");
         assert_eq!(t[6], "not a list");
-        assert_eq!(t[7], "quoted");
+        assert_eq!(t[7], "> quoted <");
         assert!(t[8].contains(notes::OPEN) && t[8].contains("remember this") && t[8].ends_with("End \\* star."), "{:?}", t[8]);
         // A closed heading is a scene name only right after a break.
         assert_eq!(texts(&read_markdown("a\n\n***\n\n## The storm ##\n\nb\n\n## Two ##\n")), ["a", "#", "## The storm ##", "b", "H2:Two"]);

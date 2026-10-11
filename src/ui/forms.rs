@@ -380,6 +380,8 @@ const PAGED: &[usize] = &[2, 3];
 const PDF_ONLY: &[usize] = &[3];
 const EPUB_ONLY: &[usize] = &[4];
 const FLOWING: &[usize] = &[2, 3, 4];
+const PDF_EPUB: &[usize] = &[3, 4];
+const PAGED_EPUB: &[usize] = &[2, 3, 4];
 const TEXT_FORMATS: &[usize] = &[0, 1];
 const CUSTOM_TRIM: &[usize] = &[6];
 
@@ -462,8 +464,8 @@ fn preset_fields(p: &Preset) -> Vec<Field> {
         n("chapter_size", "Title size", p.chapter_size, 6., 72., 1., 0, "pt").when("format", PAGED),
         Field::choice("chapter_caps", "Title capitals", labels(&["As typed", "Upper case", "Small capitals"]), position(&CAPS, p.chapter_caps)).when("format", PAGED),
         Field::toggle("chapter_bold", "Bold title", p.chapter_bold).when("format", PAGED),
-        Field::text("chapter_ornament", "Ornament under the title", &p.chapter_ornament).when("format", PAGED).hint("Optional, such as ❦"),
-        n("drop_cap", "Drop cap", p.drop_cap as f32, 0., 4., 1., 0, "lines (0 is off)").when("format", PDF_ONLY),
+        Field::text("chapter_ornament", "Ornament under the title", &p.chapter_ornament).when("format", PAGED_EPUB).hint("Optional, such as ❦"),
+        n("drop_cap", "Drop cap", p.drop_cap as f32, 0., 4., 1., 0, "lines (0 is off)").when("format", PDF_EPUB),
         Field::toggle("recto_start", "Chapters start on right-hand pages", p.recto_start).when("format", PDF_ONLY),
         Field::heading("E-book").when("format", EPUB_ONLY),
         Field::choice("epub_theme", "Style", labels(&["Classic", "Modern", "Plain"]), position(&THEMES, p.epub_theme)).when("format", EPUB_ONLY),
@@ -639,6 +641,7 @@ impl App {
             Field::toggle("typewriter", "Typewriter scrolling", s.typewriter).hint("Keep the line you are typing in the middle"),
             Field::toggle("show_markers", "Show formatting marks", s.show_markers),
             Field::toggle("spellcheck", "Underline possible misspellings", s.spellcheck).hint("Uses the project language"),
+            Field::toggle("animations", "Visual effects", s.animations).hint("The short glide when you jump to a scene"),
             Field::heading("Notes"),
             Field::text("note_marker", "Note marker", &s.note_marker).hint("Two or three punctuation characters, such as $$ or %%"),
             Field::text("note_color", "Note colour", &s.note_color).hint("#rrggbb, or leave empty for the accent colour"),
@@ -678,6 +681,7 @@ impl App {
         s.autosave = form.on("autosave");
         s.repack_minutes = form.number("repack_minutes") as u32;
         let old = self.marker();
+        s.animations = form.on("animations");
         match Settings::parse(&s.serialize()) {
             Ok(parsed) => {
                 let new = parsed.marker();
@@ -869,14 +873,16 @@ impl App {
         self.open_form(Form::new(FormKind::Project, "Project settings", fields).submit("Save").width(620.));
     }
 
-    pub(super) fn export_form(&mut self) {
+    /// `fallback` is the preset to start from when no default is set.
+    pub(super) fn export_form(&mut self, fallback: &str) {
         let Some(state) = &self.project else {
             self.status = "Open a project first.".into();
             return;
         };
         let presets = state.presets.all();
         let wanted = if state.core.manifest.settings.default_preset.is_empty() { self.settings.default_preset.clone() } else { state.core.manifest.settings.default_preset.clone() };
-        let index = presets.iter().position(|p| p.id == wanted).unwrap_or(0);
+        let at = |id: &str| presets.iter().position(|p| p.id == id);
+        let index = at(&wanted).or_else(|| at(fallback)).unwrap_or(0);
         let form = self.build_export_form(&presets[index], index, 0, 0, 0, None);
         self.open_form(form);
     }

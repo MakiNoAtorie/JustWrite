@@ -63,6 +63,7 @@ pub enum Command {
     WordCount,
     // Review and history
     ShowComments,
+    Epigraph,
     ShowHistory,
     Snapshot,
     // Output
@@ -155,6 +156,7 @@ commands![
     (Command::Snapshot, "snapshot", "Take snapshot…", "Ctrl+Alt+S"),
     (Command::Export, "export", "Export…", "Ctrl+E"),
     (Command::Preview, "preview", "Paged preview…", "Ctrl+Alt+P"),
+    (Command::Epigraph, "epigraph", "Epigraph", ""),
     (Command::BookDetails, "book_details", "Book details…", ""),
     (Command::ProjectSettings, "project_settings", "Project settings…", ""),
     (Command::ToggleTree, "toggle_tree", "Toggle project tree", "Ctrl+Shift+E"),

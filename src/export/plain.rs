@@ -94,6 +94,12 @@ fn paragraphs(blocks: &[Block], markdown: bool, scene_break: &str, out: &mut Str
                 out.push_str(&text);
                 out.push_str("\n\n");
             }
+            Block::Quote(inlines, quote) => {
+                let text = if markdown { runs(&escape_runs(inlines), true) } else { runs(inlines, false) };
+                out.push_str(format!("{}{text}", if markdown { "> " } else { "    " }).trim_end());
+                // In Markdown two spaces end the line, so the lines of a block stay apart.
+                out.push_str(if quote.last { "\n\n" } else if markdown { "  \n" } else { "\n" });
+            }
         }
     }
 }

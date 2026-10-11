@@ -134,6 +134,8 @@ fn style_xml(preset: &Preset, doc: &Doc) -> String {
 <w:style w:type=\"paragraph\" w:styleId=\"Body\"><w:name w:val=\"Body Text\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:spacing w:after=\"{after}\"/><w:ind w:firstLine=\"{indent}\"/><w:jc w:val=\"{jc}\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"BodyFlush\"><w:name w:val=\"Body Text First\"/><w:basedOn w:val=\"Body\"/><w:qFormat/><w:pPr><w:ind w:firstLine=\"0\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"SceneBreak\"><w:name w:val=\"Scene Break\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:after=\"{after}\"/><w:jc w:val=\"center\"/></w:pPr></w:style>\
+<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/></w:style>\
+<w:style w:type=\"paragraph\" w:styleId=\"Epigraph\"><w:name w:val=\"Epigraph\"/><w:basedOn w:val=\"Quote\"/><w:qFormat/><w:pPr><w:jc w:val=\"{jc}\"/></w:pPr><w:rPr><w:sz w:val=\"{epigraph_size}\"/><w:szCs w:val=\"{epigraph_size}\"/></w:rPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"Heading1\"><w:name w:val=\"heading 1\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Body\"/><w:qFormat/><w:pPr><w:keepNext/><w:spacing w:after=\"{head_after}\"/><w:jc w:val=\"{heading_jc}\"/><w:outlineLvl w:val=\"0\"/></w:pPr><w:rPr>{bold}{heading_caps}<w:sz w:val=\"{head_size}\"/><w:szCs w:val=\"{head_size}\"/></w:rPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"PartHeading\"><w:name w:val=\"Part Heading\"/><w:basedOn w:val=\"Heading1\"/><w:next w:val=\"Heading1\"/><w:qFormat/><w:pPr><w:pageBreakBefore/><w:outlineLvl w:val=\"9\"/></w:pPr></w:style>\
 <w:style w:type=\"paragraph\" w:styleId=\"Title\"><w:name w:val=\"Title\"/><w:basedOn w:val=\"Normal\"/><w:qFormat/><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:rPr><w:sz w:val=\"{title_size}\"/><w:szCs w:val=\"{title_size}\"/></w:rPr></w:style>\
@@ -146,6 +148,7 @@ fn style_xml(preset: &Preset, doc: &Doc) -> String {
 <w:style w:type=\"character\" w:styleId=\"CommentReference\"><w:name w:val=\"annotation reference\"/><w:rPr><w:sz w:val=\"16\"/></w:rPr></w:style>\
 </w:styles>",
         head_after = line_twips(preset) * 2,
+        epigraph_size = (preset.font_size * 2.0 * crate::core::prose::EPIGRAPH_SCALE).round() as i64,
         title_size = (preset.font_size * 2.0 * if preset.title_page_contact { 1.0 } else { 1.8 }).round() as i64,
         after_matter = line_twips(preset),
     )
@@ -532,6 +535,20 @@ impl Writer<'_> {
                     let content = self.inlines(inlines);
                     self.paragraph(style, "", &content);
                     self.after_break = false;
+                }
+                Block::Quote(inlines, quote) => {
+                    // An epigraph is set like the text, further in and a little smaller.
+                    let side = if quote.epigraph { (self.text_width as f32 * crate::core::prose::EPIGRAPH_INSET) as i64 } else { 720 };
+                    let (left, right) = (side, side);
+                    let space = |on: bool| if on { line_twips(preset) } else { 0 };
+                    let ppr = format!(
+                        "<w:spacing w:before=\"{}\" w:after=\"{}\"/><w:ind w:left=\"{left}\" w:right=\"{right}\"/>{}",
+                        space(quote.first),
+                        space(quote.last),
+                        if quote.attribution { "<w:jc w:val=\"right\"/>" } else { "" }
+                    );
+                    let content = self.inlines(&super::model::quote_inlines(inlines, *quote));
+                    self.paragraph(if quote.epigraph { "Epigraph" } else { "Quote" }, &ppr, &content);
                 }
             }
         }

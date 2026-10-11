@@ -65,6 +65,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::AddComment),
             Some(Command::AddWord),
         ],
+            Some(Command::Epigraph),
     ),
     (
         "Project",
