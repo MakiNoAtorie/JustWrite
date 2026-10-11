@@ -4,6 +4,7 @@ Name=JustWrite
 GenericName=Manuscript editor
 Comment=A small, fast editor for writing a novel
 Exec=justwrite %f
+Icon=justwrite
 Terminal=false
 Categories=Office;TextEditor;
 MimeType=application/x-justwrite-project;

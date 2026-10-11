@@ -139,6 +139,8 @@ original editor this one is derived from measures the same on the same machine. 
   window or the Dock icon, or File ▸ Open, works.
 * **Linux:** `packaging/linux/justwrite.desktop` and `justwrite-mime.xml`.
 
+The icon is `assets/logo/1-open-book.svg`; `tools/make_icons.sh` makes the icon files of every platform from it.
+
 ## Layout of the source
 
 | Module | |

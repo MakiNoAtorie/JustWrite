@@ -3233,6 +3233,12 @@ impl ApplicationHandler<UserEvent> for App {
             .with_theme(None)
             .with_inner_size(LogicalSize::new(width, height))
             .with_min_inner_size(LogicalSize::new(440., 300.));
+        // The icon that build.rs puts in the program file, for the title bar and the taskbar.
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::IconExtWindows;
+            attributes = attributes.with_window_icon(winit::window::Icon::from_resource(1, None).ok());
+        }
         if let Some(state) = saved {
             // Only reuse the position if it is still on a connected monitor.
             let on_screen = event_loop.available_monitors().any(|monitor| {
