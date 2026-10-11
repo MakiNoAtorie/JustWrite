@@ -54,20 +54,20 @@ pub(super) fn hovered(base: u32, p: Palette) -> u32 {
     mix(base, p.text, if p.light { 0.07 } else { 0.09 })
 }
 
-struct TreeRow {
-    id: String,
+pub(super) struct TreeRow {
+    pub(super) id: String,
     title: String,
     depth: usize,
     part: bool,
     words: u32,
     open: usize,
-    heading: Option<(&'static str, manifest::Section)>,
+    pub(super) heading: Option<(&'static str, manifest::Section)>,
     collapsed: bool,
 }
 
 impl App {
     /// The project tree as one flat list: section headings, parts and their chapters, then pages.
-    fn tree_rows(&self) -> Vec<TreeRow> {
+    pub(super) fn tree_rows(&self) -> Vec<TreeRow> {
         let mut rows: Vec<TreeRow> = Vec::new();
         let Some(state) = &self.project else { return rows };
         fn walk(nodes: &[manifest::Node], depth: usize, state: &ProjectState, out: &mut Vec<TreeRow>) {
@@ -337,7 +337,8 @@ impl App {
             | Command::GotoLine
             | Command::WordCount => editable && project,
             Command::CloseTab => tab.is_some() && project,
-            Command::Rename | Command::Delete | Command::MoveUp | Command::MoveDown => project && self.selected_item().is_some(),
+            Command::Rename => project && self.marked_ids().len() == 1,
+            Command::Delete | Command::MoveUp | Command::MoveDown => project && !self.marked_ids().is_empty(),
             Command::NewChapter
             | Command::NewPage
             | Command::NextComment
@@ -991,7 +992,9 @@ impl App {
         let Some(state) = &self.project else {
             return;
         };
+        let marked: Vec<String> = if state.selection.is_empty() { state.selected.iter().cloned().collect() } else { state.selection.clone() };
         let selected = state.selected.clone();
+        let tree_focus = self.focus == Focus::Tree;
         let dragged_is_chapter = match &self.drag {
             Some(Drag::Node(id, _)) => state.core.manifest.tree.find(id).is_some_and(|n| !n.is_part()),
             _ => false,
@@ -1032,11 +1035,12 @@ impl App {
                 self.button(text, add, Hit::Command(command), Look::Plain, p);
                 continue;
             }
-            let is_selected = selected.as_deref() == Some(row.id.as_str());
+            let is_selected = marked.contains(&row.id);
             let is_active = active.as_deref() == Some(row.id.as_str());
             let dragging_over = drag.is_some() && drag.as_deref() != Some(row.id.as_str()) && contains(line, self.mouse.x, self.mouse.y);
             if is_selected {
-                self.renderer.fill_round(line, self.su(5.), selected_fill(p.surface, p));
+                let fill = if tree_focus { selected_fill(p.surface, p) } else { hovered(p.surface, p) };
+                self.renderer.fill_round(line, self.su(5.), fill);
             } else if is_active {
                 self.renderer.fill_round(line, self.su(5.), mix(p.surface, p.accent, 0.1));
             } else if self.hot(line) && drag.is_none() {
@@ -1639,8 +1643,14 @@ impl App {
                 false,
                 vec![("Discard & open", Act::Press("discard"), Look::Outline), ("Cancel", Act::Press("escape"), Look::Outline), ("Save all & open", Act::Press("save"), Look::Primary)],
             ),
-            Kind::Delete(id) => (
-                format!("Delete \"{}\"?\nA snapshot is saved first, so the text can be brought back from History.", title_of(id)),
+            Kind::Delete(ids) => (
+                format!(
+                    "Delete {}?\nA snapshot is saved first, so the text can be brought back from History.",
+                    match ids.as_slice() {
+                        [id] => format!("\"{}\"", title_of(id)),
+                        _ => self.project.as_ref().map(|p| super::project::noun(&p.core.manifest.tree, ids)).unwrap_or_default(),
+                    }
+                ),
                 false,
                 vec![("Cancel", Act::Press("escape"), Look::Outline), ("Delete", Act::Press("enter"), Look::Danger)],
             ),

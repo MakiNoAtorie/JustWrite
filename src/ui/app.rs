@@ -154,6 +154,12 @@ enum Act {
     FormSubmit,
     FormCloseDrop,
 }
+/// Which pane owns the keyboard: Del, F2 and the arrows act on the tree or on the text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Editor,
+    Tree,
+}
 #[derive(Clone)]
 enum Drag {
     Selection(u64),
@@ -204,6 +210,7 @@ pub struct App {
     tree_top: usize,
     /// Scroll the tree to the selected row at the next paint.
     tree_reveal: bool,
+    focus: Focus,
     outline_top: usize,
     show_tree: bool,
     /// Tab hides the menu, tabs, panels and footer, as painting programs do.
@@ -366,6 +373,7 @@ impl App {
             project: None,
             tree_top: 0,
             tree_reveal: false,
+            focus: Focus::Editor,
             outline_top: 0,
             show_tree: true,
             hide_interface: false,
@@ -517,6 +525,7 @@ impl App {
         self.redraw();
     }
     fn new_tab(&mut self, pane: u64) -> u64 {
+        self.focus = Focus::Editor;
         let id = self.id();
         self.tabs.insert(id, Tab::new(id));
         if let Some(pane) = self.split.pane_mut(pane) {
@@ -1572,9 +1581,9 @@ impl App {
         if matches!(key, Key::Named(NamedKey::Enter)) {
             let query = overlay.query.clone();
             match kind {
-                Kind::Delete(id) => {
+                Kind::Delete(ids) => {
                     self.overlay = None;
-                    self.delete_node(&id);
+                    self.delete_nodes(&ids);
                 }
                 Kind::GotoLine => self.goto_line(&query),
                 Kind::Rename(id) => {
@@ -1697,6 +1706,7 @@ impl App {
             }
             Command::NewChapter => self.new_node("chapter", ""),
             Command::NewPage => self.new_note_form(),
+            Command::Rename if self.marked_ids().len() > 1 => self.status = "Select one item to rename.".into(),
             Command::Rename => match self.selected_item() {
                 Some(id) => {
                     let mut overlay = Overlay::new(Kind::Rename(id.clone()));
@@ -1706,9 +1716,9 @@ impl App {
                 }
                 None => self.status = "Click a chapter, part or note in the tree first.".into(),
             },
-            Command::Delete => match self.selected_item() {
-                Some(id) => self.overlay = Some(Overlay::new(Kind::Delete(id))),
-                None => self.status = "Click a chapter, part or note in the tree first.".into(),
+            Command::Delete => match self.marked_ids() {
+                ids if !ids.is_empty() => self.overlay = Some(Overlay::new(Kind::Delete(ids))),
+                _ => self.status = "Click a chapter, part or note in the tree first.".into(),
             },
             Command::MoveUp | Command::MoveDown => {
                 let current = self.selected_item();
@@ -2017,6 +2027,9 @@ impl App {
         }
         let primary = platform::primary(self.modifiers);
         let shift = self.modifiers.shift_key();
+        if self.focus == Focus::Tree && self.screen.is_none() && !self.modifiers.alt_key() && self.tree_key(&key, primary, shift) {
+            return;
+        }
         if let Some(command) = commands::resolve(
             &shortcut_key,
             primary,
@@ -2064,6 +2077,7 @@ impl App {
         let Some(id) = self.active_id() else {
             return;
         };
+        self.focus = Focus::Editor;
         let typography = self
             .project
             .as_ref()
@@ -2696,6 +2710,15 @@ impl App {
         }
         let found = self.hit_at(x, y);
         let hit = found.as_ref().map(|(_, hit)| hit.clone());
+        if !blocked {
+            match &hit {
+                Some(Hit::Node(_) | Hit::Fold(_)) => self.focus = Focus::Tree,
+                Some(Hit::Tab(..) | Hit::NewTab(_)) => self.focus = Focus::Editor,
+                None if self.over_editor(x, y) => self.focus = Focus::Editor,
+                None if self.tree_rect.is_some_and(|r| contains(r, x, y)) => self.focus = Focus::Tree,
+                _ => {}
+            }
+        }
         if button == MouseButton::Right {
             if blocked {
                 self.popup = None;
@@ -2708,6 +2731,10 @@ impl App {
                     }
                     Some(Hit::Node(id)) => {
                         if let Some(state) = &mut self.project {
+                            if !state.selection.contains(id) {
+                                state.selection.clear();
+                                state.anchor = Some(id.clone());
+                            }
                             state.selected = Some(id.clone());
                         }
                     }
@@ -2755,14 +2782,13 @@ impl App {
                 self.new_tab(pane);
             }
             Some(Hit::Node(id)) => {
-                if let Some(state) = &mut self.project {
-                    state.selected = Some(id.clone());
-                }
-                let is_part = self.project.as_ref().and_then(|p| p.core.manifest.tree.find(&id)).is_some_and(manifest::Node::is_part);
-                if is_part {
-                    self.toggle_fold(&id);
-                } else {
-                    self.open_item(&id);
+                let (ctrl, shift) = (platform::primary(self.modifiers), self.modifiers.shift_key());
+                let inside = self.project.as_ref().is_some_and(|p| p.selection.len() > 1 && p.selection.contains(&id));
+                if ctrl || shift {
+                    self.extend_selection(&id, ctrl, shift);
+                } else if !inside {
+                    // A press inside a multi-selection waits: it may be the start of a drag.
+                    self.click_node(&id);
                 }
                 self.drag = Some(Drag::Node(id, self.mouse));
             }
@@ -2917,6 +2943,8 @@ impl App {
         if let Some(Drag::Node(id, origin)) = self.drag.take() {
             if (self.mouse.x - origin.x).abs() + (self.mouse.y - origin.y).abs() >= 8. {
                 self.finish_node_drag(&id);
+            } else if !platform::primary(self.modifiers) && !self.modifiers.shift_key() && self.project.as_ref().is_some_and(|p| p.selection.len() > 1) {
+                self.click_node(&id);
             }
             self.redraw();
             return;

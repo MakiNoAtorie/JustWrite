@@ -17,7 +17,7 @@ pub enum Kind {
     /// Rename the chapter, part or note with this id.
     Rename(String),
     /// Delete the chapter, part or note with this id.
-    Delete(String),
+    Delete(Vec<String>),
     Close(u64),
     Quit,
     ChangeWorkspace(PathBuf),

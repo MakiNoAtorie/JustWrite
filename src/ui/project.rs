@@ -115,7 +115,12 @@ pub struct ProjectState {
     pub comments: CommentSet,
     pub presets: Presets,
     pub marker: Arc<RwLock<Marker>>,
+    /// The row last clicked; the tree keys and single-item commands act on it.
     pub selected: Option<String>,
+    /// Rows marked with Ctrl/Shift click. Empty means only `selected` is marked.
+    pub selection: Vec<String>,
+    /// Where a Shift range starts.
+    pub anchor: Option<String>,
     pub collapsed: BTreeSet<String>,
     pub filter: CommentFilter,
     pub active_comment: Option<String>,
@@ -211,6 +216,8 @@ impl App {
             presets,
             marker,
             selected: None,
+            selection: Vec::new(),
+            anchor: None,
             collapsed: BTreeSet::new(),
             filter: CommentFilter::default(),
             active_comment: None,
@@ -269,6 +276,8 @@ impl App {
         let Some(file) = self.project.as_ref().and_then(|p| p.core.file_of(id)) else { return };
         if let Some(p) = &mut self.project {
             p.selected = Some(id.to_owned());
+            p.anchor = p.selected.clone();
+            p.selection.clear();
         }
         self.tree_reveal = true;
         self.open_relative(PathBuf::from(file), 0);
@@ -350,49 +359,195 @@ impl App {
             Err(error) => self.note(&error),
         }
     }
-    /// Deletes a chapter, part or note, after saving a snapshot that still holds it.
-    pub(super) fn delete_node(&mut self, id: &str) {
+    /// Deletes chapters, parts or notes after ONE safety snapshot that still holds them.
+    pub(super) fn delete_nodes(&mut self, ids: &[String]) {
         let Some(state) = &mut self.project else { return };
-        let title = state.core.manifest.tree.find(id).map(|n| n.title().to_owned()).unwrap_or_default();
-        let now = jw::time::now();
-        if let Err(error) = state.history.capture(&state.core, history::Kind::Safety, &format!("Before deleting \"{title}\""), now) {
-            self.status = format!("Not deleted: the safety snapshot failed ({error})");
+        let tree = &state.core.manifest.tree;
+        let ids: Vec<String> = ids.iter().filter(|id| tree.find(id).is_some()).cloned().collect();
+        if ids.is_empty() {
             return;
         }
+        let title = tree.find(&ids[0]).map(|n| n.title().to_owned()).unwrap_or_default();
+        let label = if ids.len() == 1 { format!("\"{title}\"") } else { noun(tree, &ids) };
         let mut files = Vec::new();
         fn collect(n: &Node, out: &mut Vec<String>) {
             out.extend(n.file());
             n.children().iter().for_each(|c| collect(c, out));
         }
-        if let Some(node) = state.core.manifest.tree.find(id) {
-            collect(node, &mut files);
-        }
-        match state.core.delete(id) {
-            Ok(_) => {
-                if state.selected.as_deref() == Some(id) {
-                    state.selected = None;
-                }
-                state.changed = true;
-                let doomed: Vec<u64> = self
-                    .tabs
-                    .iter()
-                    .filter(|(_, t)| t.path.as_ref().is_some_and(|p| files.contains(&p.to_string_lossy().replace('\\', "/"))))
-                    .map(|(id, _)| *id)
-                    .collect();
-                for tab in doomed {
-                    self.close_tab(tab, true);
-                }
-                self.status = format!("Deleted \"{title}\". A snapshot before the deletion keeps its text.");
+        for id in &ids {
+            if let Some(node) = tree.find(id) {
+                collect(node, &mut files);
             }
-            Err(error) => self.status = error,
         }
+        let now = jw::time::now();
+        if let Err(error) = state.history.capture(&state.core, history::Kind::Safety, &format!("Before deleting {label}"), now) {
+            self.status = format!("Not deleted: the safety snapshot failed ({error})");
+            return;
+        }
+        let mut failed = None;
+        for id in &ids {
+            // A part deleted earlier already took its chapters.
+            if state.core.manifest.tree.find(id).is_none() {
+                continue;
+            }
+            if let Err(error) = state.core.delete(id) {
+                failed = Some(error);
+                break;
+            }
+        }
+        state.selection.clear();
+        if state.selected.as_ref().is_some_and(|s| state.core.manifest.tree.find(s).is_none()) {
+            state.selected = None;
+        }
+        state.changed = true;
+        let doomed: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|(_, t)| t.path.as_ref().is_some_and(|p| files.contains(&p.to_string_lossy().replace('\\', "/"))))
+            .map(|(id, _)| *id)
+            .collect();
+        for tab in doomed {
+            self.close_tab(tab, true);
+        }
+        self.status = match failed {
+            Some(error) => error,
+            None => format!("Deleted {label}. A snapshot before the deletion keeps the text."),
+        };
         self.redraw();
     }
-    /// Moves the selected item up or down among its siblings (or across a part boundary).
-    pub(super) fn move_selected(&mut self, down: bool) {
+    /// The items the tree commands act on: the marked rows in tree order (an item inside a marked
+    /// part is left out), else the selected or active item.
+    pub(super) fn marked_ids(&self) -> Vec<String> {
+        let Some(state) = &self.project else { return Vec::new() };
+        let tree = &state.core.manifest.tree;
+        let ids: Vec<String> = if state.selection.is_empty() { self.selected_item().into_iter().collect() } else { state.selection.clone() };
+        let mut located: Vec<(bool, Vec<usize>, String)> = ids
+            .into_iter()
+            .filter_map(|id| tree.locate(&id).map(|(s, path)| (s == Section::Notes, path, id)))
+            .collect();
+        located.sort();
+        located.dedup();
+        let keep: Vec<bool> = located
+            .iter()
+            .map(|(notes, path, _)| !located.iter().any(|(n, p, _)| n == notes && p.len() < path.len() && path[..p.len()] == p[..]))
+            .collect();
+        located.into_iter().zip(keep).filter(|(_, k)| *k).map(|((_, _, id), _)| id).collect()
+    }
+    /// Ids of the rows shown in the tree, top to bottom (no headings, no hidden children).
+    pub(super) fn visible_items(&self) -> Vec<String> {
+        self.tree_rows().into_iter().filter(|r| r.heading.is_none()).map(|r| r.id).collect()
+    }
+    /// Ctrl toggles `id`, Shift selects from the anchor to `id` (Ctrl+Shift adds the range).
+    pub(super) fn extend_selection(&mut self, id: &str, ctrl: bool, shift: bool) {
+        let visible = self.visible_items();
         let Some(state) = &mut self.project else { return };
-        let Some(id) = state.selected.clone() else { return };
-        let Some((section, path)) = state.core.manifest.tree.locate(&id) else { return };
+        if state.selection.is_empty() {
+            state.selection.extend(state.selected.clone());
+        }
+        let tree = &state.core.manifest.tree;
+        let section = |i: &str| tree.locate(i).map(|(s, _)| s);
+        let anchor = state.anchor.clone().or_else(|| state.selected.clone()).unwrap_or_else(|| id.to_owned());
+        if shift {
+            let ids = if section(&anchor) == section(id) { range_between(&visible, &anchor, id) } else { vec![id.to_owned()] };
+            if !ctrl {
+                state.selection.clear();
+            }
+            for i in ids {
+                if !state.selection.contains(&i) {
+                    state.selection.push(i);
+                }
+            }
+        } else {
+            if let Some(at) = state.selection.iter().position(|s| s == id) {
+                state.selection.remove(at);
+            } else {
+                state.selection.push(id.to_owned());
+            }
+            state.anchor = Some(id.to_owned());
+        }
+        state.selected = Some(id.to_owned());
+        self.redraw();
+    }
+    /// Plain click on a tree row: select it and open it (a part folds instead).
+    pub(super) fn click_node(&mut self, id: &str) {
+        let is_part = self.project.as_ref().and_then(|p| p.core.manifest.tree.find(id)).is_some_and(Node::is_part);
+        if let Some(state) = &mut self.project {
+            state.selected = Some(id.to_owned());
+            state.anchor = state.selected.clone();
+            state.selection.clear();
+        }
+        if is_part {
+            self.toggle_fold(id);
+        } else {
+            self.open_item(id);
+        }
+    }
+    /// Keys while the tree owns the keyboard. Returns whether the key was used.
+    pub(super) fn tree_key(&mut self, key: &Key, primary: bool, shift: bool) -> bool {
+        if self.project.is_none() || self.marked_ids().is_empty() {
+            return false;
+        }
+        match key {
+            Key::Named(NamedKey::Delete) => self.command(Command::Delete),
+            Key::Named(NamedKey::Enter) => {
+                if let Some(id) = self.selected_item() {
+                    self.click_node(&id);
+                }
+            }
+            Key::Named(step @ (NamedKey::ArrowUp | NamedKey::ArrowDown)) if !primary => {
+                let visible = self.visible_items();
+                let Some(state) = &mut self.project else { return false };
+                let here = state.selected.as_ref().and_then(|s| visible.iter().position(|v| v == s));
+                let next = match (here, matches!(step, NamedKey::ArrowDown)) {
+                    (Some(i), true) => (i + 1).min(visible.len().saturating_sub(1)),
+                    (Some(i), false) => i.saturating_sub(1),
+                    (None, _) => 0,
+                };
+                let Some(id) = visible.get(next).cloned() else { return false };
+                if shift {
+                    self.extend_selection(&id, false, true);
+                } else {
+                    state.selection.clear();
+                    state.selected = Some(id.clone());
+                    state.anchor = Some(id);
+                }
+                self.tree_reveal = true;
+            }
+            Key::Character(c) if primary && !shift && c.eq_ignore_ascii_case("a") => {
+                let Some(state) = &mut self.project else { return false };
+                let Some(section) = state.selected.as_ref().and_then(|s| state.core.manifest.tree.locate(s)).map(|(s, _)| s) else { return false };
+                let tree = &state.core.manifest.tree;
+                let mut all: Vec<String> = Vec::new();
+                fn walk(nodes: &[Node], out: &mut Vec<String>) {
+                    for n in nodes {
+                        out.push(n.id().to_owned());
+                        walk(n.children(), out);
+                    }
+                }
+                walk(tree.section(section), &mut all);
+                state.selection = all;
+            }
+            _ => return false,
+        }
+        self.redraw();
+        true
+    }
+    /// Moves the marked items up or down, keeping their order. Stops at the first one that cannot move.
+    pub(super) fn move_selected(&mut self, down: bool) {
+        let mut ids = self.marked_ids();
+        if down {
+            ids.reverse();
+        }
+        for id in ids {
+            if !self.move_item(&id, down) {
+                break;
+            }
+        }
+    }
+    /// Moves one item up or down among its siblings (or across a part boundary).
+    fn move_item(&mut self, id: &str, down: bool) -> bool {
+        let Some(state) = &mut self.project else { return false };
+        let Some((section, path)) = state.core.manifest.tree.locate(id) else { return false };
         let tree = &state.core.manifest.tree;
         let (parent, at) = (path[..path.len() - 1].to_vec(), *path.last().unwrap());
         let siblings = if parent.is_empty() { tree.section(section).len() } else { tree.get(section, &parent).map_or(0, |n| n.children().len()) };
@@ -408,7 +563,7 @@ impl App {
                 (parent[..parent.len() - 1].to_vec(), parent[parent.len() - 1] + 1)
             } else {
                 self.status = "Already the last one.".into();
-                return;
+                return false;
             }
         } else if at > 0 {
             match tree.get(section, &[parent.clone(), vec![at - 1]].concat()) {
@@ -419,17 +574,22 @@ impl App {
             (parent[..parent.len() - 1].to_vec(), parent[parent.len() - 1])
         } else {
             self.status = "Already the first one.".into();
-            return;
+            return false;
         };
-        match state.core.move_node(section, &path, &to_parent, to_index) {
+        let moved = match state.core.move_node(section, &path, &to_parent, to_index) {
             Ok(()) => {
                 state.changed = true;
                 self.tree_reveal = true;
                 self.dirty_session();
+                true
             }
-            Err(error) => self.status = error,
-        }
+            Err(error) => {
+                self.status = error;
+                false
+            }
+        };
         self.redraw();
+        moved
     }
     /// Drops `id` before `before` (or at the end of a section/part when `before` is `None`).
     pub(super) fn drop_node(&mut self, id: &str, target: DropTarget) {
@@ -905,8 +1065,10 @@ impl App {
         }
     }
     pub(super) fn finish_node_drag(&mut self, id: &str) {
+        let group = self.marked_ids();
+        let group = if group.len() > 1 && group.iter().any(|g| g == id) { group } else { vec![id.to_owned()] };
         let target = self.hit_at(self.mouse.x, self.mouse.y).and_then(|(_, hit)| match hit {
-            Hit::Node(other) if other != id => {
+            Hit::Node(other) if !group.contains(&other) => {
                 let tree = &self.project.as_ref()?.core.manifest.tree;
                 let dragged_part = tree.find(id).is_some_and(Node::is_part);
                 let target_part = tree.find(&other).is_some_and(Node::is_part);
@@ -920,7 +1082,9 @@ impl App {
             over_tree.then_some(DropTarget::End(section))
         });
         if let Some(target) = target {
-            self.drop_node(id, target);
+            for id in &group {
+                self.drop_node(id, target.clone());
+            }
         }
     }
 
@@ -1015,3 +1179,51 @@ pub enum DropTarget {
 
 #[allow(dead_code)]
 fn _keep(_: &manifest::Manifest) {}
+
+/// "4 chapters", "2 notes" or "3 items", for snapshot labels and prompts.
+pub(super) fn noun(tree: &manifest::Tree, ids: &[String]) -> String {
+    let kinds = |notes: bool| {
+        ids.iter().all(|id| tree.locate(id).is_some_and(|(s, _)| (s == Section::Notes) == notes) && tree.find(id).is_some_and(|n| !n.is_part()))
+    };
+    let word = if kinds(false) { "chapters" } else if kinds(true) { "notes" } else { "items" };
+    format!("{} {word}", ids.len())
+}
+
+/// The rows from `a` to `b` (either order) in `visible`; just `b` when one of them is not shown.
+fn range_between(visible: &[String], a: &str, b: &str) -> Vec<String> {
+    match (visible.iter().position(|v| v == a), visible.iter().position(|v| v == b)) {
+        (Some(x), Some(y)) => visible[x.min(y)..=x.max(y)].to_vec(),
+        _ => vec![b.to_owned()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids(n: usize) -> Vec<String> {
+        (1..=n).map(|i| format!("c{i}")).collect()
+    }
+    #[test]
+    fn range_runs_either_way() {
+        assert_eq!(range_between(&ids(8), "c2", "c4"), ["c2", "c3", "c4"]);
+        assert_eq!(range_between(&ids(8), "c6", "c5"), ["c5", "c6"]);
+    }
+    #[test]
+    fn range_with_a_hidden_end_is_the_clicked_row() {
+        assert_eq!(range_between(&ids(3), "gone", "c2"), ["c2"]);
+    }
+    #[test]
+    fn noun_counts_chapters_notes_and_mixes() {
+        let mut tree = manifest::Tree::default();
+        let (a, b) = (Node::chapter("A"), Node::chapter("B"));
+        let (ia, ib) = (a.id().to_owned(), b.id().to_owned());
+        tree.manuscript.push(a);
+        tree.manuscript.push(b);
+        let page = Node::page("N");
+        let ip = page.id().to_owned();
+        tree.notes.push(page);
+        assert_eq!(noun(&tree, &[ia.clone(), ib]), "2 chapters");
+        assert_eq!(noun(&tree, &[ia, ip]), "2 items");
+    }
+}
