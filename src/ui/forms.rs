@@ -1031,6 +1031,7 @@ impl App {
 
     /// Keyboard input for the open form. Returns false for keys the form leaves to the window.
     pub(super) fn form_key(&mut self, key: &Key, text: Option<&str>) -> bool {
+        let key = &platform::caret_key(key.clone(), self.modifiers).0;
         let primary = platform::primary(self.modifiers);
         let Some(form) = &mut self.form else { return false };
         if let Some((field, _)) = form.dropdown {
@@ -1136,7 +1137,7 @@ impl App {
                     Err(error) => self.status = error,
                 }
             }
-            Key::Character(_) | Key::Named(NamedKey::Space) if typed && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() => {
+            Key::Character(_) | Key::Named(NamedKey::Space) if typed && !platform::chord(self.modifiers) && self.preedit.is_empty() => {
                 let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
                     form.type_text(text);

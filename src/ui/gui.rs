@@ -454,7 +454,7 @@ impl App {
                 self.renderer.fill_round(title, self.su(5.), hovered(p.surface, p));
             }
             self.put(name, title, 13., p.text, Face::Normal, Align::Center);
-            if self.modifiers.alt_key() {
+            if platform::menu_mnemonics() && self.modifiers.alt_key() {
                 // Underline the Alt+letter that opens this menu.
                 let size = 13. * self.scale;
                 let at = name.to_lowercase().find(*mnemonic).unwrap_or(0);
@@ -1319,7 +1319,8 @@ impl App {
         }
         let top = bar_y + height as i32 + self.s(8.);
         if list.is_empty() {
-            let message = if total == 0 { "No comments yet. Select some text and press Ctrl+Alt+M to leave a note for yourself or a reader." } else { "No comments match these filters." };
+            let empty = format!("No comments yet. Select some text and press {} to leave a note for yourself or a reader.", commands::display_shortcut("Ctrl+Alt+M"));
+            let message = if total == 0 { empty.as_str() } else { "No comments match these filters." };
             self.label(message, Rect { x: rect.x + self.s(14.), y: top + self.s(6.), width: rect.width.saturating_sub(self.su(28.)), height: self.su(80.) }, 12. * self.scale, p.muted);
             return;
         }

@@ -96,9 +96,13 @@ pub struct CommandInfo {
     pub shortcut: &'static str,
 }
 macro_rules! commands {
-    ($(($id:expr, $key:literal, $name:literal, $shortcut:literal)),* $(,)?) => {
+    ($(($id:expr, $key:literal, $name:literal, $shortcut:expr)),* $(,)?) => {
         pub const COMMANDS: &[CommandInfo] = &[$(CommandInfo { id: $id, key: $key, name: $name, shortcut: $shortcut }),*];
     };
+}
+/// A default that differs on a Mac, where the usual key belongs to the system or to habit.
+const fn mac(mac: &'static str, other: &'static str) -> &'static str {
+    if cfg!(target_os = "macos") { mac } else { other }
 }
 commands![
     (Command::NewProject, "new_project", "New project…", "Ctrl+Shift+N"),
@@ -112,7 +116,7 @@ commands![
     (Command::CloudDisconnect, "cloud_disconnect", "Disconnect from cloud", ""),
     (Command::CloudSave, "cloud_save", "Save project to cloud", ""),
     (Command::CloudOpen, "cloud_open", "Open from cloud…", ""),
-    (Command::Quit, "quit", "Exit", "Alt+F4"),
+    (Command::Quit, "quit", "Exit", mac("Ctrl+Q", "Alt+F4")),
     (Command::NewChapter, "new_chapter", "New chapter", "Ctrl+N"),
     (Command::NewPage, "new_page", "New note", "Ctrl+Alt+N"),
     (Command::Rename, "rename", "Rename…", "F2"),
@@ -127,7 +131,7 @@ commands![
     (Command::SplitDown, "split_down", "Split down", "Ctrl+Shift+\\"),
     (Command::CloseSplit, "close_split", "Close split pane", ""),
     (Command::Undo, "undo", "Undo", "Ctrl+Z"),
-    (Command::Redo, "redo", "Redo", "Ctrl+Y"),
+    (Command::Redo, "redo", "Redo", mac("Ctrl+Shift+Z", "Ctrl+Y")),
     (Command::SelectAll, "select_all", "Select all", "Ctrl+A"),
     (Command::Copy, "copy", "Copy", "Ctrl+C"),
     (Command::Cut, "cut", "Cut", "Ctrl+X"),
@@ -175,7 +179,7 @@ commands![
     (Command::PreviewView, "preview_view", "Soft preview (editable)", ""),
     (Command::HideNotes, "hide_notes", "Hide notes", "Ctrl+Shift+Y"),
     (Command::PreviewNotes, "preview_notes", "Show notes in the preview", ""),
-    (Command::Focus, "focus", "Full screen", "F11"),
+    (Command::Focus, "focus", "Full screen", mac("Ctrl+Alt+F", "F11")),
     (Command::HideInterface, "hide_interface", "Hide or show all panels", "Tab"),
     (Command::Settings, "settings", "Settings…", "Ctrl+,"),
     (Command::Keymap, "keymap", "Keyboard shortcuts…", ""),
@@ -258,9 +262,12 @@ pub fn resolve(
     })
 }
 
-/// A stored shortcut as shown to people: Cmd for Ctrl on a Mac, arrows as arrows.
+/// A stored shortcut as shown to people: Cmd and Option on a Mac, arrows as arrows.
 pub fn display_shortcut(raw: &str) -> String {
-    raw.replace("Ctrl", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" })
+    let mac = cfg!(target_os = "macos");
+    // Cmd+Tab belongs to macOS, so the tab shortcuts keep Ctrl there.
+    raw.replace("Ctrl", if mac && !raw.ends_with("Tab") { "Cmd" } else { "Ctrl" })
+        .replace("Alt", if mac { "Option" } else { "Alt" })
         .replace("ArrowUp", "↑")
         .replace("ArrowDown", "↓")
         .replace("ArrowLeft", "←")
@@ -272,7 +279,8 @@ mod tests {
     use super::*;
     #[test]
     fn shortcuts_are_shown_with_arrows() {
-        assert_eq!(display_shortcut("Alt+ArrowUp"), "Alt+↑");
+        assert_eq!(display_shortcut("Alt+ArrowUp"), if cfg!(target_os = "macos") { "Option+↑" } else { "Alt+↑" });
+        assert_eq!(display_shortcut("Ctrl+Shift+Tab"), "Ctrl+Shift+Tab");
         assert_eq!(display_shortcut("Ctrl+Shift+ArrowRight"), format!("{}+Shift+→", if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" }));
         assert_eq!(display_shortcut("F11"), "F11");
     }

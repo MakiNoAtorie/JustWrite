@@ -77,7 +77,8 @@ your machine.
 
 ## Keys
 
-Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on a Mac.
+Every command can be remapped (Settings ▸ Keyboard shortcuts); Ctrl is Cmd on a Mac,
+where Exit is Cmd+Q, Redo Cmd+Shift+Z, Full screen Cmd+Option+F, and the tabs still change with Ctrl+Tab.
 
 | | |
 | - | - |

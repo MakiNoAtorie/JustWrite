@@ -633,7 +633,7 @@ impl App {
         let list = Rect { width: left_width, ..area };
         self.renderer.fill(Rect { x: list.x + list.width as i32 - 1, width: 1, ..list }, p.border);
         if v.snapshots.is_empty() {
-            self.put("No snapshots on this line yet. Press Ctrl+Alt+S to take one.", Rect { x: list.x + self.s(16.), y: list.y + self.s(16.), width: list.width - self.su(32.), height: self.su(30.) }, 12.5, p.muted, Face::Normal, Align::Left);
+            self.put(&format!("No snapshots on this line yet. Press {} to take one.", commands::display_shortcut("Ctrl+Alt+S")), Rect { x: list.x + self.s(16.), y: list.y + self.s(16.), width: list.width - self.su(32.), height: self.su(30.) }, 12.5, p.muted, Face::Normal, Align::Left);
         }
         let row_height = self.s(58.);
         let inset = self.s(6.);

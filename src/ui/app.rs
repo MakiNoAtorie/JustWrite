@@ -1349,7 +1349,7 @@ impl App {
         );
         let function_key = token.strip_prefix('f').is_some_and(|n| n.parse::<u8>().is_ok());
         if !(primary || alt || function_key) {
-            self.note("Include Ctrl or Alt (or use a function key) so typing isn't affected.");
+            self.note(&format!("Include {} (or use a function key) so typing isn't affected.", commands::display_shortcut("Ctrl or Alt")));
             self.redraw();
             return true;
         }
@@ -1587,6 +1587,7 @@ impl App {
         self.redraw();
     }
     fn overlay_key(&mut self, key: &Key, text: Option<&str>) -> bool {
+        let key = &platform::caret_key(key.clone(), self.modifiers).0;
         let Some(overlay) = &self.overlay else {
             return false;
         };
@@ -1743,7 +1744,7 @@ impl App {
                 }
             }
             Key::Character(_) | Key::Named(NamedKey::Space)
-                if editable && !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
+                if editable && !platform::chord(self.modifiers) && self.preedit.is_empty() =>
             {
                 let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|s| !s.chars().any(char::is_control)) {
@@ -2142,7 +2143,8 @@ impl App {
         if self.screen_key(&key) {
             return;
         }
-        let primary = platform::primary(self.modifiers);
+        // Cmd+Tab belongs to macOS, so Ctrl+Tab changes tabs there as it does elsewhere.
+        let primary = platform::primary(self.modifiers) || (self.modifiers.control_key() && matches!(key, Key::Named(NamedKey::Tab)));
         let shift = self.modifiers.shift_key();
         if self.focus == Focus::Tree && self.screen.is_none() && !self.modifiers.alt_key() && self.tree_key(&key, primary, shift) {
             return;
@@ -2157,7 +2159,7 @@ impl App {
             self.command(command);
             return;
         }
-        if self.modifiers.alt_key() && !primary && !shift {
+        if platform::menu_mnemonics() && self.modifiers.alt_key() && !primary && !shift {
             let index = crate::ui::menu::MENUS
                 .iter()
                 .position(|(_, mnemonic, _)| shortcut_key == mnemonic.to_string());
@@ -2204,6 +2206,7 @@ impl App {
             return;
         }
         let mut edited = false;
+        let (key, primary) = platform::caret_key(key, self.modifiers);
         match key {
             Key::Named(NamedKey::ArrowLeft) => {
                 tab.document.horizontal(false, shift, primary);
@@ -2293,7 +2296,7 @@ impl App {
                 edited = true;
             }
             Key::Character(_) | Key::Named(NamedKey::Space)
-                if !primary && !self.modifiers.alt_key() && self.preedit.is_empty() =>
+                if !platform::chord(self.modifiers) && self.preedit.is_empty() =>
             {
                 let text = if matches!(key, Key::Named(NamedKey::Space)) { Some(text.unwrap_or(" ")) } else { text };
                 if let Some(text) = text.filter(|t| !t.chars().any(char::is_control)) {
@@ -2643,8 +2646,8 @@ impl App {
                     Rect {
                         x: rect.x + x as i32,
                         y: rect.y + y as i32,
-                        width: 300,
-                        height: 32,
+                        width: self.su(600.),
+                        height: (self.settings.font_size * self.scale * 1.6) as u32,
                     },
                     self.settings.font_size * self.scale,
                     palette.accent,
@@ -3551,7 +3554,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let shortcut = match &event.logical_key {
+                let logical = platform::shortcut_key(&event, self.modifiers);
+                let shortcut = match &logical {
                     Key::Character(c) => c.to_lowercase(),
                     Key::Named(key) => format!("{key:?}").to_lowercase(),
                     _ => String::new(),
@@ -3605,7 +3609,7 @@ impl ApplicationHandler<UserEvent> for App {
                 MouseButton::Left | MouseButton::Middle | MouseButton::Right
             ) =>
             {
-                self.mouse_down(button)
+                self.mouse_down(platform::button(button, self.modifiers))
             }
             WindowEvent::MouseInput {
                 state: ElementState::Released,

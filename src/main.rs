@@ -6,7 +6,11 @@ use winit::event_loop::{ControlFlow, EventLoop};
 
 fn main() {
     let started = Instant::now();
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // The stock macOS menu quits on Cmd+Q without asking about unsaved text and takes Cmd+H.
+    #[cfg(target_os = "macos")]
+    winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
+    let event_loop = builder
         .build()
         .expect("Cannot create native event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
