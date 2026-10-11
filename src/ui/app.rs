@@ -1897,6 +1897,7 @@ impl App {
             Command::Snapshot => self.snapshot_form(),
             Command::Export => self.export_form(),
             Command::Preview => self.open_preview(),
+            Command::PreviewChapter => self.preview_chapter(),
             Command::BookDetails => self.book_form(),
             Command::ProjectSettings => self.project_form(),
             Command::ToggleTree => self.show_tree = !self.show_tree,

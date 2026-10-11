@@ -345,6 +345,24 @@ impl App {
             self.form_extra("preview");
         }
     }
+    /// The paged preview of the chapter in the active tab, with the project's default preset.
+    pub(super) fn preview_chapter(&mut self) {
+        let Some(item) = self.active_item() else {
+            self.status = "Open a chapter to preview it.".into();
+            return;
+        };
+        self.flush_tabs();
+        let Some(state) = &self.project else { return };
+        if state.core.manifest.tree.locate(&item).is_none_or(|(s, _)| s != crate::jw::manifest::Section::Manuscript) {
+            self.status = "Only manuscript chapters have a paged preview.".into();
+            return;
+        }
+        let preset = state.presets.get(&self.settings.default_preset).unwrap_or_default();
+        match crate::export::model::Source::from_project(&state.core, jw::time::now()) {
+            Ok(source) => self.open_preview_for(ExportRequest { source: Arc::new(source), scope: crate::export::model::Scope::Chapters(vec![item]), preset }),
+            Err(error) => self.status = error.to_string(),
+        }
+    }
     pub(super) fn open_preview_for(&mut self, request: ExportRequest) {
         self.preview_version += 1;
         let version = self.preview_version;

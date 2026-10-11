@@ -353,6 +353,7 @@ impl App {
             | Command::Snapshot
             | Command::Export
             | Command::Preview
+            | Command::PreviewChapter
             | Command::BookDetails
             | Command::ProjectSettings
             | Command::ShowHistory
@@ -683,7 +684,7 @@ impl App {
             Tool::Button("+", Face::Normal, command(Command::FontLarger)),
             Tool::Gap,
             Tool::Button("Raw", Face::Normal, command(Command::RawView)),
-            Tool::Button("Preview", Face::Normal, command(Command::PreviewView)),
+            Tool::Button("Preview", Face::Normal, command(Command::PreviewChapter)),
             Tool::Gap,
             Tool::Button("Note", Face::Normal, command(Command::ToggleNote)),
             Tool::Button("Comment", Face::Normal, command(Command::AddComment)),
@@ -723,7 +724,6 @@ impl App {
                 Hit::Command(Command::ToggleNote) => format.note,
                 Hit::Command(c @ (Command::AlignLeft | Command::AlignJustify)) => self.checked(*c),
                 Hit::Command(Command::RawView) => !self.settings.preview,
-                Hit::Command(Command::PreviewView) => self.settings.preview,
                 _ => false,
             };
             let enabled = match &hit {
