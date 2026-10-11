@@ -133,6 +133,10 @@ pub struct ProjectState {
     pub panel: Panel,
     /// The `.jw` changed outside the program; packing waits for the author's decision.
     pub blocked: bool,
+    /// The project has a file in the cloud folder (known after the first look at the cloud).
+    pub cloud_linked: bool,
+    /// The last chapter save that is not packed yet.
+    pub last_save: Option<Instant>,
 }
 
 /// A comment's range in an open tab, in editor coordinates.
@@ -228,6 +232,8 @@ impl App {
             packing: false,
             panel: Panel::Scenes,
             blocked: false,
+            cloud_linked: false,
+            last_save: None,
         });
         self.dirty_session();
         let mut note = String::new();
@@ -264,8 +270,13 @@ impl App {
             let _ = state.history.capture_auto(&state.core, "Closed", now);
         }
         let _ = history::prune::prune(&mut state.history, &state.core, now);
+        let linked = state.cloud_linked.then(|| state.core.path.clone());
         match state.core.close() {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(jw) = linked {
+                    self.cloud_flush(jw);
+                }
+            }
             Err(error) => self.fail(format!("Could not save the project file: {error}")),
         }
     }
@@ -632,6 +643,7 @@ impl App {
             let _ = state.core.set_words(&id, words as u32);
         }
         state.changed = true;
+        state.last_save = Some(Instant::now());
     }
     pub(super) fn pack_project(&mut self, overwrite: bool) {
         let Some(state) = &mut self.project else { return };
@@ -640,6 +652,7 @@ impl App {
         }
         state.packing = true;
         state.last_pack = Instant::now();
+        state.last_save = None;
         let (work, path) = (state.core.work.clone(), state.core.path.clone());
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -848,6 +861,7 @@ impl App {
             }
             Choose::Cover => self.cover_chosen(path),
             Choose::Export => self.run_export(path),
+            Choose::CloudSave => self.cloud_fetch(path),
         }
     }
     /// Opens a project, unless it is the one already open.
@@ -884,6 +898,7 @@ impl App {
                         }
                     }
                 }
+                self.cloud_sync();
             }
             Err(Ok(message)) => {
                 self.pending_session = None;
@@ -904,6 +919,7 @@ impl App {
                 if self.status.is_empty() || self.status == "Saving…" || self.status == "Saved" {
                     self.status = "Saved".into();
                 }
+                self.cloud_sync();
             }
             Err(None) => {
                 state.blocked = true;
@@ -1134,8 +1150,10 @@ impl App {
         let (due_pack, due_beat, due_snapshot) = {
             let state = self.project.as_ref()?;
             let auto = state.core.manifest.settings.snapshots.auto_minutes;
+            // A linked project is packed soon after the writing stops, so the cloud gets it.
+            let quick = state.last_save.filter(|_| state.cloud_linked).map(|saved| saved + super::cloud::QUIET);
             (
-                state.last_pack + repack,
+                quick.map_or(state.last_pack + repack, |quick| quick.min(state.last_pack + repack)),
                 state.last_beat + beat,
                 (auto > 0).then(|| state.last_snapshot + Duration::from_secs(auto as u64 * 60)),
             )
@@ -1154,6 +1172,7 @@ impl App {
         if now >= due_pack {
             self.sync_stale_marks();
             self.project.as_mut()?.last_pack = now;
+            self.project.as_mut()?.last_save = None;
             if self.project.as_ref()?.core.is_dirty() && !self.project.as_ref()?.blocked {
                 self.pack_project(false);
             }
@@ -1167,6 +1186,13 @@ impl App {
                 state.changed = false;
                 let _ = history::prune::prune(&mut state.history, &state.core, stamp);
             }
+        }
+        if self.project.as_ref()?.cloud_linked {
+            if now >= self.cloud_pull + super::cloud::PULL {
+                self.cloud_sync();
+                self.cloud_pull = now;
+            }
+            next = next.min(self.cloud_pull + super::cloud::PULL);
         }
         Some(next.max(now + Duration::from_secs(5)))
     }

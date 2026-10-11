@@ -1,7 +1,8 @@
 # JustWrite
 
-A small, fast, native editor for writing a novel. No web view, no account, no cloud: one window,
-your manuscript, and a file you own.
+A small, fast, native editor for writing a novel. No web view, no JustWrite account, no JustWrite
+server: one window, your manuscript, and a file you own. Saving to your own Nextcloud, OneDrive or
+Google Drive is optional and off until you connect one.
 
 JustWrite keeps a book as a project (`.jw`, a plain ZIP) with a **Manuscript** of parts and
 chapters and a **Notes & research** section of pages. It conceals the `*` and `**` markers while

@@ -105,9 +105,35 @@ Notes marker and style, hide notes, project language, auto-typography, autosave 
 auto-snapshot intervals, snapshot pruning, editor appearance, the default export preset and
 shortcuts.
 
+## Cloud
+
+Optional and off until a service is connected (File, Connect to cloud…): Nextcloud by WebDAV,
+OneDrive (app folder) or Google Drive (files the app made). One service at a time. The local `.jw`
+stays the master copy and the app works offline as before.
+
+* The whole `.jw` goes to a `JustWrite` folder in the service, one file per project.
+* Upload: after each save of the `.jw`; a linked project is saved 20 s after the writing stops,
+  and when the project closes.
+* Download: when a linked project opens, when the window gets the focus, and every 60 s. A newer
+  cloud version replaces the local file only when nothing local is unsaved.
+* Never overwrite: an upload states the cloud version it replaces.
+* When both computers changed the project, the cloud version is merged in through the history.
+  It is kept whole on a new line (`Cloud <date>`), with the snapshots only that computer had, and
+  the text here is saved in a safety snapshot first. The two are compared with the newest snapshot
+  both have: a chapter changed on one side is taken from that side; a chapter changed on both is
+  put together paragraph by paragraph; where both changed the same paragraph the text here stays
+  and the author is told. A chapter list changed on both sides stays as it is here, with the
+  chapters added there at its end. Review comments, book details and presets stay as they are
+  here. The result is recorded as a snapshot and uploaded.
+* A cloud file of the same name that is another project is not touched: the local project goes
+  up as `<name> (conflict, <computer>, <date>).jw`.
+* The sign-in (app password or refresh token) is in the operating system's secret store. OneDrive
+  and Google Drive need the client id of an app registration, in Settings.
+
 ## Non-goals
 
-No cloud, accounts or collaboration; no plugin system; no merging between lines.
+No JustWrite account or server, no collaboration; no plugin system; no merging between lines
+(the merge of a cloud version is the one exception).
 
 ## Build notes
 

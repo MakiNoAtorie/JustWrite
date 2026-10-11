@@ -31,6 +31,8 @@ pub mod forms;
 pub mod screens;
 #[path = "spelling.rs"]
 pub mod spelling;
+#[path = "cloud.rs"]
+pub mod cloud;
 use forms::{ExportRequest, Form};
 use project::{Panel, ProjectState};
 use screens::{Screen, ScreenAct};
@@ -84,6 +86,7 @@ pub enum UserEvent {
     SpellerLoaded(Result<Arc<crate::core::spell::Speller>, String>),
     ImportRead(PathBuf, Result<Box<crate::import::Raw>, String>),
     PreviewPage(u64, usize, u32, Arc<crate::export::typeset::Bitmap>),
+    Cloud(cloud::CloudDone),
 }
 #[derive(Clone, Copy)]
 pub enum Choose {
@@ -95,6 +98,8 @@ pub enum Choose {
     Cover,
     /// Where to write an export.
     Export,
+    /// Where to put a project that comes from the cloud.
+    CloudSave,
 }
 struct Scan {
     tab: u64,
@@ -189,12 +194,12 @@ fn default_window_size(screen_width: f64, screen_height: f64) -> (f64, f64) {
 
 /// How long a status message stays in the footer before it fades.
 const STATUS_LIFETIME: Duration = Duration::from_secs(10);
+const GLIDE_FRAME: Duration = Duration::from_millis(16);
 
 pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     window: Option<Arc<Window>>,
     surface: Option<softbuffer::Surface<Arc<Window>, Arc<Window>>>,
-const GLIDE_FRAME: Duration = Duration::from_millis(16);
     renderer: CpuRenderer,
     fonts: FontSystem,
     labels: HashMap<String, Buffer>,
@@ -264,13 +269,23 @@ const GLIDE_FRAME: Duration = Duration::from_millis(16);
     system_light: bool,
     scale_override: Option<f32>,
     hover_since: Option<Instant>,
+    /// A jump still on its way: the tab, the tops left to show (taken from the end) and when the next is due.
+    glide: Option<(u64, Vec<usize>, Instant)>,
     recent: Vec<PathBuf>,
     saved_window: Option<WindowState>,
     file_type_registered: bool,
     spell: spelling::SpellState,
     pending_session: Option<SessionSplit>,
-    /// A jump still on its way: the tab, the tops left to show (taken from the end) and when the next is due.
-    glide: Option<(u64, Vec<usize>, Instant)>,
+    /// Cloud work is under way on a worker thread.
+    cloud_busy: bool,
+    /// A look at the cloud was asked for meanwhile.
+    cloud_again: bool,
+    /// The cloud state last shown in the status bar.
+    cloud_note: String,
+    cloud_pull: Instant,
+    /// The projects in the cloud folder, for the "Open from cloud" list, and the one picked.
+    cloud_files: Vec<String>,
+    cloud_picked: Option<String>,
     /// Dialogs with several fields, and the large screens (history, compare, preview).
     form: Option<Form>,
     /// The export dialog, kept while its preview is on screen.
@@ -427,11 +442,18 @@ impl App {
             system_light: false,
             scale_override: std::env::var("JAME_SCALE").ok().and_then(|v| v.parse().ok()),
             hover_since: None,
+            glide: None,
             recent: Vec::new(),
             saved_window: None,
             file_type_registered: false,
             spell: spelling::SpellState::new(proxy_for_spell),
             pending_session: None,
+            cloud_busy: false,
+            cloud_again: false,
+            cloud_note: String::new(),
+            cloud_pull: started,
+            cloud_files: Vec::new(),
+            cloud_picked: None,
             form: None,
             parked_form: None,
             screen: None,
@@ -442,7 +464,6 @@ impl App {
             pending_import: None,
             pending_jump: None,
         }
-            glide: None,
     }
     /// Reports a failure that must not be missed: unlike other messages it does not fade and
     /// typing does not clear it.
@@ -554,6 +575,7 @@ impl App {
         let parent = self.window.clone();
         let name = self.project.as_ref().map(|p| p.core.title().to_owned());
         let export_name = self.pending_export.as_ref().map(|(_, n)| n.clone()).unwrap_or_else(|| "manuscript".into());
+        let cloud_name = self.cloud_picked.clone().unwrap_or_default();
         std::thread::spawn(move || {
             let jw: &[platform::Filter] = &[("JustWrite project", &["jw"])];
             let path = match choice {
@@ -566,6 +588,7 @@ impl App {
                     let extension = Path::new(&export_name).extension().and_then(|e| e.to_str()).unwrap_or("docx").to_owned();
                     platform::choose_save(parent, "Export to", &export_name, &[("Export", &[extension.as_str()])])
                 }
+                Choose::CloudSave => platform::choose_save(parent, "Save the cloud project as", &cloud_name, jw).map(|p| p.with_extension("jw")),
             };
             let _ = proxy.send_event(UserEvent::Chosen(path, choice));
         });
@@ -937,6 +960,14 @@ impl App {
                     })
                     .collect();
             }
+            Kind::Cloud => {
+                overlay.rows = self
+                    .cloud_files
+                    .iter()
+                    .filter(|name| workspace::fuzzy(&query, name).is_some())
+                    .map(|name| Row { label: name.trim_end_matches(".jw").into(), hint: String::new(), action: Action::Cloud(name.clone()) })
+                    .collect();
+            }
             Kind::Setting(key) if key.ends_with("font") => {
                 overlay.rows = self
                     .font_names
@@ -965,6 +996,7 @@ impl App {
                         let name = (at < text.len_lines()).then(|| prose::scene_name(&text.line(at).to_string()).map(str::to_owned)).flatten();
                         let snippet = name.unwrap_or_else(|| {
                             (at..text.len_lines())
+                                .filter(|l| tab.blocks.quote_span(*l).is_none())
                                 .map(|l| text.line(l).to_string())
                                 .map(|l| l.trim().to_owned())
                                 .find(|l| !l.is_empty() && !prose::is_scene_break(l) && prose::scene_name(l).is_none())
@@ -996,7 +1028,6 @@ impl App {
                                 Some(part) => format!("{} · {}", part.title(), node.title()),
                                 None => node.title().to_owned(),
                             };
-                                .filter(|l| tab.blocks.quote_span(*l).is_none())
                             if let Some(score) = workspace::fuzzy(&query, &name) {
                                 rows.push((score, Row {
                                     label: node.title().to_owned(),
@@ -1172,6 +1203,10 @@ impl App {
             Action::Project(path) => {
                 self.overlay = None;
                 self.open_project(path, false);
+            }
+            Action::Cloud(name) => {
+                self.overlay = None;
+                self.cloud_pick(name);
             }
             Action::Shortcut(key) => {
                 let query = self
@@ -1757,6 +1792,10 @@ impl App {
                     self.title();
                 }
             }
+            Command::CloudConnect => self.cloud_connect_form(),
+            Command::CloudDisconnect => self.cloud_disconnect(),
+            Command::CloudSave => self.cloud_save(),
+            Command::CloudOpen => self.cloud_open(),
             Command::NewChapter => self.new_node("chapter", ""),
             Command::NewPage => self.new_note_form(),
             Command::Rename if self.marked_ids().len() > 1 => self.status = "Select one item to rename.".into(),
@@ -1886,6 +1925,16 @@ impl App {
                     }
                 }
             }
+            Command::Epigraph => {
+                if let Some(id) = editable {
+                    let tab = self.tabs.get_mut(&id).unwrap();
+                    let added = tab.document.insert_epigraph();
+                    tab.view.ensure_cursor(&tab.document);
+                    if added {
+                        self.edited(id);
+                    }
+                }
+            }
             Command::AlignLeft | Command::AlignJustify => {
                 self.settings.justify = command == Command::AlignJustify;
                 self.save_settings();
@@ -1925,16 +1974,6 @@ impl App {
                 let mut leaves = Vec::new();
                 self.split.leaves(Rect { x: 0, y: 0, width: 1, height: 1 }, &mut leaves);
                 let from = self.active_pane;
-            Command::Epigraph => {
-                if let Some(id) = editable {
-                    let tab = self.tabs.get_mut(&id).unwrap();
-                    let added = tab.document.insert_epigraph();
-                    tab.view.ensure_cursor(&tab.document);
-                    if added {
-                        self.edited(id);
-                    }
-                }
-            }
                 if let Some(target) = leaves.iter().map(|(id, _)| *id).find(|id| *id != from) {
                     let moved = self.split.pane(from).map(|p| p.tabs.clone()).unwrap_or_default();
                     if let Some(pane) = self.split.pane_mut(from) {
@@ -2455,6 +2494,19 @@ impl App {
                 next = Some(next.map_or(due, |other: Instant| other.min(due)));
             }
         }
+        if let Some((id, mut frames, mut due)) = self.glide.take() {
+            if due <= now {
+                if let (Some(top), Some(tab)) = (frames.pop(), self.tabs.get_mut(&id)) {
+                    tab.view.top = top.min(tab.document.text.len_chars());
+                    self.redraw();
+                }
+                due = now + GLIDE_FRAME;
+            }
+            if !frames.is_empty() && self.tabs.contains_key(&id) {
+                next = Some(next.map_or(due, |other: Instant| other.min(due)));
+                self.glide = Some((id, frames, due));
+            }
+        }
         if let Some(due) = self.session_due {
             if due <= now {
                 self.session_due = None;
@@ -2494,19 +2546,6 @@ impl App {
         self.pane_rects.clear();
         let palette = Palette::new(self.settings.light(), self.settings.accent_color());
         let full = Rect {
-        if let Some((id, mut frames, mut due)) = self.glide.take() {
-            if due <= now {
-                if let (Some(top), Some(tab)) = (frames.pop(), self.tabs.get_mut(&id)) {
-                    tab.view.top = top.min(tab.document.text.len_chars());
-                    self.redraw();
-                }
-                due = now + GLIDE_FRAME;
-            }
-            if !frames.is_empty() && self.tabs.contains_key(&id) {
-                next = Some(next.map_or(due, |other: Instant| other.min(due)));
-                self.glide = Some((id, frames, due));
-            }
-        }
             x: 0,
             y: 0,
             width: size.width,
@@ -3238,6 +3277,7 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Chosen(Some(path), choice) => self.chosen(path, choice),
             UserEvent::Chosen(None, _) => {
+                self.cloud_picked = None;
                 self.after_save = None;
                 self.pending_import = None;
                 self.pending_export = None;
@@ -3427,6 +3467,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::SpellerLoaded(result) => self.speller_loaded(result),
             UserEvent::ImportRead(path, result) => self.import_read(path, result),
             UserEvent::PreviewPage(version, page, q, bitmap) => self.preview_page(version, page, q, bitmap),
+            UserEvent::Cloud(done) => self.cloud_done(done),
             UserEvent::SessionSaved(result) => match result {
                 Ok(()) if self.session_closing => event_loop.exit(),
                 Ok(()) => {}
@@ -3626,6 +3667,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.drag = None;
                 self.modifiers = ModifiersState::empty();
             }
+            WindowEvent::Focused(true) => self.cloud_sync(),
             _ => {}
         }
     }

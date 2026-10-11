@@ -8,7 +8,7 @@
 //! ```
 
 use crate::jw::{
-    Project,
+    Manifest, Project,
     manifest::{COMMENTS, HISTORY, Section, Tree},
     workdir::WorkDir,
 };
@@ -80,10 +80,10 @@ impl Default for Lines {
 pub fn hash(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
-fn blob_path(hash: &str) -> String {
+pub(crate) fn blob_path(hash: &str) -> String {
     format!("{HISTORY}/blobs/{hash}")
 }
-fn snap_path(id: &str) -> String {
+pub(crate) fn snap_path(id: &str) -> String {
     format!("{HISTORY}/snap/{id}.json")
 }
 const INDEX: &str = "history/index.jsonl";
@@ -103,23 +103,28 @@ pub struct State {
 impl State {
     /// The working copy as it is on disk now.
     pub fn working(project: &Project, write_blobs: bool) -> io::Result<State> {
+        Self::of(&project.work, &project.manifest, write_blobs.then_some(&project.work))
+    }
+    /// A working copy as it is on disk. Its text is also stored as blobs in `blobs`, which can
+    /// be the working copy of another computer's version of the project.
+    pub fn of(work: &WorkDir, manifest: &Manifest, blobs: Option<&WorkDir>) -> io::Result<State> {
         let mut items = BTreeMap::new();
         for section in [Section::Manuscript, Section::Notes] {
-            for (node, _) in project.manifest.tree.leaves(section) {
+            for (node, _) in manifest.tree.leaves(section) {
                 let Some(file) = node.file() else { continue };
-                let bytes = project.work.read(&file).unwrap_or_default();
+                let bytes = work.read(&file).unwrap_or_default();
                 let blob = hash(&bytes);
-                if write_blobs {
-                    project.work.write_once(&blob_path(&blob), &bytes)?;
+                if let Some(store) = blobs {
+                    store.write_once(&blob_path(&blob), &bytes)?;
                 }
                 items.insert(node.id().to_owned(), ItemEntry { blob, words: node.words() });
             }
         }
-        let comments = match project.work.read(COMMENTS) {
+        let comments = match work.read(COMMENTS) {
             Ok(bytes) if !bytes.is_empty() => {
                 let blob = hash(&bytes);
-                if write_blobs {
-                    project.work.write_once(&blob_path(&blob), &bytes)?;
+                if let Some(store) = blobs {
+                    store.write_once(&blob_path(&blob), &bytes)?;
                 }
                 Some(blob)
             }
@@ -127,8 +132,8 @@ impl State {
         };
         Ok(State {
             label: "Current text".into(),
-            title: project.manifest.title.clone(),
-            tree: project.manifest.tree.clone(),
+            title: manifest.title.clone(),
+            tree: manifest.tree.clone(),
             items,
             comments,
             snapshot: None,
@@ -203,7 +208,7 @@ impl History {
         }
         History { snapshots, lines }
     }
-    fn save_lines(&self, work: &WorkDir) -> io::Result<()> {
+    pub(crate) fn save_lines(&self, work: &WorkDir) -> io::Result<()> {
         work.write(LINES, serde_json::to_string_pretty(&self.lines).map_err(io::Error::other)?.as_bytes())
     }
     pub fn current_line(&self) -> &str {
@@ -258,6 +263,21 @@ impl History {
         restored_from: Option<String>,
     ) -> io::Result<SnapshotMeta> {
         let state = State::working(project, true)?;
+        let line = self.lines.current.clone();
+        self.record(&project.work, &state, kind, message, &line, now, restored_from)
+    }
+    /// Records `state`, whose blobs are stored already, as a snapshot on `line`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record(
+        &mut self,
+        work: &WorkDir,
+        state: &State,
+        kind: Kind,
+        message: &str,
+        line: &str,
+        now: i64,
+        restored_from: Option<String>,
+    ) -> io::Result<SnapshotMeta> {
         let id = crate::jw::new_id();
         let detail = SnapshotDetail {
             id: id.clone(),
@@ -266,19 +286,19 @@ impl History {
             items: state.items.clone(),
             comments: state.comments.clone(),
         };
-        project.work.write(&snap_path(&id), serde_json::to_string(&detail).map_err(io::Error::other)?.as_bytes())?;
+        work.write(&snap_path(&id), serde_json::to_string(&detail).map_err(io::Error::other)?.as_bytes())?;
         let meta = SnapshotMeta {
             id,
             time: now,
             message: message.trim().to_owned(),
             kind,
-            line: self.lines.current.clone(),
+            line: line.to_owned(),
             words: state.words(),
             items: state.items.len() as u32,
             signature: state.signature(),
             restored_from,
         };
-        project.work.append(INDEX, format!("{}\n", serde_json::to_string(&meta).map_err(io::Error::other)?).as_bytes())?;
+        work.append(INDEX, format!("{}\n", serde_json::to_string(&meta).map_err(io::Error::other)?).as_bytes())?;
         self.snapshots.push(meta.clone());
         Ok(meta)
     }

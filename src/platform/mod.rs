@@ -198,6 +198,11 @@ fn open_with_system(target: &str) -> bool {
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().is_ok()
 }
 
+/// An entry in the operating system's secret store (Credential Manager, Keychain, Secret Service).
+pub fn secret(name: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(crate::APP_NAME, name).map_err(|e| format!("The system's secret store is not available: {e}"))
+}
+
 /// A stable name for this computer, shown when two machines open the same project.
 pub fn machine_name() -> String {
     for key in ["COMPUTERNAME", "HOSTNAME", "HOST"] {

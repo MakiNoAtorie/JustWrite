@@ -34,6 +34,11 @@ typst-render = "0.15.1"
 typst-kit = { version = "0.15.1", default-features = false, features = ["scan-fonts"] }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 zspell = "0.5.5"
+# Cloud saving. TLS trusts the operating system's certificate store, so a private CA works.
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"] }
+keyring = "4"
+sha2 = "0.11"
+getrandom = "0.3"
 
 [profile.release]
 lto = "fat"

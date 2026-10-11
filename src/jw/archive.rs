@@ -30,6 +30,9 @@ pub fn stamp(path: &Path) -> io::Result<Stamp> {
     Ok(Stamp { len: meta.len(), mtime_ms })
 }
 
+/// Held while a `.jw` is replaced or read whole, so a pack and a cloud transfer do not cross.
+pub static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What the last pack wrote, so the next one can skip unchanged files.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PackState {

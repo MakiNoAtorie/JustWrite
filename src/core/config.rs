@@ -41,6 +41,11 @@ pub struct Settings {
     pub spellcheck: bool,
     /// Export preset the Export command starts from.
     pub default_preset: String,
+    /// OAuth app registrations for cloud saving. Empty: that service cannot be connected.
+    pub onedrive_client_id: String,
+    pub google_client_id: String,
+    /// Google issues one for desktop apps; it is not a secret.
+    pub google_client_secret: String,
     pub keymap: BTreeMap<String, String>,
     /// Whether Windows is currently in light mode; only used when `theme` is "system".
     #[serde(skip)]
@@ -78,12 +83,15 @@ impl Default for Settings {
             note_color: String::new(),
             note_italic: true,
             hide_notes: false,
+            animations: true,
             edit_scene_names: false,
             preview_notes: false,
             spellcheck: true,
             default_preset: String::new(),
+            onedrive_client_id: String::new(),
+            google_client_id: String::new(),
+            google_client_secret: String::new(),
             keymap: BTreeMap::new(),
-            animations: true,
             system_light: false,
             justify: false,
             preview: false,

@@ -13,7 +13,7 @@ fn err(e: io::Error) -> String {
 }
 
 /// Makes the working copy match `state` (tree, text and comments).
-fn apply_state(project: &mut Project, state: &State) -> Result<(), String> {
+pub(super) fn apply_state(project: &mut Project, state: &State) -> Result<(), String> {
     // Files of chapters that are not part of that state go; the history still has their text.
     let current: Vec<String> = [Section::Manuscript, Section::Notes]
         .iter()
@@ -33,7 +33,7 @@ fn apply_state(project: &mut Project, state: &State) -> Result<(), String> {
 }
 
 /// Re-anchors the comments after text changed under them. Comments are never dropped.
-fn reanchor_comments(project: &Project, items: &[String]) -> Result<(), String> {
+pub(super) fn reanchor_comments(project: &Project, items: &[String]) -> Result<(), String> {
     use crate::core::comments::CommentSet;
     let mut set = project.work.read(COMMENTS).map(|b| CommentSet::parse(&b)).unwrap_or_default();
     if set.comments.is_empty() {

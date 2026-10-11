@@ -162,7 +162,7 @@ impl App {
     }
 
     /// Everything open is stale after a restore: tree, titles, text and comments.
-    fn after_restore(&mut self) {
+    pub(super) fn after_restore(&mut self) {
         let Some(state) = &mut self.project else { return };
         state.comments = state.core.work.read(COMMENTS).map(|b| CommentSet::parse(&b)).unwrap_or_default();
         state.changed = true;

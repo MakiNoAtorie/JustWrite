@@ -36,6 +36,7 @@ pub enum FormKind {
     Goals,
     Locked(PathBuf),
     Overwrite,
+    Cloud,
 }
 
 #[derive(Clone)]
@@ -379,9 +380,9 @@ impl Form {
 const PAGED: &[usize] = &[2, 3];
 const PDF_ONLY: &[usize] = &[3];
 const EPUB_ONLY: &[usize] = &[4];
-const FLOWING: &[usize] = &[2, 3, 4];
 const PDF_EPUB: &[usize] = &[3, 4];
 const PAGED_EPUB: &[usize] = &[2, 3, 4];
+const FLOWING: &[usize] = &[2, 3, 4];
 const TEXT_FORMATS: &[usize] = &[0, 1];
 const CUSTOM_TRIM: &[usize] = &[6];
 
@@ -615,7 +616,7 @@ impl App {
         self.form = None;
         self.redraw();
     }
-    fn open_form(&mut self, form: Form) {
+    pub(super) fn open_form(&mut self, form: Form) {
         self.overlay = None;
         self.popup = None;
         self.form = Some(form);
@@ -640,8 +641,8 @@ impl App {
             Field::number("max_width", "Column width", s.max_width.unwrap_or(0.), 0., 3000., 40., 0, "px (0 is full width)"),
             Field::toggle("typewriter", "Typewriter scrolling", s.typewriter).hint("Keep the line you are typing in the middle"),
             Field::toggle("show_markers", "Show formatting marks", s.show_markers),
-            Field::toggle("spellcheck", "Underline possible misspellings", s.spellcheck).hint("Uses the project language"),
             Field::toggle("animations", "Visual effects", s.animations).hint("The short glide when you jump to a scene"),
+            Field::toggle("spellcheck", "Underline possible misspellings", s.spellcheck).hint("Uses the project language"),
             Field::heading("Notes"),
             Field::text("note_marker", "Note marker", &s.note_marker).hint("Two or three punctuation characters, such as $$ or %%"),
             Field::text("note_color", "Note colour", &s.note_color).hint("#rrggbb, or leave empty for the accent colour"),
@@ -653,6 +654,10 @@ impl App {
             Field::toggle("autosave", "Save chapters while I write", s.autosave),
             Field::number("repack_minutes", "Write the .jw file every", s.repack_minutes as f32, 1., 60., 1., 0, "min"),
             Field::button("keymap", "Keyboard shortcuts", "Customize…"),
+            Field::heading("Cloud"),
+            Field::text("onedrive_client_id", "OneDrive client id", &s.onedrive_client_id).hint("From your app registration in Microsoft Entra"),
+            Field::text("google_client_id", "Google client id", &s.google_client_id).hint("From a Desktop app OAuth client in Google Cloud"),
+            Field::text("google_client_secret", "Google client secret", &s.google_client_secret),
         ];
         let form = Form::new(FormKind::Settings, "Settings", fields).no_submit().width(620.);
         self.open_form(form);
@@ -676,12 +681,15 @@ impl App {
         s.note_color = form.text("note_color");
         s.note_italic = form.on("note_italic");
         s.hide_notes = form.on("hide_notes");
+        s.animations = form.on("animations");
         s.edit_scene_names = form.on("edit_scene_names");
         s.preview_notes = form.on("preview_notes");
         s.autosave = form.on("autosave");
         s.repack_minutes = form.number("repack_minutes") as u32;
+        s.onedrive_client_id = form.text("onedrive_client_id");
+        s.google_client_id = form.text("google_client_id");
+        s.google_client_secret = form.text("google_client_secret");
         let old = self.marker();
-        s.animations = form.on("animations");
         match Settings::parse(&s.serialize()) {
             Ok(parsed) => {
                 let new = parsed.marker();
@@ -1450,6 +1458,15 @@ impl App {
             }
             FormKind::Import => self.submit_import(),
             FormKind::Export => self.submit_export(),
+            FormKind::Cloud => {
+                let (service, server) = (form.choice("service"), form.text("server"));
+                if service == 0 && server.is_empty() {
+                    self.form_note("Type the address of your Nextcloud server.");
+                } else {
+                    self.close_form();
+                    self.cloud_connect(service, server);
+                }
+            }
         }
         self.redraw();
     }

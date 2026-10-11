@@ -351,6 +351,7 @@ impl App {
             | Command::DeleteComment
             | Command::Save
             | Command::SaveAs
+            | Command::CloudSave
             | Command::CloseProject
             | Command::Snapshot
             | Command::Export
@@ -693,8 +694,8 @@ impl App {
             Tool::Gap,
             Tool::Button("Find", Face::Normal, command(Command::Find)),
             Tool::Button("New Scene", Face::Normal, command(Command::NewScene)),
-        ];
             Tool::Button("Epigraph", Face::Normal, command(Command::Epigraph)),
+        ];
         let edge = rect.x + rect.width as i32 - self.s(8.);
         // A divider is drawn only when a tool follows it, so a narrow bar does not end with one.
         let mut gap = None;
@@ -1238,8 +1239,8 @@ impl App {
                 (*line..text.len_lines())
                     .skip(usize::from(n > 0))
                     .take(40)
-                    .map(|l| text.line(l).to_string().trim().to_owned())
                     .filter(|l| tab.blocks.quote_span(*l).is_none())
+                    .map(|l| text.line(l).to_string().trim().to_owned())
                     .filter(|l| !l.is_empty() && !prose::is_scene_break(l) && prose::scene_name(l).is_none())
                     .map(|l| crate::core::notes::strip(&crate::core::notes::to_neutral(&l, &marker).0).replace('*', "").trim().to_owned())
                     .find(|l| !l.is_empty())
@@ -1408,6 +1409,9 @@ impl App {
             stats.push_str(&written);
             if goals.session_words > 0 {
                 stats.push_str(&format!(" of {}", thousands(goals.session_words as u64)));
+            }
+            if state.cloud_linked {
+                stats.push_str(if self.cloud_note == super::cloud::SYNCED { "  ·  Cloud ✓" } else { "  ·  Cloud …" });
             }
         }
         let busy = active.map_or("", |t| {

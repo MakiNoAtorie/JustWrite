@@ -176,6 +176,7 @@ impl WorkDir {
     /// Repacks the `.jw`. Fails with [`PackError::ExternalChange`] if the file on disk is not the
     /// one this working copy last wrote, unless `overwrite` is set.
     pub fn pack(&self, target: &Path, overwrite: bool) -> Result<(), PackError> {
+        let _writing = archive::WRITING.lock();
         let previous_state = self.pack_state();
         if !overwrite && target.exists() {
             if let Some(state) = &previous_state {
