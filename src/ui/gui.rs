@@ -1237,7 +1237,7 @@ impl App {
                     .unwrap_or_default()
             })
             .collect();
-        // A scene's name is the note on the line right under its break.
+        // A scene's name is the `## Name ##` line right under its break.
         let names: Vec<Option<String>> = starts
             .iter()
             .enumerate()

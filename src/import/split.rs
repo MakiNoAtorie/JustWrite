@@ -145,7 +145,7 @@ pub fn split(raw: &Raw, options: &Options) -> Result<Imported, String> {
             }
         }
         let line = match &para.kind {
-            Kind::SceneBreak => "#".to_owned(),
+            Kind::SceneBreak => crate::core::prose::SCENE_BREAK.to_owned(),
             Kind::Heading(_) | Kind::Body => comment_line(&para.text).unwrap_or_else(|| para.text.clone()),
         };
         if line.trim().is_empty() && para.kind != Kind::SceneBreak {
@@ -294,7 +294,7 @@ mod tests {
         let imported = split(&raw, &options).unwrap();
         assert_eq!(titles(&imported), ["CHAPTER ONE", "CHAPTER TWO"]);
         let one = imported.chapters().next().unwrap();
-        assert_eq!(one.text, format!("It began.\n{} remember the storm\nThen it rained.\n#\nLater.\n", notes::LINE));
+        assert_eq!(one.text, format!("It began.\n{} remember the storm\nThen it rained.\n###newscene###\nLater.\n", notes::LINE));
         assert_eq!(notes::word_count(&one.text), 6);
         assert!(split(&raw, &Options { by: By::Pattern("(".into()), ..Options::default() }).is_err());
         // Other markers work the same way.

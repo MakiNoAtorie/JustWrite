@@ -17,8 +17,10 @@ splits, focus mode, word count, the performance gate (5 ms per edit, 60 Hz scrol
 
 ## Prose formatting
 
-* `*italic*` and `**bold**` with concealed markers; a scene-break line (`#`, `***`, …) shows as a
-  configurable symbol; no headings inside chapters.
+* `*italic*` and `**bold**` with concealed markers; a scene-break line (`###newscene###`, `#`, `***`, …) shows as a
+  configurable symbol; a `## Name ##` line names a scene and is left out of exports and word counts.
+  Names and hash breaks are locked in the text unless the setting "Edit scene names in the text" is
+  on. No headings inside chapters.
 * Auto-typography that can be switched off: smart quotes, `--` to an em dash, the Spanish dialogue
   dash.
 * A per-project language (English or Spanish) drives spelling, hyphenation and the quote style.

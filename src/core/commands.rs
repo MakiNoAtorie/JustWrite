@@ -223,10 +223,12 @@ pub fn resolve(
     alt: bool,
     keymap: &BTreeMap<String, String>,
 ) -> Option<Command> {
+    // `=` and `+` are one key with or without Shift, depending on the keyboard layout.
+    let plus = matches!(key, "=" | "+");
     let event = Shortcut {
-        key: key.to_lowercase(),
+        key: if plus { "=".into() } else { key.to_lowercase() },
         primary,
-        shift,
+        shift: shift && !plus,
         alt,
     };
     COMMANDS.iter().find_map(|command| {
@@ -234,7 +236,11 @@ pub fn resolve(
             .get(command.key)
             .map(String::as_str)
             .unwrap_or(command.shortcut);
-        if parse_shortcut(value).ok().flatten().as_ref() == Some(&event) {
+        let wanted = parse_shortcut(value).ok().flatten().map(|mut s| {
+            s.shift &= s.key != "=";
+            s
+        });
+        if wanted.as_ref() == Some(&event) {
             Some(command.id)
         } else {
             None
@@ -275,6 +281,10 @@ mod tests {
         let mut keys = BTreeMap::new();
         keys.insert("bold".into(), "Cmd+Alt+B".into());
         assert_eq!(resolve("b", true, false, true, &keys), Some(Command::Bold));
+        // Larger text: `=` alone (US), Shift+`=` (Spanish), `+` with or without Shift.
+        for (key, shift) in [("=", false), ("=", true), ("+", true), ("+", false)] {
+            assert_eq!(resolve(key, true, shift, false, &BTreeMap::new()), Some(Command::FontLarger), "{key} {shift}");
+        }
         let captured = parse_shortcut(&format_shortcut(true, true, false, "f2")).unwrap();
         assert_eq!(captured.unwrap().key, "f2");
         keys.insert("bold".into(), "".into());

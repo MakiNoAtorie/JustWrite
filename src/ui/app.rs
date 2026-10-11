@@ -66,7 +66,8 @@ pub enum UserEvent {
     Config(Result<(Settings, Option<Session>), String>),
     Error(String),
     SessionSaved(Result<(), String>),
-    Replaced(u64, u64, u64, Rope),
+    /// Tab, disk epoch, revision, the new text, and the matches kept because their line is locked.
+    Replaced(u64, u64, u64, Rope, usize),
     ConfigWatch(notify::RecommendedWatcher),
     ConfigChanged,
     SettingsUpdated(Result<Settings, String>),
@@ -522,6 +523,9 @@ impl App {
         if !self.failing() {
             self.status.clear();
         }
+        if self.tabs.get_mut(&id).is_some_and(|tab| std::mem::take(&mut tab.document.name_blocked)) {
+            self.status = "A scene's name changes in the Scenes panel: double-click the scene.".into();
+        }
         if self.overlay.as_ref().is_some_and(|o| o.docked() && !o.focused) {
             // Typing in the text with the find bar open: its matches follow.
             self.refresh_overlay();
@@ -953,12 +957,15 @@ impl App {
                         if line >= text.len_lines() {
                             continue;
                         }
-                        let snippet = (line..text.len_lines())
-                            .skip(usize::from(n > 0))
-                            .map(|l| text.line(l).to_string())
-                            .map(|l| l.trim().to_owned())
-                            .find(|l| !l.is_empty() && !prose::is_scene_break(l))
-                            .unwrap_or_default();
+                        let at = line + usize::from(n > 0);
+                        let name = (at < text.len_lines()).then(|| prose::scene_name(&text.line(at).to_string()).map(str::to_owned)).flatten();
+                        let snippet = name.unwrap_or_else(|| {
+                            (at..text.len_lines())
+                                .map(|l| text.line(l).to_string())
+                                .map(|l| l.trim().to_owned())
+                                .find(|l| !l.is_empty() && !prose::is_scene_break(l) && prose::scene_name(l).is_none())
+                                .unwrap_or_default()
+                        });
                         let snippet: String = snippet.chars().take(90).collect();
                         if let Some(score) = workspace::fuzzy(&query, &snippet) {
                             rows.push((score, Row {
@@ -1389,9 +1396,26 @@ impl App {
             let snapshot = tab.document.text.clone();
             let (revision, epoch) = (tab.document.revision, tab.disk_epoch);
             let proxy = self.proxy.clone();
+            let protect = tab.document.protect_names;
             std::thread::spawn(move || {
-                let text = workspace::replace_all(&snapshot.to_string(), &query, &replacement, case);
-                let _ = proxy.send_event(UserEvent::Replaced(id, epoch, revision, Rope::from_str(&text)));
+                // Locked scene names and separators stay as they are.
+                let mut kept = 0;
+                let text = if protect {
+                    (0..snapshot.len_lines())
+                        .map(|l| {
+                            let line = snapshot.line(l).to_string();
+                            if crate::core::buffer::locked_line(&snapshot, l) {
+                                kept += (line.len() - workspace::replace_all(&line, &query, "", case).len()) / query.len().max(1);
+                                line
+                            } else {
+                                workspace::replace_all(&line, &query, &replacement, case)
+                            }
+                        })
+                        .collect()
+                } else {
+                    workspace::replace_all(&snapshot.to_string(), &query, &replacement, case)
+                };
+                let _ = proxy.send_event(UserEvent::Replaced(id, epoch, revision, Rope::from_str(&text), kept));
             });
             self.status = "Replacing all matches…".into();
             self.redraw();
@@ -1408,6 +1432,10 @@ impl App {
         });
         if same {
             tab.document.replace(found.start..found.end, &replacement);
+            if tab.document.name_blocked {
+                // A locked scene name: step over it.
+                tab.document.select(found.end, false);
+            }
             self.edited(id);
             // The caret is now after the new words, so the search moves on to the next match.
             self.refresh_overlay();
@@ -1862,8 +1890,10 @@ impl App {
                     match crate::core::notes::toggle(&doc.text, selection, &marker) {
                         Some(toggle) => {
                             doc.replace(toggle.range, &toggle.text);
-                            doc.anchor = toggle.select.start;
-                            doc.cursor = toggle.select.end;
+                            if !doc.name_blocked {
+                                doc.anchor = toggle.select.start;
+                                doc.cursor = toggle.select.end;
+                            }
                             self.edited(id);
                         }
                         None => self.status = "Nothing to turn into a note here.".into(),
@@ -2216,12 +2246,8 @@ impl App {
             }
             _ => {}
         }
-        let blocked = std::mem::take(&mut tab.document.name_blocked);
         if edited {
             self.edited(id);
-        }
-        if blocked {
-            self.status = "A scene's name changes in the Scenes panel: double-click the scene.".into();
         }
         self.redraw();
     }
@@ -3379,17 +3405,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             },
             UserEvent::Error(error) => self.status = error,
-            UserEvent::Replaced(id, epoch, revision, text) => {
+            UserEvent::Replaced(id, epoch, revision, text, kept) => {
                 if let Some(tab) = self.tabs.get_mut(&id) {
                     if tab.document.revision == revision && tab.disk_epoch == epoch {
                         let (end, caret) = (tab.document.text.len_chars(), tab.document.cursor);
                         tab.document.replace_rope(0..end, text);
                         // Stay where the author was instead of landing at the end of the chapter.
                         tab.document.select(caret, false);
-                        let count = self.overlay.as_ref().map_or(0, |o| o.rows.len());
+                        let count = self.overlay.as_ref().map_or(0, |o| o.rows.len()).saturating_sub(kept);
                         self.edited(id);
                         self.refresh_overlay();
                         self.status = match count {
+                            0 => "The only matches are in scene names; rename scenes in the Scenes panel.".into(),
                             1 => "Replaced 1 match.".into(),
                             2..500 => format!("Replaced {count} matches."),
                             _ => "Replaced every match.".into(),

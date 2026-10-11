@@ -364,7 +364,7 @@ mod tests {
         let first = imported.chapters().nth(1).unwrap();
         assert!(first.text.contains("It began with a *whisper*."), "{}", first.text);
         assert!(first.text.contains("Then **silence** fell."));
-        assert!(first.text.lines().any(|l| l == "#"), "the scene break");
+        assert!(first.text.lines().any(|l| l == crate::core::prose::SCENE_BREAK), "the scene break");
         assert!(!first.text.contains("cut this"));
         assert_eq!(first.comments.len(), 1);
         let c = &first.comments[0];

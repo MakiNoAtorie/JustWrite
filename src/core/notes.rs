@@ -477,16 +477,27 @@ pub fn word_count(neutral: &str) -> usize {
     let mut inline = false;
     let mut line_note = false;
     let mut block = false;
-    let mut line_start = true;
-    let mut chars = neutral.chars().peekable();
-    while let Some(c) = chars.next() {
-        let at_start = std::mem::replace(&mut line_start, c == '\n');
+    // Only blanks so far on this line, which starts at byte `line_at`.
+    let mut lead = true;
+    let mut line_at = 0;
+    for (i, c) in neutral.char_indices() {
+        let at_lead = lead;
+        lead = c == '\n' || (lead && c.is_whitespace());
+        if c == '\n' {
+            line_at = i + 1;
+        }
         match c {
             BLOCK_OPEN => block = true,
             BLOCK_CLOSE => block = false,
             _ if block => {}
-            // A scene's name (`## The storm ##`) is not prose.
-            '#' if at_start && chars.clone().take(2).eq(['#', ' ']) => line_note = true,
+            // A scene's name (`## The storm ##`) and the `###newscene###` break are not prose.
+            '#' if at_lead && {
+                let line = neutral[line_at..].lines().next().unwrap_or("");
+                super::prose::scene_name(line).is_some() || super::prose::is_hash_break(line)
+            } =>
+            {
+                line_note = true
+            }
             '\n' => {
                 line_note = false;
                 inline = false;
@@ -670,6 +681,8 @@ mod tests {
         assert_eq!(word_count("one two\n## The storm ##\nthree"), 3);
         assert_eq!(word_count("one\n# not a name\n"), 4);
         assert_eq!(word_count("a # b"), 2);
+        assert_eq!(word_count("one\n  ## The storm ##\r\n## open heading\n"), 3);
+        assert_eq!(word_count("one\n###newscene###\ntwo"), 2);
     }
     #[test]
     fn markers_are_validated() {

@@ -266,8 +266,8 @@ pub fn parse_text(text: &str, keep_notes: bool, marks: &[(usize, Range<usize>)])
             // A blank line, or a line that held only a note.
             continue;
         }
-        // A scene's name (`## The storm ##` under its break) is for the editor only.
-        if matches!(blocks.last(), None | Some(Block::SceneBreak)) && crate::core::prose::scene_name(&prose_text).is_some() {
+        // A scene's name (`## The storm ##`) is for the editor only.
+        if crate::core::prose::scene_name(&prose_text).is_some() {
             continue;
         }
         if !prose_text.is_empty() && is_scene_break(&prose_text) {
@@ -367,7 +367,7 @@ pub fn parse_matter(text: &str) -> Vec<Vec<Inline>> {
 }
 
 /// Whether `title` is only the chapter's number ("Chapter 3", "3"), so no title line is wanted.
-pub fn number_of_chapter_title(title: &str, language: Language) -> bool {
+fn number_of_chapter_title(title: &str, language: Language) -> bool {
     let t = title.trim().to_lowercase();
     let word = preset::chapter_word(language).to_lowercase();
     t.strip_prefix(&word).is_some_and(|rest| rest.trim().chars().all(|c| c.is_ascii_digit() || c.is_alphabetic() && rest.len() < 4)) || t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty()

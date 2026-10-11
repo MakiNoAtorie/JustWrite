@@ -108,17 +108,8 @@ impl Document {
     pub fn replace(&mut self, range: Range<usize>, text: &str) {
         self.replace_rope(range, Rope::from_str(text));
     }
-    /// Whether line `l` is a scene name or the break above one.
     fn name_pair_line(&self, l: usize) -> bool {
-        let lines = self.text.len_lines();
-        if l >= lines {
-            return false;
-        }
-        let get = |i: usize| -> String { self.text.line(i).chars().take(64).collect() };
-        let line = get(l);
-        super::prose::is_hash_break(&line)
-            || (super::prose::scene_name(&line).is_some() && (l == 0 || super::prose::is_scene_break(get(l - 1).trim())))
-            || (l + 1 < lines && super::prose::is_scene_break(line.trim()) && super::prose::scene_name(&get(l + 1)).is_some())
+        locked_line(&self.text, l)
     }
     /// Whether `range` changes part of a name line or of its break. Covering the whole line is fine.
     fn touches_scene_name(&self, range: &Range<usize>) -> bool {
@@ -228,11 +219,13 @@ impl Document {
         if !self.name_pair_line(line) {
             return None;
         }
-        let text = |l: usize| -> String { self.text.line(l).chars().take(64).collect() };
+        let text = |l: usize| -> String { self.text.line(l).chars().take(512).collect() };
         let is_name = |l: usize| super::prose::scene_name(&text(l)).is_some();
         let (mut first, mut last) = (line, line);
-        if is_name(line) && line > 0 && super::prose::is_scene_break(text(line - 1).trim()) {
-            first = line - 1;
+        if is_name(line) {
+            if line > 0 && super::prose::is_scene_break(text(line - 1).trim()) {
+                first = line - 1;
+            }
         } else if line + 1 < self.text.len_lines() && is_name(line + 1) {
             last = line + 1;
         }
@@ -436,7 +429,12 @@ impl Document {
             (self.anchor, self.cursor) = (a, b);
         }
         let (a, b) = (range.start, range.end);
-        let run = |from: usize, forward: bool, text: &Rope| -> usize {
+        // Marks go in as two edits; a locked line would take only one of them.
+        if self.protect_names && (self.text.char_to_line(a)..=self.text.char_to_line(b)).any(|l| self.name_pair_line(l)) {
+            self.name_blocked = true;
+            return;
+        }
+        let run =|from: usize, forward: bool, text: &Rope| -> usize {
             let mut n = 0;
             while n < 3
                 && if forward { from + n < text.len_chars() && text.char(from + n) == '*' } else { from > n && text.char(from - n - 1) == '*' }
@@ -481,6 +479,21 @@ impl Document {
             edit.after = (self.cursor, self.anchor);
         }
     }
+}
+
+/// Whether line `l` is a scene name, a hash break, or the break above a name: the lines the
+/// editor locks.
+pub fn locked_line(text: &Rope, l: usize) -> bool {
+    let lines = text.len_lines();
+    if l >= lines {
+        return false;
+    }
+    // A name line can be longer than a break, but not without limit.
+    let get = |i: usize| -> String { text.line(i).chars().take(512).collect() };
+    let line = get(l);
+    super::prose::is_hash_break(&line)
+        || super::prose::scene_name(&line).is_some()
+        || (l + 1 < lines && super::prose::is_scene_break(line.trim()) && super::prose::scene_name(&get(l + 1)).is_some())
 }
 
 /// Whitespace-separated words, like `str::split_whitespace().count()` but without copying the rope.
@@ -555,6 +568,17 @@ mod tests {
         doc.delete(false);
         assert_eq!(doc.text.to_string(), "Apara\n\n\nnext");
         doc.undo();
+        // A name away from a break is locked too; Bold over it does nothing; Delete takes that line only.
+        let lone_text = "a\n## Lone ##\n## Two ##\nb";
+        let mut lone = Document::new(Rope::from_str(lone_text));
+        lone.select(4, false);
+        lone.type_text("x", None);
+        (lone.anchor, lone.cursor) = (0, 6);
+        lone.toggle_emphasis("**");
+        assert_eq!(lone.text.to_string(), lone_text);
+        lone.select(4, false);
+        lone.delete(false);
+        assert_eq!(lone.text.to_string(), "a\n## Two ##\nb");
         // Typing a separator or a name by hand is refused.
         let mut plain = Document::new(Rope::new());
         for c in "###".chars() {
