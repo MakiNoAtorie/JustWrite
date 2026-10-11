@@ -1836,6 +1836,13 @@ impl App {
                 self.settings.font_size = (self.settings.font_size + step).clamp(10., 48.);
                 self.save_settings();
             }
+            Command::NewScene => {
+                if let Some(id) = editable {
+                    if self.tabs.get_mut(&id).unwrap().document.insert_scene_break() {
+                        self.edited(id);
+                    }
+                }
+            }
             Command::AlignLeft | Command::AlignJustify => {
                 self.settings.justify = command == Command::AlignJustify;
                 self.save_settings();

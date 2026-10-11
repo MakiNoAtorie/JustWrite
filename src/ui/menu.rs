@@ -59,6 +59,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::FontSmaller),
             Some(Command::FontLarger),
             None,
+            Some(Command::NewScene),
             Some(Command::ToggleNote),
             Some(Command::NoteParagraph),
             Some(Command::AddComment),

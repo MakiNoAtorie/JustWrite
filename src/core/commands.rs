@@ -58,6 +58,7 @@ pub enum Command {
     NextChapter,
     PreviousChapter,
     JumpScene,
+    NewScene,
     GotoLine,
     WordCount,
     // Review and history
@@ -145,6 +146,7 @@ commands![
     (Command::QuickOpen, "quick_open", "Go to chapter or note…", "Ctrl+P"),
     (Command::NextChapter, "next_chapter", "Next chapter or note", "Ctrl+PageDown"),
     (Command::PreviousChapter, "previous_chapter", "Previous chapter or note", "Ctrl+PageUp"),
+    (Command::NewScene, "new_scene", "New scene", "Ctrl+Alt+Enter"),
     (Command::JumpScene, "jump_scene", "Jump to scene", "Ctrl+J"),
     (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
     (Command::WordCount, "word_count", "Word count", ""),

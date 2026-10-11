@@ -281,6 +281,43 @@ impl Document {
         self.typing = true;
         self.last_edit = Some(std::time::Instant::now());
     }
+    /// Puts a scene break (`#`) with a blank line on each side at the caret, as one undo step.
+    /// The paragraph is split at the caret; the caret ends on the line after the break. Returns
+    /// false, changing nothing, when the caret is already on a break line.
+    pub fn insert_scene_break(&mut self) -> bool {
+        self.typing = false;
+        let le = self.line_ending;
+        let line = self.text.char_to_line(self.cursor.min(self.text.len_chars()));
+        let start = self.text.line_to_char(line);
+        let content: String = self.text.line(line).to_string().trim_end_matches(['\r', '\n']).to_owned();
+        if super::prose::is_scene_break(&content) {
+            return false;
+        }
+        let end = start + content.chars().count();
+        let column = (self.cursor - start).min(content.chars().count());
+        let split = content.char_indices().nth(column).map_or(content.len(), |(i, _)| i);
+        let (pre, post) = (content[..split].trim_end(), content[split..].trim_start());
+        let prev_blank = line == 0 || self.text.line(line - 1).to_string().trim().is_empty();
+        let (insert, back) = if content.trim().is_empty() {
+            let text = if prev_blank { format!("#{le}") } else { format!("{le}#{le}") };
+            (text, 0)
+        } else {
+            let head = match (pre.is_empty(), prev_blank) {
+                (false, _) => format!("{pre}{le}{le}#"),
+                (true, true) => "#".to_owned(),
+                (true, false) => format!("{le}#"),
+            };
+            let back = post.chars().count();
+            (format!("{head}{le}{le}{post}"), back)
+        };
+        let caret = start + insert.chars().count() - back;
+        self.replace(start..end, &insert);
+        self.select(caret, false);
+        if let Some(edit) = self.undo.last_mut() {
+            edit.after = (self.cursor, self.anchor);
+        }
+        true
+    }
     /// Wraps the selection in `mark` (`*` or `**`), or takes the marks off if it already has them.
     /// With nothing selected the word at the caret is used, or an empty pair is inserted.
     pub fn toggle_emphasis(&mut self, mark: &str) {
@@ -375,6 +412,53 @@ mod tests {
         for c in text.chars() {
             doc.type_text(&c.to_string(), None);
         }
+    }
+
+    #[test]
+    fn scene_break_splits_a_paragraph_and_undoes_in_one_step() {
+        let mut doc = Document::new(Rope::from_str("one two
+next"));
+        doc.select(4, false);
+        assert!(doc.insert_scene_break());
+        assert_eq!(doc.text.to_string(), "one
+
+#
+
+two
+next");
+        assert_eq!(doc.text.char_to_line(doc.cursor), 4);
+        doc.select(doc.text.line_to_char(2), false);
+        assert!(!doc.insert_scene_break());
+        assert_eq!(doc.text.to_string(), "one
+
+#
+
+two
+next");
+        doc.undo();
+        assert_eq!(doc.text.to_string(), "one two
+next");
+    }
+    #[test]
+    fn scene_break_at_line_end_and_on_empty_line() {
+        let mut doc = Document::new(Rope::from_str("end"));
+        doc.select(3, false);
+        doc.insert_scene_break();
+        assert_eq!(doc.text.to_string(), "end
+
+#
+
+");
+        let mut doc = Document::new(Rope::from_str("a
+
+b"));
+        doc.select(2, false);
+        doc.insert_scene_break();
+        assert_eq!(doc.text.to_string(), "a
+
+#
+
+b");
     }
     #[test]
     fn edits_keep_unicode_and_original_endings() {

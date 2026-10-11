@@ -334,6 +334,7 @@ impl App {
             | Command::Find
             | Command::Replace
             | Command::JumpScene
+            | Command::NewScene
             | Command::GotoLine
             | Command::WordCount => editable && project,
             Command::CloseTab => tab.is_some() && project,
@@ -690,7 +691,7 @@ impl App {
             Tool::Button("Comment", Face::Normal, command(Command::AddComment)),
             Tool::Gap,
             Tool::Button("Find", Face::Normal, command(Command::Find)),
-            Tool::Button("Scenes", Face::Normal, command(Command::JumpScene)),
+            Tool::Button("New Scene", Face::Normal, command(Command::NewScene)),
         ];
         let edge = rect.x + rect.width as i32 - self.s(8.);
         for tool in tools {
