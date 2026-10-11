@@ -16,6 +16,8 @@ pub enum Kind {
     Shortcut(String),
     /// Rename the chapter, part or note with this id.
     Rename(String),
+    /// Rename the scene whose break is on this line of the open chapter.
+    RenameScene(usize),
     /// Delete the chapter, part or note with this id.
     Delete(Vec<String>),
     Close(u64),
@@ -100,6 +102,7 @@ impl Overlay {
             Kind::Shortcut(_) => "Change shortcut",
             Kind::GotoLine => "Go to line",
             Kind::Rename(_) => "Rename",
+            Kind::RenameScene(_) => "Rename scene",
             Kind::Delete(_) => "Delete",
             Kind::Close(_) | Kind::Quit | Kind::ChangeWorkspace(_) => "Unsaved changes",
         }
@@ -116,6 +119,7 @@ impl Overlay {
             Kind::Recent => "Type a project name…",
             Kind::GotoLine => "Line number",
             Kind::Rename(_) => "New title",
+            Kind::RenameScene(_) => "Scene name",
             _ => "",
         }
     }
@@ -126,6 +130,7 @@ impl Overlay {
             Kind::Shortcut(_)
                 | Kind::GotoLine
                 | Kind::Rename(_)
+                | Kind::RenameScene(_)
                 | Kind::Delete(_)
                 | Kind::Close(_)
                 | Kind::Quit

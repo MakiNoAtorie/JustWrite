@@ -255,6 +255,8 @@ pub struct App {
     tree_rect: Option<Rect>,
     outline_rect: Option<Rect>,
     clicks: (Instant, PhysicalPosition<f64>, u8),
+    /// The last click on a row of the Scenes panel, for double-click.
+    scene_click: Option<(Instant, usize)>,
     wheel: f32,
     session_due: Option<Instant>,
     system_light: bool,
@@ -415,6 +417,7 @@ impl App {
             tree_rect: None,
             outline_rect: None,
             clicks: (Instant::now(), PhysicalPosition::new(0., 0.), 0),
+            scene_click: None,
             wheel: 0.,
             session_due: None,
             system_light: false,
@@ -1596,6 +1599,10 @@ impl App {
                     self.delete_nodes(&ids);
                 }
                 Kind::GotoLine => self.goto_line(&query),
+                Kind::RenameScene(line) => {
+                    self.overlay = None;
+                    self.set_scene_name(line, query.trim());
+                }
                 Kind::Rename(id) => {
                     let title = query.trim().to_owned();
                     if title.is_empty() {
@@ -2669,6 +2676,64 @@ impl App {
                     .is_some_and(|view| y >= view.y as f64 - self.s(27.) as f64)
         })
     }
+    /// Opens the name box for the scene whose break is on `line` of the active chapter.
+    fn rename_scene(&mut self, line: usize) {
+        let marker = self.marker();
+        let Some(tab) = self.active_id().and_then(|id| self.tabs.get(&id)) else { return };
+        let text = &tab.document.text;
+        if line >= text.len_lines() || !prose::is_scene_break(text.line(line).to_string().trim()) {
+            self.status = "The first scene has no break to carry a name.".into();
+            return;
+        }
+        let name = (line + 1 < text.len_lines())
+            .then(|| crate::core::notes::whole_line_note(&text.line(line + 1).to_string(), &marker))
+            .flatten()
+            .unwrap_or_default();
+        let mut overlay = Overlay::new(Kind::RenameScene(line));
+        overlay.query = name;
+        overlay.select_all = true;
+        self.overlay = Some(overlay);
+        self.redraw();
+    }
+    /// Writes (or replaces, or removes) the name note on the line under the break at `line`.
+    fn set_scene_name(&mut self, line: usize, name: &str) {
+        let marker = self.marker();
+        let Some(id) = self.active_id() else { return };
+        let Some(tab) = self.tabs.get_mut(&id) else { return };
+        let doc = &mut tab.document;
+        if line >= doc.text.len_lines() || !prose::is_scene_break(doc.text.line(line).to_string().trim()) {
+            return;
+        }
+        let name: String = name.replace(marker.as_str(), "").split_whitespace().collect::<Vec<_>>().join(" ");
+        let m = marker.as_str();
+        let end = |doc: &crate::core::buffer::Document, l: usize| {
+            let mut e = doc.text.line_to_char(l) + doc.text.line(l).len_chars();
+            while e > doc.text.line_to_char(l) && matches!(doc.text.char(e - 1), '\n' | '\r') {
+                e -= 1;
+            }
+            e
+        };
+        let has_name = line + 1 < doc.text.len_lines() && crate::core::notes::whole_line_note(&doc.text.line(line + 1).to_string(), &marker).is_some();
+        let le = doc.line_ending;
+        match (has_name, name.is_empty()) {
+            (false, true) => return,
+            (false, false) => {
+                let at = end(doc, line);
+                doc.replace(at..at, &format!("{le}{m} {name} {m}"));
+            }
+            (true, false) => {
+                let (a, b) = (doc.text.line_to_char(line + 1), end(doc, line + 1));
+                doc.replace(a..b, &format!("{m} {name} {m}"));
+            }
+            (true, true) => {
+                // The whole line goes, with its line ending.
+                let (a, b) = (end(doc, line), end(doc, line + 1));
+                doc.replace(a..b, "");
+            }
+        }
+        self.edited(id);
+        self.redraw();
+    }
     fn editor_click(&mut self, x: f64, y: f64) {
         if !self.over_editor(x, y) {
             return;
@@ -2817,6 +2882,13 @@ impl App {
             }
             Some(Hit::Fold(id)) => self.toggle_fold(&id),
             Some(Hit::Scene(line)) => {
+                let now = Instant::now();
+                let again = self.scene_click.is_some_and(|(at, l)| l == line && now.duration_since(at) < Duration::from_millis(450));
+                self.scene_click = Some((now, line));
+                if again {
+                    self.rename_scene(line);
+                    return;
+                }
                 self.activate_row(Row { label: String::new(), hint: String::new(), action: Action::Scene(line) });
             }
             Some(Hit::Comment(id)) => self.jump_to_comment(&id),

@@ -1194,6 +1194,7 @@ impl App {
     }
     fn paint_scenes(&mut self, rect: Rect, p: Palette) {
         let Some(id) = self.active_id() else { return };
+        let marker = self.marker();
         let tab = &self.tabs[&id];
         let text = &tab.document.text;
         let cursor_line = text.char_to_line(tab.document.cursor.min(text.len_chars()));
@@ -1208,9 +1209,22 @@ impl App {
                     .skip(usize::from(n > 0))
                     .take(40)
                     .map(|l| text.line(l).to_string().trim().to_owned())
-                    .find(|l| !l.is_empty() && !prose::is_scene_break(l))
-                    .map(|l| crate::core::notes::strip(&l).replace('*', "").trim().to_owned())
+                    .filter(|l| !l.is_empty() && !prose::is_scene_break(l))
+                    .map(|l| crate::core::notes::strip(&crate::core::notes::to_neutral(&l, &marker).0).replace('*', "").trim().to_owned())
+                    .find(|l| !l.is_empty())
                     .unwrap_or_default()
+            })
+            .collect();
+        // A scene's name is the note on the line right under its break.
+        let names: Vec<Option<String>> = starts
+            .iter()
+            .enumerate()
+            .map(|(n, line)| {
+                let next = *line + 1;
+                (n > 0 && next < text.len_lines())
+                    .then(|| crate::core::notes::whole_line_note(&text.line(next).to_string(), &marker))
+                    .flatten()
+                    .filter(|name| !name.is_empty())
             })
             .collect();
         let head = Rect { x: rect.x + self.s(14.), y: rect.y + self.s(8.), width: rect.width.saturating_sub(self.su(28.)), height: self.su(22.) };
@@ -1226,7 +1240,8 @@ impl App {
             } else if self.hot(row) {
                 self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
             }
-            self.put(&format!("Scene {}", n + 1), Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(20.) }, 11., if n == current { p.accent_text() } else { p.muted }, Face::Bold, Align::Left);
+            let label = names[n].clone().unwrap_or_else(|| format!("Scene {}", n + 1));
+            self.put(&label, Rect { x: row.x + self.s(10.), y: row.y + self.s(2.), width: row.width - self.su(20.), height: self.su(20.) }, 11., if n == current { p.accent_text() } else { p.muted }, Face::Bold, Align::Left);
             let snippet = self.fit(if snippets[n].is_empty() { "(empty)" } else { &snippets[n] }, row.width as f32 - self.s(20.) as f32, 12.5);
             self.put(&snippet, Rect { x: row.x + self.s(10.), y: row.y + self.s(22.), width: row.width - self.su(20.), height: self.su(22.) }, 12.5, p.text, Face::Normal, Align::Left);
             self.hits.push((row, Hit::Scene(*line)));
@@ -1714,6 +1729,11 @@ impl App {
                 "Enter a line number.".into(),
                 true,
                 vec![("Cancel", Act::Press("escape"), Look::Outline), ("Go", Act::Press("enter"), Look::Primary)],
+            ),
+            Kind::RenameScene(_) => (
+                "Name this scene. Leave it empty to remove the name.".into(),
+                true,
+                vec![("Cancel", Act::Press("escape"), Look::Outline), ("Rename", Act::Press("enter"), Look::Primary)],
             ),
             Kind::Rename(id) => (
                 format!("Rename \"{}\".", title_of(id)),

@@ -433,8 +433,11 @@ impl EditorView {
         }
         // A scene break is a short line; only its first characters are read.
         let after_break = || {
-            let before: String = doc.text.line(line - 1).chars().take(64).collect();
-            prose::is_scene_break(before.trim_end())
+            let text = |l: usize| -> String { doc.text.line(l).chars().take(64).collect() };
+            // A scene's name is a note line right under the break.
+            let named = line >= 2 && crate::core::notes::whole_line_note(&text(line - 1), &settings.marker()).is_some();
+            let above = if named { line - 2 } else { line - 1 };
+            prose::is_scene_break(text(above).trim_end())
         };
         let flush = settings.preview_flush && (line == 0 || after_break());
         if flush { 0 } else { settings.preview_indent }
