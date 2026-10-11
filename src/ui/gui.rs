@@ -802,7 +802,10 @@ impl App {
             self.paint_findbar(Rect { y: bar_top, height: find_height, ..rect }, p);
         }
         let padding = self.su(27.);
-        let top = header + toolbar + find_height;
+        // The item's name, fixed above the text; it is not part of the chapter file.
+        let title = if focus || self.project.is_none() { None } else { self.item_of_tab(id).and_then(|item| self.node_title(&item)) };
+        let band = if title.is_some() { (self.settings.font_size * 1.3 * 1.6 * self.scale) as u32 } else { 0 };
+        let top = header + toolbar + find_height + band;
         let width = rect
             .width
             .saturating_sub(padding * 2)
@@ -814,6 +817,15 @@ impl App {
             width,
             height: rect.height.saturating_sub(top + padding * 2).max(1),
         };
+        if let Some(title) = title {
+            let language = self.project.as_ref().map(|s| s.core.manifest.settings.language).unwrap_or_default();
+            let plain = crate::export::model::number_of_chapter_title(&title, language);
+            let (size, colour, face) = if plain { (self.settings.font_size, p.muted, Face::Normal) } else { (self.settings.font_size * 1.3, p.text, Face::Bold) };
+            let area = Rect { x: editor_rect.x, y: rect.y + (header + toolbar + find_height + padding / 2) as i32, width: editor_rect.width, height: band };
+            let shown = self.fit(&title, area.width.saturating_sub(self.su(20.)) as f32, size);
+            self.put(&shown, Rect { x: area.x + self.s(10.), width: area.width.saturating_sub(self.su(10.)), ..area }, size, colour, face, Align::Left);
+            self.hits.push((area, Hit::Do(Act::RenameTitle)));
+        }
         let mut settings = self.settings.clone();
         settings.font_size *= self.scale;
         if settings.preview {

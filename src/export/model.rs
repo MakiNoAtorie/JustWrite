@@ -362,7 +362,8 @@ pub fn parse_matter(text: &str) -> Vec<Vec<Inline>> {
         .collect()
 }
 
-fn number_of_chapter_title(title: &str, language: Language) -> bool {
+/// Whether `title` is only the chapter's number ("Chapter 3", "3"), so no title line is wanted.
+pub fn number_of_chapter_title(title: &str, language: Language) -> bool {
     let t = title.trim().to_lowercase();
     let word = preset::chapter_word(language).to_lowercase();
     t.strip_prefix(&word).is_some_and(|rest| rest.trim().chars().all(|c| c.is_ascii_digit() || c.is_alphabetic() && rest.len() < 4)) || t.chars().all(|c| c.is_ascii_digit()) && !t.is_empty()

@@ -128,6 +128,8 @@ enum Hit {
 enum Act {
     Menu(usize),
     Run(Command),
+    /// The title above the text: rename the open item.
+    RenameTitle,
     Panel(Panel),
     Dismiss,
     Block,
@@ -1434,6 +1436,14 @@ impl App {
             Act::Run(command) => {
                 self.popup = None;
                 self.command(command);
+            }
+            Act::RenameTitle => {
+                let active = self.active_item();
+                if let Some(state) = &mut self.project {
+                    state.selection.clear();
+                    state.selected = active;
+                }
+                self.command(Command::Rename);
             }
             Act::Dismiss => {
                 if self.popup.take().is_none() {
