@@ -1,10 +1,14 @@
 pub mod buffer;
 pub mod commands;
 pub mod comments;
+#[cfg(not(target_os = "ios"))]
 pub mod config;
 pub mod notes;
 pub mod prose;
+#[cfg(not(target_os = "ios"))]
 pub mod spell;
+#[cfg(not(target_os = "ios"))]
 pub mod storage;
 pub mod typography;
+#[cfg(not(target_os = "ios"))]
 pub mod workspace;

@@ -282,11 +282,24 @@ fn endpoints(provider: Provider) -> Endpoints {
 /// The access token and when it stops being valid.
 static TOKEN: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
+// Tests sign in with this and leave the system's secret store alone.
+#[cfg(test)]
+thread_local!(static TEST_SECRET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) });
+
 fn stored_secret() -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(secret) = TEST_SECRET.with(|s| s.borrow().clone()) {
+        return Ok(secret);
+    }
     let bytes = platform::secret(SECRET)?.get_secret().map_err(|_| "Cloud: not signed in. Connect again.".to_owned())?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 fn store_secret(secret: &str) -> Result<(), String> {
+    #[cfg(test)]
+    if TEST_SECRET.with(|s| s.borrow().is_some()) {
+        TEST_SECRET.set(Some(secret.to_owned()));
+        return Ok(());
+    }
     platform::secret(SECRET)?.set_secret(secret.as_bytes()).map_err(|e| format!("Cloud: the sign-in could not be stored ({e})"))
 }
 
@@ -648,13 +661,28 @@ pub fn connect(data: &Path, provider: Provider, server: &str, ids: &Ids) -> Resu
         _ => drop(ids.of(provider)?),
     }
     disconnect(data);
-    let mut account = match provider {
+    let account = match provider {
         Provider::Nextcloud => nextcloud_login(server)?,
         _ => {
             sign_in(provider, ids)?;
             Account { provider, server: String::new(), login: String::new(), user: String::new(), folder: String::new() }
         }
     };
+    establish(data, account, ids)
+}
+
+/// Connects to Nextcloud with an app password made in its web settings, where the browser sign-in
+/// cannot be waited for (iOS stops the app while the browser is in front). The password is the
+/// user's: it is not taken back on the server when the connection is replaced.
+pub fn connect_with_password(data: &Path, server: &str, login: &str, password: &str) -> Result<String, String> {
+    let account = Account { provider: Provider::Nextcloud, server: https(server)?, login: login.trim().to_owned(), user: String::new(), folder: String::new() };
+    store_secret(password.trim())?;
+    establish(data, account, &Ids::default())
+}
+
+/// Checks the sign-in, makes the cloud folder and records the connection, with no links.
+fn establish(data: &Path, mut account: Account, ids: &Ids) -> Result<String, String> {
+    let provider = account.provider;
     let mut client = Client::open(&account, ids)?;
     match provider {
         Provider::Nextcloud => {
@@ -836,7 +864,7 @@ fn replace(jw: &Path, bytes: &[u8], expect: Option<Stamp>) -> Result<Option<Stam
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::jw::{Manifest, workdir};
     use std::io::{BufRead, BufReader};
@@ -914,7 +942,7 @@ mod tests {
 
     /// A local server that speaks enough WebDAV, Microsoft Graph and Google Drive for the sync
     /// rules. Files are kept in memory, with a counter as the version.
-    fn server() -> String {
+    pub(crate) fn server() -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = format!("http://{}", listener.local_addr().unwrap());
         let base = address.clone();
@@ -941,7 +969,7 @@ mod tests {
                 }
                 let mut body = vec![0u8; headers.get("content-length").and_then(|l| l.parse().ok()).unwrap_or(0)];
                 reader.read_exact(&mut body).unwrap();
-                assert_eq!(headers.get("authorization").map(String::as_str), Some("Basic dGVzdA=="));
+                assert_eq!(headers.get("authorization").map(String::as_str), Some("Basic YW5uOnRlc3Q="));
                 let missing = ("404 Not Found", String::new(), Vec::new());
                 let refused = ("412 Precondition Failed", String::new(), Vec::new());
                 let (status, header, reply): (&str, String, Vec<u8>) = if let Some(rest) = path.strip_prefix("/remote.php/dav/files/ann/JustWrite") {
@@ -1035,6 +1063,17 @@ mod tests {
         address
     }
 
+    /// From here on this thread keeps its sign-in in memory.
+    pub(crate) fn no_secret_store() {
+        TEST_SECRET.set(Some(String::new()));
+    }
+    /// Signs this thread in to the Nextcloud of the test server, with `data` as the data folder.
+    pub(crate) fn sign_in_to(base: &str, data: &Path) {
+        TEST_SECRET.set(Some("test".into()));
+        let account = Account { provider: Provider::Nextcloud, server: base.into(), login: "ann".into(), user: "ann".into(), folder: String::new() };
+        State { account: Some(account), links: BTreeMap::new() }.save(data).unwrap();
+    }
+
     /// A packed project with one chapter.
     fn project(data: &Path, jw: &Path, text: &str) -> workdir::WorkDir {
         let work = workdir::create(data, &Manifest::new("Novel")).unwrap();
@@ -1049,7 +1088,7 @@ mod tests {
             let base = server();
             let mut client = Client {
                 account: Account { provider, server: base.clone(), login: String::new(), user: "ann".into(), folder: String::new() },
-                auth: "Basic dGVzdA==".into(),
+                auth: "Basic YW5uOnRlc3Q=".into(),
                 graph: format!("{base}/graph"),
                 drive: format!("{base}/drive"),
                 drive_upload: format!("{base}/upload"),

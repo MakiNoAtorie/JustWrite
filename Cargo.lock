@@ -2238,6 +2238,7 @@ dependencies = [
 name = "justwrite"
 version = "0.1.0"
 dependencies = [
+ "apple-native-keyring-store",
  "arboard",
  "blake3",
  "cosmic-text",
@@ -2245,6 +2246,7 @@ dependencies = [
  "im",
  "jiff",
  "keyring",
+ "keyring-core",
  "notify",
  "quick-xml 0.42.0",
  "regex-lite",
