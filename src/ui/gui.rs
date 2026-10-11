@@ -1210,7 +1210,7 @@ impl App {
                     .skip(usize::from(n > 0))
                     .take(40)
                     .map(|l| text.line(l).to_string().trim().to_owned())
-                    .filter(|l| !l.is_empty() && !prose::is_scene_break(l))
+                    .filter(|l| !l.is_empty() && !prose::is_scene_break(l) && prose::scene_name(l).is_none())
                     .map(|l| crate::core::notes::strip(&crate::core::notes::to_neutral(&l, &marker).0).replace('*', "").trim().to_owned())
                     .find(|l| !l.is_empty())
                     .unwrap_or_default()
@@ -1223,9 +1223,8 @@ impl App {
             .map(|(n, line)| {
                 let next = *line + 1;
                 (n > 0 && next < text.len_lines())
-                    .then(|| crate::core::notes::whole_line_note(&text.line(next).to_string(), &marker))
+                    .then(|| prose::scene_name(&text.line(next).to_string()).map(str::to_owned))
                     .flatten()
-                    .filter(|name| !name.is_empty())
             })
             .collect();
         let head = Rect { x: rect.x + self.s(14.), y: rect.y + self.s(8.), width: rect.width.saturating_sub(self.su(28.)), height: self.su(22.) };

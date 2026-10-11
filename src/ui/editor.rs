@@ -435,7 +435,7 @@ impl EditorView {
         let after_break = || {
             let text = |l: usize| -> String { doc.text.line(l).chars().take(64).collect() };
             // A scene's name is a note line right under the break.
-            let named = line >= 2 && crate::core::notes::whole_line_note(&text(line - 1), &settings.marker()).is_some();
+            let named = line >= 2 && prose::scene_name(&text(line - 1)).is_some();
             let above = if named { line - 2 } else { line - 1 };
             prose::is_scene_break(text(above).trim_end())
         };

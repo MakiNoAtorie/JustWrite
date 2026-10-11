@@ -29,6 +29,8 @@ Text is UTF-8. Paragraphs are separated by a line break; there is no markup othe
 
 * `*italic*` and `**bold**`
 * a scene break is a line that holds only `#`, `***`, `* * *` or similar symbols
+* a scene may have a name: a line `# The storm` directly under its break. The editor shows it bold
+  and centred; exports leave it out
 * **notes** are stored with private-use characters, independent of the marker the author types:
 
   | Character | Meaning |

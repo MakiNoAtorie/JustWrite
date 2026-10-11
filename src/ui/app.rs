@@ -2678,7 +2678,6 @@ impl App {
     }
     /// Opens the name box for the scene whose break is on `line` of the active chapter.
     fn rename_scene(&mut self, line: usize) {
-        let marker = self.marker();
         let Some(tab) = self.active_id().and_then(|id| self.tabs.get(&id)) else { return };
         let text = &tab.document.text;
         if line >= text.len_lines() || !prose::is_scene_break(text.line(line).to_string().trim()) {
@@ -2686,7 +2685,7 @@ impl App {
             return;
         }
         let name = (line + 1 < text.len_lines())
-            .then(|| crate::core::notes::whole_line_note(&text.line(line + 1).to_string(), &marker))
+            .then(|| prose::scene_name(&text.line(line + 1).to_string()).map(str::to_owned))
             .flatten()
             .unwrap_or_default();
         let mut overlay = Overlay::new(Kind::RenameScene(line));
@@ -2697,15 +2696,13 @@ impl App {
     }
     /// Writes (or replaces, or removes) the name note on the line under the break at `line`.
     fn set_scene_name(&mut self, line: usize, name: &str) {
-        let marker = self.marker();
         let Some(id) = self.active_id() else { return };
         let Some(tab) = self.tabs.get_mut(&id) else { return };
         let doc = &mut tab.document;
         if line >= doc.text.len_lines() || !prose::is_scene_break(doc.text.line(line).to_string().trim()) {
             return;
         }
-        let name: String = name.replace(marker.as_str(), "").split_whitespace().collect::<Vec<_>>().join(" ");
-        let m = marker.as_str();
+        let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
         let end = |doc: &crate::core::buffer::Document, l: usize| {
             let mut e = doc.text.line_to_char(l) + doc.text.line(l).len_chars();
             while e > doc.text.line_to_char(l) && matches!(doc.text.char(e - 1), '\n' | '\r') {
@@ -2713,17 +2710,18 @@ impl App {
             }
             e
         };
-        let has_name = line + 1 < doc.text.len_lines() && crate::core::notes::whole_line_note(&doc.text.line(line + 1).to_string(), &marker).is_some();
+        let has_name = line + 1 < doc.text.len_lines() && prose::scene_name(&doc.text.line(line + 1).to_string()).is_some();
         let le = doc.line_ending;
+        let (caret, length) = (doc.cursor, doc.text.len_chars());
         match (has_name, name.is_empty()) {
             (false, true) => return,
             (false, false) => {
                 let at = end(doc, line);
-                doc.replace(at..at, &format!("{le}{m} {name} {m}"));
+                doc.replace(at..at, &format!("{le}# {name}"));
             }
             (true, false) => {
                 let (a, b) = (doc.text.line_to_char(line + 1), end(doc, line + 1));
-                doc.replace(a..b, &format!("{m} {name} {m}"));
+                doc.replace(a..b, &format!("# {name}"));
             }
             (true, true) => {
                 // The whole line goes, with its line ending.
@@ -2731,6 +2729,10 @@ impl App {
                 doc.replace(a..b, "");
             }
         }
+        // The caret stays on its text, not on the name line.
+        let shift = doc.text.len_chars() as isize - length as isize;
+        let caret = if caret > doc.text.line_to_char(line.min(doc.text.len_lines() - 1)) + 1 { (caret as isize + shift).max(0) as usize } else { caret };
+        doc.select(caret.min(doc.text.len_chars()), false);
         self.edited(id);
         self.redraw();
     }

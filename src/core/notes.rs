@@ -389,25 +389,6 @@ pub fn has_notes(neutral: &str) -> bool {
     neutral.chars().any(|c| matches!(c, LINE | OPEN | BLOCK_OPEN))
 }
 
-/// The text of a line that holds only a note (`$$ The storm $$` or `$$ The storm`), if it is one.
-pub fn whole_line_note(line: &str, marker: &Marker) -> Option<String> {
-    let mut name = String::new();
-    let mut found = false;
-    for seg in &scan_line(line, marker, false).segs {
-        let text = &line[seg.range.clone()];
-        match seg.kind {
-            Kind::Note => {
-                name.push_str(text);
-                found = true;
-            }
-            Kind::Delim(Delim::Line | Delim::Open | Delim::Close) => {}
-            Kind::Prose if text.trim().is_empty() => {}
-            _ => return None,
-        }
-    }
-    found.then(|| name.trim().to_owned())
-}
-
 /// Neutral text with every note removed and the whitespace they leave behind cleaned up: a line
 /// that held only a note disappears, trailing spaces before a line note go, and two spaces
 /// around an inline note become one. Runs of blank lines left behind collapse to one.
@@ -679,14 +660,6 @@ mod tests {
         Marker::default()
     }
 
-    #[test]
-    fn a_line_holding_only_a_note_gives_its_text() {
-        let m = Marker::default();
-        assert_eq!(whole_line_note("$$ The storm $$", &m).as_deref(), Some("The storm"));
-        assert_eq!(whole_line_note("$$ The storm", &m).as_deref(), Some("The storm"));
-        assert_eq!(whole_line_note("Rain $$ later $$", &m), None);
-        assert_eq!(whole_line_note("Rain", &m), None);
-    }
     #[test]
     fn markers_are_validated() {
         assert!(Marker::new("$$").is_ok() && Marker::new("%%").is_ok() && Marker::new("//").is_ok());

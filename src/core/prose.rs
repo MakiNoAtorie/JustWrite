@@ -31,6 +31,21 @@ pub fn is_scene_break(line: &str) -> bool {
     }
 }
 
+/// The name of a scene: a line `# The storm` right under its break. Returns the byte offset where
+/// the name starts. A lone `#` is a break, not a name.
+pub fn scene_name_at(line: &str) -> Option<usize> {
+    let body = line.trim_end_matches(['\r', '\n']);
+    let lead = body.len() - body.trim_start().len();
+    let rest = body[lead..].strip_prefix("# ")?;
+    let skipped = rest.len() - rest.trim_start().len();
+    let name = rest.trim();
+    (!name.is_empty() && !is_scene_break(body)).then_some(lead + 2 + skipped)
+}
+/// The text of a scene name line, if it is one.
+pub fn scene_name(line: &str) -> Option<&str> {
+    scene_name_at(line).map(|at| line[at..].trim_end())
+}
+
 // ---- emphasis -------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -342,6 +357,32 @@ pub fn present(source: &str, start: usize, cursor_line: Option<usize>, initial: 
             }
         }
 
+        // A scene's name: bold and centred, without its `# `.
+        if !raw && !scan.has_notes() && !started_in_block && !initial.in_line_note {
+            if let Some(at) = scene_name_at(&line[..body_end]) {
+                let lead = line[..at].chars().count();
+                for (k, c) in line[at..body_end].trim_end().chars().enumerate() {
+                    let position = out.text.len();
+                    out.source.push((position, char_offset + lead + k));
+                    out.text.push(c);
+                    let style = Style { bold: true, ..Default::default() };
+                    match out.spans.last_mut() {
+                        Some(span) if span.style == style && span.bytes.end == position => span.bytes.end = out.text.len(),
+                        _ => out.spans.push(Span { bytes: position..out.text.len(), style }),
+                    }
+                }
+                out.center = true;
+                let ending = &line[body_end..];
+                if !ending.is_empty() {
+                    let at = out.text.len();
+                    out.source.push((at, char_offset + line[..body_end].chars().count()));
+                    out.text.push_str(ending);
+                    out.spans.push(Span { bytes: at..out.text.len(), style: Style::default() });
+                }
+                char_offset += line.chars().count();
+                continue;
+            }
+        }
         // Scene break shown as a symbol.
         if !raw && !scan.has_notes() && !started_in_block && !initial.in_line_note && is_scene_break(&line[..body_end]) {
             let position = out.text.len();
@@ -619,6 +660,19 @@ mod tests {
         Options { marker, show_markers: false, hide_notes: false, scene_symbol: "* * *", indent: 0, caret: None }
     }
 
+    #[test]
+    fn a_scene_name_is_a_hash_line_with_words() {
+        assert_eq!(scene_name("# The storm
+"), Some("The storm"));
+        assert_eq!(scene_name("#"), None);
+        assert_eq!(scene_name("# #"), None);
+        assert_eq!(scene_name("Chapter # 3"), None);
+        let p = present("# The storm
+", 0, None, Initial::default(), Options { marker: &Marker::default(), show_markers: false, hide_notes: false, scene_symbol: "*", indent: 0, caret: None });
+        assert_eq!(p.text, "The storm
+");
+        assert!(p.center && p.spans[0].style.bold);
+    }
     #[test]
     fn scene_breaks() {
         for yes in ["#", "  #  ", "***", "* * *", "---", "___", "~~~~", "⁂", "##"] {
