@@ -644,6 +644,7 @@ impl App {
             Field::text("note_color", "Note colour", &s.note_color).hint("#rrggbb, or leave empty for the accent colour"),
             Field::toggle("note_italic", "Italic notes", s.note_italic),
             Field::toggle("hide_notes", "Hide notes", s.hide_notes),
+            Field::toggle("edit_scene_names", "Edit scene names in the text", s.edit_scene_names).hint("Off: rename scenes by double-clicking them in the Scenes panel"),
             Field::toggle("preview_notes", "Show notes in the preview", s.preview_notes),
             Field::heading("Saving"),
             Field::toggle("autosave", "Save chapters while I write", s.autosave),
@@ -672,6 +673,7 @@ impl App {
         s.note_color = form.text("note_color");
         s.note_italic = form.on("note_italic");
         s.hide_notes = form.on("hide_notes");
+        s.edit_scene_names = form.on("edit_scene_names");
         s.preview_notes = form.on("preview_notes");
         s.autosave = form.on("autosave");
         s.repack_minutes = form.number("repack_minutes") as u32;

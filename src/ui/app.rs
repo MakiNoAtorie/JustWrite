@@ -2201,8 +2201,12 @@ impl App {
             }
             _ => {}
         }
+        let blocked = std::mem::take(&mut tab.document.name_blocked);
         if edited {
             self.edited(id);
+        }
+        if blocked {
+            self.status = "A scene's name changes in the Scenes panel: double-click the scene.".into();
         }
         self.redraw();
     }
@@ -2696,12 +2700,14 @@ impl App {
     }
     /// Writes (or replaces, or removes) the name note on the line under the break at `line`.
     fn set_scene_name(&mut self, line: usize, name: &str) {
+        let protect = !self.settings.edit_scene_names;
         let Some(id) = self.active_id() else { return };
         let Some(tab) = self.tabs.get_mut(&id) else { return };
         let doc = &mut tab.document;
         if line >= doc.text.len_lines() || !prose::is_scene_break(doc.text.line(line).to_string().trim()) {
             return;
         }
+        doc.protect_names = false;
         let name: String = name.split_whitespace().collect::<Vec<_>>().join(" ");
         let end = |doc: &crate::core::buffer::Document, l: usize| {
             let mut e = doc.text.line_to_char(l) + doc.text.line(l).len_chars();
@@ -2733,6 +2739,7 @@ impl App {
         let shift = doc.text.len_chars() as isize - length as isize;
         let caret = if caret > doc.text.line_to_char(line.min(doc.text.len_lines() - 1)) + 1 { (caret as isize + shift).max(0) as usize } else { caret };
         doc.select(caret.min(doc.text.len_chars()), false);
+        doc.protect_names = protect;
         self.edited(id);
         self.redraw();
     }

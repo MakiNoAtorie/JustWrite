@@ -36,6 +36,10 @@ pub struct Document {
     typing: bool,
     deleting: bool,
     last_edit: Option<std::time::Instant>,
+    /// Edits that touch a scene's name (and its break) are refused; the Scenes panel renames.
+    pub protect_names: bool,
+    /// An edit was refused because of `protect_names`; the program says why and clears this.
+    pub name_blocked: bool,
 }
 
 impl Default for Document {
@@ -69,6 +73,8 @@ impl Document {
             typing: false,
             deleting: false,
             last_edit: None,
+            protect_names: true,
+            name_blocked: false,
         }
     }
     pub fn selection(&self) -> Range<usize> {
@@ -102,7 +108,39 @@ impl Document {
     pub fn replace(&mut self, range: Range<usize>, text: &str) {
         self.replace_rope(range, Rope::from_str(text));
     }
+    /// Whether line `l` is a scene name or the break above one.
+    fn name_pair_line(&self, l: usize) -> bool {
+        let lines = self.text.len_lines();
+        if l >= lines {
+            return false;
+        }
+        let get = |i: usize| -> String { self.text.line(i).chars().take(64).collect() };
+        let line = get(l);
+        (l > 0 && super::prose::scene_name(&line).is_some() && super::prose::is_scene_break(get(l - 1).trim()))
+            || (l + 1 < lines && super::prose::is_scene_break(line.trim()) && super::prose::scene_name(&get(l + 1)).is_some())
+    }
+    /// Whether `range` changes part of a name line or of its break. Covering the whole line is fine.
+    fn touches_scene_name(&self, range: &Range<usize>) -> bool {
+        let len = self.text.len_chars();
+        let end = range.end.min(len);
+        let check = |pos: usize| {
+            let l = self.text.char_to_line(pos.min(len));
+            if !self.name_pair_line(l) {
+                return false;
+            }
+            let last = l + 1 >= self.text.len_lines();
+            let (s, e) = (self.text.line_to_char(l), if last { len } else { self.text.line_to_char(l + 1) });
+            let overlaps = if range.start == end { s <= range.start && (range.start < e || last) } else { range.start < e && end > s };
+            let covered = range.start < end && range.start <= s && end >= e;
+            overlaps && !covered
+        };
+        check(range.start) || (end > range.start && check(end))
+    }
     pub fn replace_rope(&mut self, range: Range<usize>, inserted: Rope) {
+        if self.protect_names && self.touches_scene_name(&range) {
+            self.name_blocked = true;
+            return;
+        }
         let changed_line = self.text.char_to_line(range.start);
         let before = (self.cursor, self.anchor);
         self.edits.push(EditRec { start: range.start, removed: range.len(), inserted: inserted.len_chars() });
@@ -193,7 +231,11 @@ impl Document {
             let single_back = backwards && range.len() == 1 && self.selection().is_empty();
             let fresh = self.last_edit.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(1500));
             let adjacent = self.undo.last().is_some_and(|e| e.inserted.len_chars() == 0 && e.start == range.end);
+            let before = self.revision;
             self.replace(range, "");
+            if self.revision == before {
+                return;
+            }
             if single_back && adjacent && self.deleting && !fresh && self.undo.len() >= 2 {
                 let last = self.undo.pop().unwrap();
                 let previous = self.undo.last_mut().unwrap();
@@ -270,7 +312,11 @@ impl Document {
         let adjacent_to_last = self.undo.last().is_some_and(|e| e.removed.len_chars() == 0 && e.start + e.inserted.len_chars() == range.start);
         let fresh = self.last_edit.is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(1500));
         let merge = range.is_empty() && delete_before == 0 && adjacent_to_last && !word_start && !fresh && self.typing;
+        let before = self.revision;
         self.replace(range.start - delete_before..range.end, &text);
+        if self.revision == before {
+            return;
+        }
         if merge && self.undo.len() >= 2 {
             let last = self.undo.pop().unwrap();
             let previous = self.undo.last_mut().unwrap();
@@ -290,7 +336,7 @@ impl Document {
         let line = self.text.char_to_line(self.cursor.min(self.text.len_chars()));
         let start = self.text.line_to_char(line);
         let content: String = self.text.line(line).to_string().trim_end_matches(['\r', '\n']).to_owned();
-        if super::prose::is_scene_break(&content) {
+        if super::prose::is_scene_break(&content) || (self.protect_names && self.name_pair_line(line)) {
             return false;
         }
         let end = start + content.chars().count();
@@ -459,6 +505,48 @@ b"));
 #
 
 b");
+    }
+    #[test]
+    fn a_scene_name_and_its_break_resist_edits_unless_unprotected() {
+        let text = "para
+
+#
+# The storm
+
+next";
+        let mut doc = Document::new(Rope::from_str(text));
+        // Typing in the name, at its end, and deleting a part of the break are all refused.
+        let name_end = text.find("storm").unwrap() + 5;
+        doc.select(name_end, false);
+        doc.type_text("x", None);
+        doc.delete(true);
+        let break_line = text.find("#
+#").unwrap();
+        doc.select(break_line + 1, false);
+        doc.delete(true);
+        assert_eq!(doc.text.to_string(), text);
+        assert!(doc.name_blocked);
+        // Text around them still edits, and a selection covering both lines goes whole.
+        doc.select(0, false);
+        doc.type_text("A", None);
+        assert!(doc.text.to_string().starts_with("Apara"));
+        let from = doc.text.to_string().find("#
+#").unwrap();
+        let to = doc.text.to_string().find("
+
+next").unwrap() + 1;
+        doc.anchor = from;
+        doc.cursor = to;
+        doc.delete(false);
+        assert_eq!(doc.text.to_string(), "Apara
+
+
+next");
+        doc.undo();
+        doc.protect_names = false;
+        doc.select(doc.text.to_string().find("storm").unwrap() + 5, false);
+        doc.type_text("y", None);
+        assert!(doc.text.to_string().contains("# The stormy"));
     }
     #[test]
     fn edits_keep_unicode_and_original_endings() {

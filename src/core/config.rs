@@ -31,6 +31,8 @@ pub struct Settings {
     pub note_color: String,
     pub note_italic: bool,
     pub hide_notes: bool,
+    /// Let the text edit scene names. Off: names change only in the Scenes panel.
+    pub edit_scene_names: bool,
     /// Keep notes in the preview view. Off by default: the preview shows the text as exported.
     pub preview_notes: bool,
     /// Underline possible spelling mistakes.
@@ -74,6 +76,7 @@ impl Default for Settings {
             note_color: String::new(),
             note_italic: true,
             hide_notes: false,
+            edit_scene_names: false,
             preview_notes: false,
             spellcheck: true,
             default_preset: String::new(),

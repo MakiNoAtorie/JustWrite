@@ -861,6 +861,7 @@ impl App {
         let symbol = self.scene_symbol();
         let tab = self.tabs.get_mut(&id).unwrap();
         tab.view.highlights = highlights;
+        tab.document.protect_names = !self.settings.edit_scene_names;
         tab.view.configure(&settings, &symbol);
         tab.view.layout(&tab.document, &tab.blocks, &settings, &mut self.fonts, editor_rect);
         // The empty pane of a new split has no file, so no text and no caret.
