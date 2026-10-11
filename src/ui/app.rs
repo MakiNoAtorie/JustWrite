@@ -1821,6 +1821,11 @@ impl App {
                     self.edited(id);
                 }
             }
+            Command::FontSmaller | Command::FontLarger => {
+                let step = if command == Command::FontLarger { 1. } else { -1. };
+                self.settings.font_size = (self.settings.font_size + step).clamp(10., 48.);
+                self.save_settings();
+            }
             Command::AlignLeft | Command::AlignJustify => {
                 self.settings.justify = command == Command::AlignJustify;
                 self.save_settings();

@@ -665,33 +665,56 @@ impl App {
         let mut x = rect.x + self.s(14.);
         let height = rect.height.saturating_sub(self.su(10.));
         let y = rect.y + self.s(5.);
-        let tools: [(&str, Face, Option<Hit>); 14] = [
-            ("B", Face::Bold, Some(Hit::Command(Command::Bold))),
-            ("I", Face::Italic, Some(Hit::Command(Command::Italic))),
-            ("", Face::Normal, None),
-            ("Left", Face::Normal, Some(Hit::Command(Command::AlignLeft))),
-            ("Justify", Face::Normal, Some(Hit::Command(Command::AlignJustify))),
-            ("", Face::Normal, None),
-            ("Raw", Face::Normal, Some(Hit::Command(Command::RawView))),
-            ("Preview", Face::Normal, Some(Hit::Command(Command::PreviewView))),
-            ("", Face::Normal, None),
-            ("Note", Face::Normal, Some(Hit::Command(Command::ToggleNote))),
-            ("Comment", Face::Normal, Some(Hit::Command(Command::AddComment))),
-            ("", Face::Normal, None),
-            ("Find", Face::Normal, Some(Hit::Command(Command::Find))),
-            ("Scenes", Face::Normal, Some(Hit::Command(Command::JumpScene))),
+        enum Tool {
+            Gap,
+            Label(String),
+            Button(&'static str, Face, Hit),
+        }
+        let command = |c| Hit::Command(c);
+        let tools = [
+            Tool::Button("B", Face::Bold, command(Command::Bold)),
+            Tool::Button("I", Face::Italic, command(Command::Italic)),
+            Tool::Gap,
+            Tool::Button("", Face::Normal, command(Command::AlignLeft)),
+            Tool::Button("", Face::Normal, command(Command::AlignJustify)),
+            Tool::Gap,
+            Tool::Button("−", Face::Normal, command(Command::FontSmaller)),
+            Tool::Label(format!("{}", self.settings.font_size)),
+            Tool::Button("+", Face::Normal, command(Command::FontLarger)),
+            Tool::Gap,
+            Tool::Button("Raw", Face::Normal, command(Command::RawView)),
+            Tool::Button("Preview", Face::Normal, command(Command::PreviewView)),
+            Tool::Gap,
+            Tool::Button("Note", Face::Normal, command(Command::ToggleNote)),
+            Tool::Button("Comment", Face::Normal, command(Command::AddComment)),
+            Tool::Gap,
+            Tool::Button("Find", Face::Normal, command(Command::Find)),
+            Tool::Button("Scenes", Face::Normal, command(Command::JumpScene)),
         ];
-        for (text, face, hit) in tools {
-            let Some(hit) = hit else {
-                self.renderer.fill(
-                    Rect { x: x + self.s(4.), y: y + self.s(5.), width: 1, height: height.saturating_sub(self.su(10.)) },
-                    p.border,
-                );
-                x += self.s(10.);
-                continue;
+        let edge = rect.x + rect.width as i32 - self.s(8.);
+        for tool in tools {
+            let (text, face, hit) = match tool {
+                Tool::Gap => {
+                    self.renderer.fill(
+                        Rect { x: x + self.s(4.), y: y + self.s(5.), width: 1, height: height.saturating_sub(self.su(10.)) },
+                        p.border,
+                    );
+                    x += self.s(10.);
+                    continue;
+                }
+                Tool::Label(text) => {
+                    let width = self.measure(&text, 13. * self.scale, Face::Normal).ceil() as u32 + self.su(10.);
+                    if x + width as i32 > edge {
+                        break;
+                    }
+                    self.put(&text, Rect { x, y, width, height }, 13., p.text, Face::Normal, Align::Center);
+                    x += width as i32 + self.s(2.);
+                    continue;
+                }
+                Tool::Button(text, face, hit) => (text, face, hit),
             };
             let width = (self.measure(text, 13. * self.scale, face).ceil() as u32 + self.su(18.)).max(self.su(30.));
-            if x + width as i32 > rect.x + rect.width as i32 - self.s(8.) {
+            if x + width as i32 > edge {
                 break;
             }
             let on = match &hit {
@@ -708,12 +731,32 @@ impl App {
                 _ => true,
             };
             let look = if on { Look::Active } else { Look::Plain };
+            let cell = Rect { x, y, width, height };
+            let icon = match &hit {
+                Hit::Command(Command::AlignLeft) => Some(false),
+                Hit::Command(Command::AlignJustify) => Some(true),
+                _ => None,
+            };
             if enabled {
-                self.button_face(text, Rect { x, y, width, height }, hit, look, face, Align::Center, p);
+                self.button_face(text, cell, hit, look, face, Align::Center, p);
             } else {
-                self.put(text, Rect { x, y, width, height }, 13., p.faint(p.surface), face, Align::Center);
+                self.put(text, cell, 13., p.faint(p.surface), face, Align::Center);
+            }
+            if let Some(justified) = icon {
+                let colour = if !enabled { p.faint(p.surface) } else if on || self.hot(cell) { p.text } else { p.muted };
+                self.paint_align_icon(cell, justified, colour);
             }
             x += width as i32 + self.s(2.);
+        }
+    }
+    /// Four text lines: ragged for left, full width for justified.
+    fn paint_align_icon(&mut self, cell: Rect, justified: bool, colour: u32) {
+        let (w, bar, pitch) = (self.su(14.), self.s(1.5).max(1) as u32, self.s(3.5).max(2));
+        let top = cell.y + (cell.height as i32 - (3 * pitch + bar as i32)) / 2;
+        let left = cell.x + (cell.width as i32 - w as i32) / 2;
+        for (n, percent) in [100, 70, 100, 50].into_iter().enumerate() {
+            let percent = if justified { 100 } else { percent };
+            self.renderer.fill(Rect { x: left, y: top + n as i32 * pitch, width: w * percent / 100, height: bar }, colour);
         }
     }
     pub(super) fn paint_pane(&mut self, pane_id: u64, rect: Rect, focus: bool, p: Palette) {

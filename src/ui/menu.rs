@@ -56,6 +56,8 @@ pub const MENUS: &[(&str, char, Items)] = &[
             None,
             Some(Command::AlignLeft),
             Some(Command::AlignJustify),
+            Some(Command::FontSmaller),
+            Some(Command::FontLarger),
             None,
             Some(Command::ToggleNote),
             Some(Command::NoteParagraph),
