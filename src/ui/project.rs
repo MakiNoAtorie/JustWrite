@@ -481,6 +481,8 @@ impl App {
         } else {
             self.open_item(id);
         }
+        // Opening a chapter makes a tab, which takes the keys; the tree click keeps them.
+        self.focus = Focus::Tree;
     }
     /// Keys while the tree owns the keyboard. Returns whether the key was used.
     pub(super) fn tree_key(&mut self, key: &Key, primary: bool, shift: bool) -> bool {

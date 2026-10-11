@@ -567,11 +567,7 @@ impl EditorView {
         };
         let down = matches!(motion, Motion::Down | Motion::PageDown);
         for attempt in 0..2 {
-            let position = self
-                .tiles
-                .iter()
-                .find(|t| t.owns(doc.cursor))
-                .and_then(|t| t.caret(doc.cursor));
+            let position = self.caret_at(doc.cursor);
             if let Some((x, y)) = position {
                 let step = settings.font_size * settings.line_height;
                 let target_y = y + if down { step * 1.5 } else { -step * 0.5 };
