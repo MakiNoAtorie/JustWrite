@@ -298,11 +298,11 @@ mod tests {
         assert_eq!(keymap.get("italic").map(String::as_str), Some("Ctrl+Alt+I"));
         assert_eq!(keymap.get("undo").map(String::as_str), Some(""));
         assert!(!keymap.contains_key("bold"));
-        assert_eq!(keymap.contains_key("quit"), !cfg!(target_os = "macos"));
-        // With no default listed, the same shortcut is a choice and stays.
+        assert!(!keymap.contains_key("quit"));
+        // With no default listed, the same shortcut is a choice on a Mac and stays.
         let mut chosen: BTreeMap<String, String> = [("quit".to_owned(), "Alt+F4".to_owned())].into();
         prune_defaults(&mut chosen);
-        assert_eq!(chosen.len(), if cfg!(windows) { 0 } else { 1 });
+        assert_eq!(chosen.len(), if cfg!(target_os = "macos") { 1 } else { 0 });
     }
     #[test]
     fn shortcuts_are_shown_with_arrows() {
