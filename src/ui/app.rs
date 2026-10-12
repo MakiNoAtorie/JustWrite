@@ -149,6 +149,7 @@ enum Act {
     ToggleReplace,
     Screen(ScreenAct),
     CommentDo(&'static str, String),
+    HistoryDo(&'static str, String),
     CommentFilter(&'static str),
     OpenRecent(usize),
     FormFocus(usize),
@@ -1563,6 +1564,7 @@ impl App {
             }
             Act::CommentFilter(key) => self.comment_filter(key),
             Act::CommentDo(action, id) => self.comment_action(action, &id),
+            Act::HistoryDo(action, id) => self.history_do(action, &id),
             Act::FormFocus(_)
             | Act::FormToggle(_)
             | Act::FormSegment(..)
@@ -1772,7 +1774,7 @@ impl App {
             Command::OpenProject => self.choose(Choose::OpenProject),
             Command::Recent => self.show(Kind::Recent),
             Command::Import => self.choose(Choose::ImportFile),
-            Command::Save => self.save_all(),
+            Command::Save => self.save_by_hand(),
             Command::SaveAs => {
                 if self.project.is_some() {
                     self.choose(Choose::SaveProjectAs);
@@ -1995,7 +1997,18 @@ impl App {
                 }
                 self.show_outline = true;
             }
-            Command::ShowHistory => self.open_history(),
+            Command::ShowHistory => {
+                // The tab first; a second press, or a window too narrow for the panel, opens the full view.
+                let hidden = self.show_outline && self.outline_rect.is_none();
+                let shown = self.show_outline && self.project.as_ref().is_some_and(|s| s.panel == Panel::History);
+                match &mut self.project {
+                    Some(state) if !shown && !hidden => {
+                        state.panel = Panel::History;
+                        self.show_outline = true;
+                    }
+                    _ => self.open_history(),
+                }
+            }
             Command::Snapshot => self.snapshot_form(),
             Command::Export => self.export_form(""),
             Command::Preview => self.open_preview(),

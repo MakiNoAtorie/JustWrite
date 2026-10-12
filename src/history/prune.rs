@@ -54,6 +54,58 @@ pub fn prune(history: &mut History, project: &crate::jw::Project, now: i64) -> i
     Ok(ids.len())
 }
 
+/// How far the trimmer thins out: the newest snapshot of each span of time stays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keep {
+    Hourly,
+    Daily,
+    Weekly,
+    Nothing,
+}
+/// What the author asked the trimmer to remove.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trim {
+    pub keep: Keep,
+    /// Only snapshots at least this many days old.
+    pub older_days: u32,
+    /// Also the snapshots the author took with a message.
+    pub named: bool,
+    /// Also safety copies and restores.
+    pub safety: bool,
+}
+
+/// The snapshots that `trim` would remove at time `now`. The newest snapshot of a line stays.
+pub fn trimmed(history: &History, trim: &Trim, now: i64) -> Vec<String> {
+    let heads: HashSet<&str> = history
+        .lines
+        .lines
+        .iter()
+        .filter_map(|l| history.head(&l.name).map(|s| s.id.as_str()))
+        .collect();
+    let mut newest: std::collections::HashMap<(&str, i64), &str> = std::collections::HashMap::new();
+    let mut gone = Vec::new();
+    // Newest first, so the first snapshot met in a span of time is the one that stays. A snapshot
+    // that is not up for removal counts too: it is the one kept for its span.
+    for s in history.snapshots.iter().rev() {
+        let span = match trim.keep {
+            Keep::Hourly => Some(s.time.div_euclid(3600)),
+            Keep::Daily => Some(time::day(s.time)),
+            Keep::Weekly => Some(time::day(s.time).div_euclid(7)),
+            Keep::Nothing => None,
+        };
+        let stays = span.is_some_and(|span| *newest.entry((s.line.as_str(), span)).or_insert(&s.id) == s.id);
+        let wanted = match s.kind {
+            Kind::Auto => true,
+            Kind::Manual => trim.named,
+            Kind::Safety | Kind::Restore => trim.safety,
+        };
+        if wanted && !stays && !heads.contains(s.id.as_str()) && now - s.time >= trim.older_days as i64 * DAY {
+            gone.push(s.id.clone());
+        }
+    }
+    gone
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::store::{SnapshotMeta, testing::fixture};
@@ -97,6 +149,29 @@ mod tests {
         assert_eq!(gone.iter().filter(|i| i.starts_with("w60_")).count(), 3, "{gone:?}");
         let off = SnapshotPolicy { thin: false, ..policy };
         assert!(doomed(&history, &off, now).is_empty());
+    }
+
+    #[test]
+    fn the_trimmer_keeps_one_per_span_and_spares_named_snapshots_and_heads() {
+        let now = 100 * DAY + DAY / 2;
+        let mut history = History::default();
+        // Four automatic snapshots in one hour two days ago, a named one among them, one today.
+        for i in 0..4 {
+            history.snapshots.push(meta(&format!("a{i}"), now - 2 * DAY + 60 * i, Kind::Auto));
+        }
+        history.snapshots.push(meta("named", now - 2 * DAY + 30, Kind::Manual));
+        history.snapshots.push(meta("safety", now - 2 * DAY + 90, Kind::Safety));
+        history.snapshots.push(meta("head", now, Kind::Auto));
+        history.snapshots.sort_by_key(|s| s.time);
+        let trim = Trim { keep: Keep::Hourly, older_days: 0, named: false, safety: false };
+        let mut gone = trimmed(&history, &trim, now);
+        gone.sort();
+        assert_eq!(gone, ["a0", "a1", "a2"]);
+        assert_eq!(trimmed(&history, &Trim { named: true, safety: true, ..trim }, now).len(), 5, "a3 is the one of its hour");
+        let all = Trim { keep: Keep::Nothing, named: true, safety: true, ..trim };
+        assert_eq!(trimmed(&history, &all, now).len(), 6, "everything but the head");
+        assert!(trimmed(&history, &Trim { older_days: 3, ..all }, now).is_empty());
+        assert_eq!(trimmed(&history, &Trim { older_days: 1, ..all }, now).len(), 6);
     }
 
     #[test]

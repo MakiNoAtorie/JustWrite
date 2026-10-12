@@ -96,6 +96,7 @@ pub const MENUS: &[(&str, char, Items)] = &[
             Some(Command::ToggleTree),
             Some(Command::TogglePanel),
             Some(Command::ShowComments),
+            Some(Command::ShowHistory),
             Some(Command::Focus),
             None,
             Some(Command::RawView),

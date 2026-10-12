@@ -26,6 +26,9 @@ pub enum FormKind {
     Reply(String),
     DeleteComment(String),
     Snapshot,
+    EditSnapshot(String),
+    DeleteSnapshot(String),
+    Trim,
     NewNote,
     NewLine,
     RenameLine(String),
@@ -582,6 +585,23 @@ impl App {
             }
         }
     }
+    /// A manual save: with the project's setting on, it also takes a snapshot, without a message.
+    pub(super) fn save_by_hand(&mut self) {
+        if self.project.as_ref().is_some_and(|s| s.core.manifest.settings.snapshots.on_save) {
+            // The snapshot reads the files, so the text is written here and not in the background.
+            self.flush_tabs();
+            let now = self.now();
+            if let Some(state) = &mut self.project
+                && let Ok(Some(_)) = state.history.capture_auto(&state.core, "Saved", now)
+            {
+                state.changed = false;
+                state.stale = true;
+                state.last_snapshot = Instant::now();
+            }
+            self.refresh_history();
+        }
+        self.save_all();
+    }
     pub(super) fn save_all(&mut self) {
         let ids: Vec<u64> = self.tabs.iter().filter(|(_, t)| t.document.dirty()).map(|(id, _)| *id).collect();
         for id in ids {
@@ -783,16 +803,76 @@ impl App {
         self.open_form(Form::new(FormKind::Overwrite, "The project file changed", fields).submit("Overwrite").danger().button("Save a copy…", "copy").width(580.));
     }
     pub(super) fn snapshot_form(&mut self) {
+        self.flush_tabs();
+        self.refresh_changes();
+        let summary = self.changes_summary();
         let Some(state) = &self.project else {
             self.status = "Open a project first.".into();
             return;
         };
         let line = state.history.current_line().to_owned();
+        let hint = if summary.is_empty() { "What is this version? For example: first draft done".to_owned() } else { format!("Leave it empty for: {summary}") };
         let fields = vec![
             Field::info(&format!("A snapshot keeps every chapter, note, comment and the book details as they are now, on the “{line}” line.")),
-            Field::text("message", "Message", "").hint("What is this version? For example: first draft done"),
+            Field::text("message", "Message", "").hint(&hint),
         ];
-        self.open_form(Form::new(FormKind::Snapshot, "Take a snapshot", fields).submit("Take snapshot").width(560.));
+        let mut form = Form::new(FormKind::Snapshot, "Take a snapshot", fields).submit("Take snapshot").width(560.);
+        form.data = vec![summary];
+        self.open_form(form);
+    }
+    pub(super) fn edit_snapshot_form(&mut self, id: &str) {
+        let Some(meta) = self.project.as_ref().and_then(|s| s.history.get(id)) else { return };
+        let fields = vec![Field::text("message", "Message", &meta.message)];
+        self.open_form(Form::new(FormKind::EditSnapshot(id.into()), "Rename the snapshot", fields).submit("Rename").width(520.));
+    }
+    pub(super) fn delete_snapshot_form(&mut self, id: &str) {
+        let Some(meta) = self.project.as_ref().and_then(|s| s.history.get(id)) else { return };
+        let name = if meta.message.is_empty() { jw::time::local(meta.time) } else { format!("“{}”", meta.message) };
+        let fields = vec![Field::info(&format!("The snapshot {name} is removed from the history. The text in the editor does not change. This cannot be undone."))];
+        self.open_form(Form::new(FormKind::DeleteSnapshot(id.into()), "Delete this snapshot?", fields).submit("Delete").danger().width(520.));
+    }
+    pub(super) fn trim_form(&mut self) {
+        if self.project.is_none() {
+            return;
+        }
+        let fields = vec![
+            Field::choice("keep", "Of the automatic snapshots, keep", labels(&["One per hour", "One per day", "One per week", "None"]), 1),
+            Field::number("older", "Only trim snapshots older than", 0., 0., 3650., 1., 0, "days (0 for all)"),
+            Field::toggle("named", "Also trim the snapshots I took myself", false),
+            Field::toggle("safety", "Also trim safety copies and restores", false),
+            Field::info(""),
+        ];
+        self.open_form(Form::new(FormKind::Trim, "Trim the history", fields).submit("Trim").danger().width(580.));
+        self.trim_count();
+    }
+    fn trim_request(form: &Form) -> history::prune::Trim {
+        use history::prune::Keep;
+        history::prune::Trim {
+            keep: [Keep::Hourly, Keep::Daily, Keep::Weekly, Keep::Nothing][form.choice("keep").min(3)],
+            older_days: form.number("older") as u32,
+            named: form.on("named"),
+            safety: form.on("safety"),
+        }
+    }
+    /// Tells in the trim dialog how many snapshots the choices remove.
+    fn trim_count(&mut self) {
+        let (Some(form), Some(state)) = (&mut self.form, &self.project) else { return };
+        let gone = history::prune::trimmed(&state.history, &Self::trim_request(form), jw::time::now()).len();
+        if let Some(info) = form.fields.iter_mut().find(|f| matches!(f.control, Control::Info)) {
+            info.text = format!(
+                "This removes {gone} of {} snapshots, on all lines. The newest snapshot of every line stays. The text in the editor does not change. This cannot be undone.",
+                state.history.snapshots.len()
+            );
+        }
+    }
+    /// After snapshots were removed or renamed: the file and what is on screen follow.
+    fn history_edited(&mut self) {
+        if let Some(state) = &mut self.project {
+            state.stale = true;
+        }
+        self.pack_project(false);
+        self.refresh_history();
+        self.close_form();
     }
     pub(super) fn new_line_form(&mut self) {
         let fields = vec![
@@ -874,6 +954,7 @@ impl App {
             Field::heading("Snapshots"),
             Field::number("auto_minutes", "Automatic snapshot every", s.snapshots.auto_minutes as f32, 0., 1440., 5., 0, "min (0 for never)"),
             Field::toggle("on_close", "Snapshot when the project closes", s.snapshots.on_close),
+            Field::toggle("on_save", "Snapshot on every manual save", s.snapshots.on_save).hint("No message is asked"),
             Field::toggle("thin", "Thin out old automatic snapshots", s.snapshots.thin).hint("Manual snapshots are always kept"),
             Field::number("keep_all_days", "Keep every automatic snapshot for", s.snapshots.keep_all_days as f32, 0., 365., 1., 0, "days"),
             Field::number("keep_daily_days", "Then one per day for", s.snapshots.keep_daily_days as f32, 0., 3650., 5., 0, "days"),
@@ -1248,6 +1329,7 @@ impl App {
         let Some(form) = &mut self.form else { return };
         match form.kind {
             FormKind::Settings => self.apply_settings_form(),
+            FormKind::Trim => self.trim_count(),
             FormKind::Export => match key {
                 "preset" => {
                     let Some(state) = &self.project else { return };
@@ -1416,9 +1498,35 @@ impl App {
                 self.close_form();
             }
             FormKind::Snapshot => {
-                let message = form.text("message");
+                let message = Some(form.text("message")).filter(|m| !m.is_empty()).or_else(|| form.data.first().cloned()).unwrap_or_default();
                 self.take_snapshot(&message);
                 self.close_form();
+            }
+            FormKind::EditSnapshot(id) => {
+                let message = form.text("message");
+                let result = self.project.as_mut().map(|s| s.history.set_message(&s.core.work, &id, &message));
+                if let Some(Err(error)) = result {
+                    self.status = format!("Could not rename the snapshot: {error}");
+                }
+                self.history_edited();
+            }
+            FormKind::DeleteSnapshot(id) => {
+                let result = self.project.as_mut().map(|s| s.history.remove_snapshots(&s.core.work, &[id]));
+                self.status = match result {
+                    Some(Err(error)) => format!("Could not delete the snapshot: {error}"),
+                    _ => "Snapshot deleted.".into(),
+                };
+                self.history_edited();
+            }
+            FormKind::Trim => {
+                let trim = Self::trim_request(form);
+                let Some(state) = &mut self.project else { return };
+                let ids = history::prune::trimmed(&state.history, &trim, jw::time::now());
+                self.status = match state.history.remove_snapshots(&state.core.work, &ids) {
+                    Ok(()) => format!("Trimmed: {} snapshot{} removed.", ids.len(), if ids.len() == 1 { "" } else { "s" }),
+                    Err(error) => format!("Could not trim the history: {error}"),
+                };
+                self.history_edited();
             }
             FormKind::NewNote => {
                 let name = form.text("name");
@@ -1526,6 +1634,7 @@ impl App {
         match state.history.capture(&state.core, history::Kind::Manual, message, now) {
             Ok(meta) => {
                 state.changed = false;
+                state.stale = true;
                 state.last_snapshot = Instant::now();
                 self.status = format!("Snapshot taken: {}.", count_words(meta.words as u64));
                 self.pack_project(false);
@@ -1565,7 +1674,7 @@ impl App {
             if let Err(error) = state.core.save_book() {
                 self.status = format!("Could not save the book details: {error}");
             } else {
-                state.changed = true;
+                state.touch();
             }
         }
         self.close_form();
@@ -1588,9 +1697,11 @@ impl App {
             form.number("keep_all_days") as u32,
             form.number("keep_daily_days") as u32,
         );
+        let on_save = form.on("on_save");
         let Some(state) = &mut self.project else { return };
         let s = &mut state.core.manifest.settings;
         s.language = language;
+        s.snapshots.on_save = on_save;
         (s.typography.smart_quotes, s.typography.em_dash, s.typography.ellipsis, s.typography.dialogue_dash) = (values.0, values.1, values.2, values.3);
         if !scene.is_empty() {
             s.scene_break = scene;
@@ -1678,7 +1789,7 @@ impl App {
         let Some(state) = &mut self.project else { return };
         match state.core.set_cover(&path) {
             Ok(()) => {
-                state.changed = true;
+                state.touch();
                 self.status = "Cover set.".into();
                 if matches!(self.form.as_ref().map(|f| &f.kind), None) {
                     self.book_form();

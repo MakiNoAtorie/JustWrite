@@ -165,7 +165,7 @@ commands![
     (Command::GotoLine, "goto_line", "Go to line…", "Ctrl+G"),
     (Command::WordCount, "word_count", "Word count", ""),
     (Command::ShowComments, "show_comments", "Show comments panel", "Ctrl+Shift+M"),
-    (Command::ShowHistory, "show_history", "Snapshots and history…", "Ctrl+Shift+H"),
+    (Command::ShowHistory, "show_history", "Snapshots and history", "Ctrl+Shift+H"),
     (Command::Snapshot, "snapshot", "Take snapshot…", "Ctrl+Alt+S"),
     (Command::Export, "export", "Export…", "Ctrl+E"),
     (Command::Preview, "preview", "Paged preview…", "Ctrl+Alt+P"),

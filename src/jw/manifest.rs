@@ -294,6 +294,8 @@ pub struct SnapshotPolicy {
     /// Minutes between automatic snapshots; 0 turns the timer off.
     pub auto_minutes: u32,
     pub on_close: bool,
+    /// A manual save also takes a snapshot, without a message.
+    pub on_save: bool,
     /// Automatic snapshots newer than this many days are all kept.
     pub keep_all_days: u32,
     /// Older ones are thinned to one per day until this many days...
@@ -303,7 +305,7 @@ pub struct SnapshotPolicy {
 }
 impl Default for SnapshotPolicy {
     fn default() -> Self {
-        Self { auto_minutes: 30, on_close: true, keep_all_days: 2, keep_daily_days: 30, thin: true }
+        Self { auto_minutes: 30, on_close: true, on_save: false, keep_all_days: 2, keep_daily_days: 30, thin: true }
     }
 }
 

@@ -1193,16 +1193,23 @@ impl App {
     pub(super) fn paint_panel(&mut self, rect: Rect, p: Palette) {
         self.renderer.fill(rect, p.surface);
         self.renderer.fill(Rect { width: 1, ..rect }, p.border);
+        self.refresh_changes();
         let Some(state) = &self.project else {
             return;
         };
         let panel = state.panel;
         let open = state.comments.comments.iter().filter(|c| c.status == CommentStatus::Open).count();
+        let pending = state.pending.len();
         // Tabs
         let tab_height = self.su(34.);
-        let half = rect.width / 2;
-        for (index, (label, which)) in [("Scenes".to_owned(), Panel::Scenes), (if open > 0 { format!("Comments ({open})") } else { "Comments".to_owned() }, Panel::Comments)].into_iter().enumerate() {
-            let cell = Rect { x: rect.x + index as i32 * half as i32, width: half, height: tab_height, ..rect };
+        let tabs = [
+            ("Scenes".to_owned(), Panel::Scenes),
+            (if open > 0 { format!("Comments ({open})") } else { "Comments".to_owned() }, Panel::Comments),
+            (if pending > 0 { format!("History ({pending})") } else { "History".to_owned() }, Panel::History),
+        ];
+        let third = rect.width / 3;
+        for (index, (label, which)) in tabs.into_iter().enumerate() {
+            let cell = Rect { x: rect.x + index as i32 * third as i32, width: third, height: tab_height, ..rect };
             let on = panel == which;
             if on {
                 self.renderer.fill(Rect { y: cell.y + cell.height as i32 - self.s(2.), height: self.su(2.), ..cell }, p.accent);
@@ -1217,6 +1224,7 @@ impl App {
         match panel {
             Panel::Scenes => self.paint_scenes(body, p),
             Panel::Comments => self.paint_comments(body, p),
+            Panel::History => self.paint_history_panel(body, p),
         }
         self.hits.push((
             Rect { x: rect.x - self.s(3.), width: self.su(6.), ..rect },
@@ -1383,11 +1391,12 @@ impl App {
             ("Split", Command::SplitRight, false),
             // Lit only while the panel is on screen: a narrow window hides both.
             ("Panel", Command::TogglePanel, self.outline_rect.is_some()),
+            ("History", Command::ShowHistory, self.outline_rect.is_some() && self.project.as_ref().is_some_and(|s| s.panel == Panel::History)),
             ("Chapters", Command::ToggleTree, self.tree_rect.is_some()),
         ];
         for (text, command, on) in buttons {
             // Without a project, or behind a full-window view, there is no tree, panel or split to toggle.
-            if (self.project.is_none() || self.screen.is_some()) && matches!(command, Command::ToggleTree | Command::TogglePanel | Command::SplitRight) {
+            if (self.project.is_none() || self.screen.is_some()) && matches!(command, Command::ToggleTree | Command::TogglePanel | Command::ShowHistory | Command::SplitRight) {
                 continue;
             }
             let width = self.measure(text, 12. * self.scale, Face::Normal).ceil() as u32 + self.su(18.);

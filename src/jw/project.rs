@@ -45,6 +45,8 @@ impl Project {
     /// Creates a project with one empty chapter and saves it to `jw`.
     pub fn create(data: &Path, jw: &Path, title: &str) -> Result<Project, String> {
         let mut manifest = Manifest::new(title);
+        // Off in projects made before the setting existed, so those keep their behaviour.
+        manifest.settings.snapshots.on_save = true;
         let first = Node::chapter("Chapter 1");
         manifest.tree.manuscript.push(first.clone());
         let work = workdir::create(data, &manifest).map_err(io_message)?;

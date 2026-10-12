@@ -44,13 +44,18 @@ splits, focus mode, word count, the performance gate (5 ms per edit, 60 Hz scrol
 
 ## Snapshots
 
-* Manual snapshots with a message; optional automatic ones on a timer and when closing.
+* Manual snapshots with a message; optional automatic ones on a timer, when closing and on a
+  manual save.
+* A History tab in the side panel: the chapters changed since the newest snapshot, and the
+  snapshots of the line with compare, restore, rename and delete.
 * Content-addressed blobs; restore (whole project or one chapter) is non-destructive and creates a
   new snapshot.
 * A compare view between any two snapshots or a snapshot and the current text, with notes and
   comments that can be hidden.
 * Named lines that can be switched and compared, never merged.
 * Pruning keeps every manual snapshot and thins out old automatic ones.
+* Trimming on request: one snapshot per hour, day or week stays, or none; manual snapshots and
+  safety copies only when asked. The newest snapshot of a line always stays.
 
 ## File format `.jw`
 

@@ -35,12 +35,16 @@ print-ready PDF, an EPUB 3 or plain text, with a paged preview inside the app.
 
 ## History
 
-Ctrl+Alt+S takes a snapshot with a message; the program also takes automatic ones on a timer and when
-the project closes. Ctrl+Shift+H opens the history: compare any two snapshots or one with the text
-now (notes and comment changes can be hidden), restore the whole project or one chapter, or work on
-a separate *line* (an alternate ending, say) and switch between lines. Restoring never destroys
-anything; it saves what was there first and records the restore as a new snapshot. Old automatic
-snapshots are thinned out; manual ones are always kept.
+Ctrl+Alt+S takes a snapshot with a message; the program also takes automatic ones on a timer, when
+the project closes and, if the project says so, on every Ctrl+S. Ctrl+Shift+H opens the History tab
+of the side panel: the chapters changed since the last snapshot, and the snapshots of the line. A
+click on a snapshot shows what it changed; Shift+click compares it with the one clicked before.
+From the tab a snapshot can be compared with the text now, restored, renamed or deleted. A second
+Ctrl+Shift+H opens the full view: compare any two snapshots (notes and comment changes can be
+hidden), restore one chapter, or work on a separate *line* (an alternate ending, say) and switch
+between lines. Restoring never destroys anything; it saves what was there first and records the
+restore as a new snapshot. Old automatic snapshots are thinned out; manual ones are always kept,
+unless *Trim* is told to remove them: it keeps one snapshot per hour, day or week, or none.
 
 ## Export
 

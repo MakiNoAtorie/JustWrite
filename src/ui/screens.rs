@@ -20,6 +20,7 @@ pub enum ScreenAct {
     Mark(usize),
     CompareCurrent(usize),
     CompareMarked(usize),
+    CompareBefore(usize),
     RestoreProject(usize),
     RestoreItem(usize, String),
     CompareItem(usize, String),
@@ -69,6 +70,8 @@ pub struct CompareView {
     pub hide_notes: bool,
     pub show_comments: bool,
     pub split: i32,
+    /// Opened from the full-window history: closing returns there.
+    pub back: bool,
 }
 
 pub struct PreviewView {
@@ -89,7 +92,7 @@ pub struct PreviewView {
     pub warnings: Vec<String>,
 }
 
-fn kind_name(kind: SnapshotKind) -> &'static str {
+pub(super) fn kind_name(kind: SnapshotKind) -> &'static str {
     match kind {
         SnapshotKind::Manual => "Snapshot",
         SnapshotKind::Auto => "Automatic",
@@ -165,7 +168,7 @@ impl App {
     pub(super) fn after_restore(&mut self) {
         let Some(state) = &mut self.project else { return };
         state.comments = state.core.work.read(COMMENTS).map(|b| CommentSet::parse(&b)).unwrap_or_default();
-        state.changed = true;
+        state.touch();
         let gone: Vec<u64> = self
             .tabs
             .iter()
@@ -205,17 +208,13 @@ impl App {
                 self.flush_tabs();
                 self.compare_with_working(&id, Some(item));
             }
+            ScreenAct::CompareBefore(i) => {
+                let Some(id) = self.snapshot_id(i) else { return };
+                self.compare_before(&id);
+            }
             ScreenAct::RestoreProject(i) => {
                 let Some(id) = self.snapshot_id(i) else { return };
-                self.flush_tabs();
-                let result = self.project.as_mut().map_or(Err("No project".into()), |s| restore::restore_project(&mut s.history, &mut s.core, &id, now));
-                match result {
-                    Ok(()) => {
-                        self.after_restore();
-                        self.status = "Restored. What was there before is kept in a safety snapshot.".into();
-                    }
-                    Err(error) => self.status = format!("Could not restore: {error}"),
-                }
+                self.restore_snapshot(&id);
             }
             ScreenAct::RestoreItem(i, item) => {
                 let Some(id) = self.snapshot_id(i) else { return };
@@ -229,17 +228,7 @@ impl App {
                     Err(error) => self.status = format!("Could not restore: {error}"),
                 }
             }
-            ScreenAct::SwitchLine(name) => {
-                self.flush_tabs();
-                let result = self.project.as_mut().map_or(Err("No project".into()), |s| restore::switch_line(&mut s.history, &mut s.core, &name, now));
-                match result {
-                    Ok(()) => {
-                        self.after_restore();
-                        self.status = format!("Now on the “{name}” line.");
-                    }
-                    Err(error) => self.status = error,
-                }
-            }
+            ScreenAct::SwitchLine(name) => self.switch_line(&name),
             ScreenAct::NewLine => self.new_line_form(),
             ScreenAct::RenameLine => {
                 if let Some(Screen::History(v)) = &self.screen {
@@ -250,6 +239,210 @@ impl App {
             _ => {}
         }
     }
+    fn restore_snapshot(&mut self, id: &str) {
+        self.flush_tabs();
+        let now = jw::time::now();
+        let result = self.project.as_mut().map_or(Err("No project".into()), |s| restore::restore_project(&mut s.history, &mut s.core, id, now));
+        match result {
+            Ok(()) => {
+                self.after_restore();
+                self.status = "Restored. What was there before is kept in a safety snapshot.".into();
+            }
+            Err(error) => self.status = format!("Could not restore: {error}"),
+        }
+    }
+    fn switch_line(&mut self, name: &str) {
+        self.flush_tabs();
+        let now = jw::time::now();
+        let result = self.project.as_mut().map_or(Err("No project".into()), |s| restore::switch_line(&mut s.history, &mut s.core, name, now));
+        match result {
+            Ok(()) => {
+                self.after_restore();
+                self.status = format!("Now on the “{name}” line.");
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    // ---- the History tab --------------------------------------------------------------------
+
+    /// Brings the list of changes since the newest snapshot up to date.
+    pub(super) fn refresh_changes(&mut self) {
+        let Some(state) = &mut self.project else { return };
+        if !std::mem::take(&mut state.stale) {
+            return;
+        }
+        let head = state.history.head(state.history.current_line()).map(|h| h.id.clone());
+        state.pending = match head.map(|id| (state.history.state(&state.core.work, &id), State::working(&state.core, false))) {
+            Some((Ok(then), Ok(now))) => diff::compare(&then, &now).changed().cloned().collect(),
+            _ => Vec::new(),
+        };
+    }
+    /// "Edited Chapter 3, Chapter 7; added Epilogue", for a snapshot without a message.
+    pub(super) fn changes_summary(&self) -> String {
+        let Some(state) = &self.project else { return String::new() };
+        let mut parts = Vec::new();
+        for (verb, status) in [("Edited", diff::Status::Changed), ("added", diff::Status::Added), ("deleted", diff::Status::Removed)] {
+            let titles: Vec<&str> = state.pending.iter().filter(|c| c.status == status).map(|c| c.title.as_str()).collect();
+            if let Some(first) = titles.first() {
+                let more = if titles.len() > 2 { format!(" and {} more", titles.len() - 1) } else { titles[1..].iter().map(|t| format!(", {t}")).collect() };
+                parts.push(format!("{verb} {first}{more}"));
+            }
+        }
+        let mut text = parts.join("; ");
+        if let Some(first) = text.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        text
+    }
+    /// A click in the History tab.
+    pub(super) fn history_do(&mut self, action: &str, id: &str) {
+        match action {
+            "snapshot" => self.snapshot_form(),
+            "trim" => self.trim_form(),
+            "full" => self.open_history(),
+            "line" => self.switch_line(id),
+            "restore" => self.restore_snapshot(id),
+            "rename" => self.edit_snapshot_form(id),
+            "delete" => self.delete_snapshot_form(id),
+            "now" => {
+                self.flush_tabs();
+                self.compare_with_working(id, None);
+            }
+            "change" => {
+                let Some(head) = self.project.as_ref().and_then(|s| s.history.head(s.history.current_line()).map(|h| h.id.clone())) else { return };
+                self.flush_tabs();
+                self.compare_with_working(&head, Some(id.to_owned()));
+            }
+            "open" => {
+                let shift = self.modifiers.shift_key();
+                let Some(state) = &mut self.project else { return };
+                let other = state.picked.replace(id.to_owned()).filter(|p| p != id && shift);
+                match other {
+                    Some(other) => self.compare_snapshots(&other, id),
+                    None => self.compare_before(id),
+                }
+            }
+            _ => {}
+        }
+        self.redraw();
+    }
+    /// What a snapshot changed: it against the one before it on its line.
+    fn compare_before(&mut self, id: &str) {
+        let Some(state) = &self.project else { return };
+        let Some(meta) = state.history.get(id) else { return };
+        match state.history.on_line(&meta.line).take_while(|s| s.id != id).last().map(|s| s.id.clone()) {
+            Some(before) => self.compare_snapshots(&before, id),
+            None => self.status = "This is the first snapshot of the line: there is nothing before it to compare with.".into(),
+        }
+    }
+    pub(super) fn paint_history_panel(&mut self, rect: Rect, p: Palette) {
+        let Some(state) = &self.project else { return };
+        let line = state.history.current_line().to_owned();
+        let lines: Vec<String> = state.history.lines.lines.iter().map(|l| l.name.clone()).collect();
+        let mut snapshots: Vec<SnapshotMeta> = state.history.on_line(&line).cloned().collect();
+        snapshots.reverse();
+        let pending = state.pending.clone();
+        let picked = state.picked.clone();
+        let x = rect.x + self.s(10.);
+        let width = rect.width.saturating_sub(self.su(20.));
+        let right = x + width as i32;
+        let mut y = rect.y + self.s(8.);
+        let mut bx = x;
+        for (label, key, look) in [("Snapshot…", "snapshot", Look::Primary), ("Trim…", "trim", Look::Outline), ("Full view", "full", Look::Outline)] {
+            let w = self.measure(label, 11.5 * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
+            if bx + w as i32 > right {
+                break;
+            }
+            self.button(label, Rect { x: bx, y, width: w, height: self.su(26.) }, Hit::Do(Act::HistoryDo(key, String::new())), look, p);
+            bx += w as i32 + self.s(4.);
+        }
+        y += self.s(34.);
+        if lines.len() > 1 {
+            bx = x;
+            for name in &lines {
+                let label = self.fit(name, width as f32 / 2., 11.5);
+                let w = self.measure(&label, 11.5 * self.scale, Face::Normal).ceil() as u32 + self.su(18.);
+                if bx + w as i32 > right {
+                    break;
+                }
+                self.button(&label, Rect { x: bx, y, width: w, height: self.su(24.) }, Hit::Do(Act::HistoryDo("line", name.clone())), if *name == line { Look::Active } else { Look::Plain }, p);
+                bx += w as i32 + self.s(4.);
+            }
+            y += self.s(30.);
+        }
+        // Changes
+        self.section(&format!("CHANGED SINCE THE LAST SNAPSHOT ({})", pending.len()), x, y, width, p);
+        y += self.s(22.);
+        if pending.is_empty() {
+            let text = if snapshots.is_empty() { "No snapshot on this line yet." } else { "Nothing has changed." };
+            self.put(text, Rect { x, y, width, height: self.su(22.) }, 11.5, p.muted, Face::Normal, Align::Left);
+            y += self.s(26.);
+        }
+        const SHOWN: usize = 5;
+        let change_height = self.s(40.);
+        for change in pending.iter().take(SHOWN) {
+            let row = Rect { x: rect.x + self.s(7.), y, width: rect.width.saturating_sub(self.su(14.)), height: change_height as u32 - 2 };
+            if self.hot(row) {
+                self.renderer.fill_round(row, self.su(5.), hovered(p.surface, p));
+            }
+            let (label, tint) = match change.status {
+                diff::Status::Added => ("Added", p.success_text()),
+                diff::Status::Removed => ("Deleted", p.danger_text()),
+                diff::Status::Changed => ("Edited", p.accent_text()),
+                diff::Status::Unchanged => (if change.was.is_some() { "Renamed" } else { "Moved" }, p.muted),
+            };
+            let title = self.fit(&change.title, row.width as f32 - self.s(20.) as f32, 12.5);
+            self.put(&title, Rect { x: row.x + self.s(8.), y: row.y + self.s(1.), width: row.width - self.su(16.), height: self.su(20.) }, 12.5, p.text, Face::Normal, Align::Left);
+            let words = format!("{label} · {} → {} words", change.words_a, change.words_b);
+            self.put(&words, Rect { x: row.x + self.s(8.), y: row.y + self.s(19.), width: row.width - self.su(16.), height: self.su(18.) }, 10.5, tint, Face::Normal, Align::Left);
+            self.hits.push((row, Hit::Do(Act::HistoryDo("change", change.id.clone()))));
+            y += change_height;
+        }
+        if pending.len() > SHOWN
+            && let Some(head) = snapshots.first()
+        {
+            let more = Rect { x, y, width: self.su(150.), height: self.su(24.) };
+            self.button(&format!("and {} more…", pending.len() - SHOWN), more, Hit::Do(Act::HistoryDo("now", head.id.clone())), Look::Plain, p);
+            y += self.s(28.);
+        }
+        // Snapshots
+        y += self.s(6.);
+        self.renderer.fill(Rect { x: rect.x, y, width: rect.width, height: 1 }, p.border);
+        y += self.s(6.);
+        self.section(&format!("SNAPSHOTS ({})", snapshots.len()), x, y, width, p);
+        let top = y + self.s(22.);
+        let card_height = self.s(88.);
+        let capacity = ((rect.y + rect.height as i32 - top) / card_height).max(1) as usize;
+        self.outline_top = self.outline_top.min(snapshots.len().saturating_sub(capacity));
+        let now = jw::time::now();
+        for (n, meta) in snapshots.iter().enumerate().skip(self.outline_top).take(capacity) {
+            let card = Rect { x: rect.x + self.s(8.), y: top + (n - self.outline_top) as i32 * card_height, width: rect.width.saturating_sub(self.su(16.)), height: card_height as u32 - self.su(8.) };
+            let on = picked.as_deref() == Some(meta.id.as_str());
+            let fill = if on { mix(p.surface, p.accent, 0.12) } else { p.raised };
+            self.renderer.framed(card, self.su(7.), fill, if on { p.accent } else { mix(p.border, p.text, 0.1) });
+            self.hits.push((card, Hit::Do(Act::HistoryDo("open", meta.id.clone()))));
+            let inner_x = card.x + self.s(10.);
+            let inner_w = card.width.saturating_sub(self.su(20.));
+            let title = if meta.message.is_empty() { kind_name(meta.kind).to_owned() } else { meta.message.clone() };
+            let title = self.fit(&title, inner_w as f32, 12.5);
+            self.put(&title, Rect { x: inner_x, y: card.y + self.s(5.), width: inner_w, height: self.su(20.) }, 12.5, p.text, if meta.kind == SnapshotKind::Manual { Face::Bold } else { Face::Normal }, Align::Left);
+            let sub = self.fit(&format!("{} · {} · {}", jw::time::ago(meta.time, now), count_words(meta.words), kind_name(meta.kind)), inner_w as f32, 10.5);
+            self.put(&sub, Rect { x: inner_x, y: card.y + self.s(25.), width: inner_w, height: self.su(18.) }, 10.5, p.muted, Face::Normal, Align::Left);
+            let by = card.y + card.height as i32 - self.s(30.);
+            let mut bx = inner_x;
+            for (label, key) in [("Vs. now", "now"), ("Restore", "restore"), ("Rename", "rename"), ("Delete", "delete")] {
+                let w = self.measure(label, 11. * self.scale, Face::Normal).ceil() as u32 + self.su(14.);
+                if bx + w as i32 > card.x + card.width as i32 - self.s(4.) {
+                    break;
+                }
+                self.button(label, Rect { x: bx, y: by, width: w, height: self.su(24.) }, Hit::Do(Act::HistoryDo(key, meta.id.clone())), Look::Plain, p);
+                bx += w as i32 + self.s(2.);
+            }
+        }
+        self.scroll_thumb(Rect { y: top, height: (capacity as i32 * card_height) as u32, ..rect }, self.outline_top, capacity, snapshots.len(), p);
+    }
+
     fn snapshot_id(&self, index: usize) -> Option<String> {
         match &self.screen {
             Some(Screen::History(v)) => v.snapshots.get(index).map(|s| s.id.clone()),
@@ -295,6 +488,7 @@ impl App {
             hide_notes: false,
             show_comments: true,
             split: 0,
+            back: matches!(self.screen, Some(Screen::History(_))),
         };
         self.load_compare_rows(&mut view);
         self.screen = Some(Screen::Compare(Box::new(view)));
@@ -477,7 +671,7 @@ impl App {
     pub(super) fn screen_act(&mut self, act: ScreenAct) {
         if matches!(act, ScreenAct::Close) {
             // Closing a comparison returns to the history it was opened from.
-            if matches!(self.screen, Some(Screen::Compare(_))) && self.project.is_some() {
+            if matches!(&self.screen, Some(Screen::Compare(v)) if v.back) && self.project.is_some() {
                 self.open_history();
                 return;
             }
@@ -684,6 +878,7 @@ impl App {
         let marked_other = v.marked.as_deref().is_some_and(|m| m != meta.id);
         let mut buttons: Vec<(String, ScreenAct, Look)> = vec![
             ("Compare with current text".into(), ScreenAct::CompareCurrent(v.selected), Look::Primary),
+            ("What this snapshot changed".into(), ScreenAct::CompareBefore(v.selected), Look::Outline),
             ("Restore the whole project".into(), ScreenAct::RestoreProject(v.selected), Look::Outline),
             (if v.marked.as_deref() == Some(meta.id.as_str()) { "Unmark" } else { "Mark to compare" }.into(), ScreenAct::Mark(v.selected), Look::Outline),
         ];

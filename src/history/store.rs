@@ -365,6 +365,13 @@ impl History {
         }
         work.write(INDEX, out.as_bytes())
     }
+    /// Changes the message of a snapshot.
+    pub fn set_message(&mut self, work: &WorkDir, id: &str, message: &str) -> io::Result<()> {
+        if let Some(s) = self.snapshots.iter_mut().find(|s| s.id == id) {
+            s.message = message.trim().to_owned();
+        }
+        self.rewrite_index(work)
+    }
     pub(crate) fn remove_snapshots(&mut self, work: &WorkDir, ids: &[String]) -> io::Result<()> {
         self.snapshots.retain(|s| !ids.contains(&s.id));
         self.rewrite_index(work)?;

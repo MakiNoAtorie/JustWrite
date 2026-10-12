@@ -100,6 +100,7 @@ impl Storage for ProjectStorage {
 pub enum Panel {
     Scenes,
     Comments,
+    History,
 }
 #[derive(Clone, Default)]
 pub struct CommentFilter {
@@ -107,6 +108,14 @@ pub struct CommentFilter {
     pub tag: Option<String>,
     /// Only the chapter in the active tab.
     pub this_chapter: bool,
+}
+
+impl ProjectState {
+    /// Something was written: a snapshot is due and the list of changes is old.
+    pub fn touch(&mut self) {
+        self.changed = true;
+        self.stale = true;
+    }
 }
 
 pub struct ProjectState {
@@ -129,6 +138,12 @@ pub struct ProjectState {
     pub last_snapshot: Instant,
     /// Text was saved since the last snapshot.
     pub changed: bool,
+    /// What differs from the newest snapshot of the current line, for the History tab.
+    pub pending: Vec<history::diff::ItemChange>,
+    /// `pending` is older than the files or the history.
+    pub stale: bool,
+    /// The snapshot last opened in the History tab; Shift+click compares another with it.
+    pub picked: Option<String>,
     pub packing: bool,
     pub panel: Panel,
     /// The `.jw` changed outside the program; packing waits for the author's decision.
@@ -229,6 +244,9 @@ impl App {
             last_beat: now,
             last_snapshot: now,
             changed: false,
+            pending: Vec::new(),
+            stale: true,
+            picked: None,
             packing: false,
             panel: Panel::Scenes,
             blocked: false,
@@ -348,7 +366,7 @@ impl App {
         match state.core.add(section, &[], index, node) {
             Ok(_) => {
                 state.selected = Some(id.clone());
-                state.changed = true;
+                state.touch();
                 self.open_item(&id);
                 self.dirty_session();
             }
@@ -411,7 +429,7 @@ impl App {
         if state.selected.as_ref().is_some_and(|s| state.core.manifest.tree.find(s).is_none()) {
             state.selected = None;
         }
-        state.changed = true;
+        state.touch();
         let doomed: Vec<u64> = self
             .tabs
             .iter()
@@ -592,7 +610,7 @@ impl App {
         };
         let moved = match state.core.move_node(section, &path, &to_parent, to_index) {
             Ok(()) => {
-                state.changed = true;
+                state.touch();
                 self.tree_reveal = true;
                 self.dirty_session();
                 true
@@ -628,7 +646,7 @@ impl App {
         }
         match state.core.move_node(section, &from, &parent, index) {
             Ok(()) => {
-                state.changed = true;
+                state.touch();
                 self.dirty_session();
             }
             Err(error) => self.status = error,
@@ -643,7 +661,7 @@ impl App {
         if let Some(id) = state.core.id_of_file(rel) {
             let _ = state.core.set_words(&id, words as u32);
         }
-        state.changed = true;
+        state.touch();
         state.last_save = Some(Instant::now());
     }
     pub(super) fn pack_project(&mut self, overwrite: bool) {
@@ -1132,7 +1150,7 @@ impl App {
                 match crate::import::append(&mut state.core, &imported) {
                     Ok(count) => {
                         state.comments = state.core.work.read(COMMENTS).map(|b| CommentSet::parse(&b)).unwrap_or_default();
-                        state.changed = true;
+                        state.touch();
                         self.status = format!("Imported {count} chapter{}.", if count == 1 { "" } else { "s" });
                     }
                     Err(error) => self.status = format!("The import failed: {error}"),
@@ -1185,6 +1203,7 @@ impl App {
             state.last_snapshot = now;
             if let Ok(Some(_)) = state.history.capture_auto(&state.core, "Automatic snapshot", stamp) {
                 state.changed = false;
+                state.stale = true;
                 let _ = history::prune::prune(&mut state.history, &state.core, stamp);
             }
         }
